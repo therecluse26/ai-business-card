@@ -97,9 +97,9 @@ def test_describe_before_anything_is_measured():
 def test_a_small_cost_is_said_as_under_one_cent_and_an_unknown_provider_is_named():
     stats = CallStats()
     stats.add_usage("openai_realtime", LLMTokenUsage(prompt_tokens=1_000, completion_tokens=50, total_tokens=1_050))
-    stats.add_usage("nova_sonic", LLMTokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15))
+    stats.add_usage("pipeline_claude", LLMTokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15))
     text = stats.describe()
-    assert "under one cent" in text and "No price is known for nova_sonic" in text
+    assert "under one cent" in text and "No price is known for pipeline_claude" in text
 
 
 def test_every_built_voice_leg_has_a_price():

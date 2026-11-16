@@ -68,14 +68,23 @@ class TelnyxTelephony:
     async def stop_streaming(self, call_control_id: str) -> None:
         await self.client.calls.actions.stop_streaming(call_control_id, command_id=self._cid())
 
-    async def transfer(self, call_control_id: str, *, to: str, timeout_secs: int | None = None, state: dict | None = None) -> None:
+    async def transfer(
+        self, call_control_id: str, *, to: str, timeout_secs: int | None = None, state: dict | None = None, detect_voicemail: bool = False
+    ) -> None:
         """Call `to` and bridge it to this call when it answers. The call must have no media stream
         (Telnyx error 90045); `TransferManager` stops the stream first.
 
         `state` is set as the new leg's `client_state`, so the webhooks for the owner's leg can be
         told apart. The owner's phone shows this line's number as the caller ID.
+
+        `detect_voicemail` asks Telnyx to say if a person or a machine answered (the webhook
+        `call.machine.detection.ended`). It also parks the caller's leg when the owner's leg ends,
+        where Telnyx would hang it up: `TransferManager` then decides what the caller hears next.
         """
         extra: dict = {}
+        if detect_voicemail:
+            extra["answering_machine_detection"] = "detect"
+            extra["park_after_unbridge"] = "self"
         if timeout_secs:
             extra["timeout_secs"] = timeout_secs
         if state:

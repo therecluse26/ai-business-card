@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
         exempt_numbers=frozenset({settings.owner_phone}),
     )
     app.state.health = ProviderHealth()  # which voice providers are answering; shared by all calls
-    app.state.transfers = TransferManager(app.state.telephony, stream_url=settings.media_stream_url, ring_secs=settings.transfer_ring_secs)
+    app.state.transfers = TransferManager(app.state.telephony, stream_url=settings.media_stream_url, ring_secs=settings.transfer_ring_secs, detect_voicemail=settings.transfer_voicemail_detection)
     if settings.telnyx_app_id:
         try:
             if not await app.state.telephony.outbound_profile_id(settings.telnyx_app_id):

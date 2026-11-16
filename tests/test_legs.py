@@ -2,10 +2,12 @@
 
 from pipecat.frames.frames import FunctionCallResultFrame, FunctionCallResultProperties
 
-from ai_call_center.agents.specs import LEG_VOICES
+import pytest
+
+from ai_call_center.agents.specs import LEG_VOICES, parse_agent_legs
 from ai_call_center.config import Settings
 from ai_call_center.voice.call_session import failover_instruction, handoff_instruction
-from ai_call_center.voice.legs import HandoffGeminiLive, build_leg, ready_legs, resolve_spec
+from ai_call_center.voice.legs import HandoffGeminiLive, HandoffNovaSonic, build_leg, ensure_connected, ready_legs, replay_and_respond, reset_session, resolve_spec, self_heals
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
 
@@ -89,3 +91,110 @@ def test_failover_instruction_carries_the_exact_apology_line():
     text = failover_instruction("profile", "OpenAI")
     assert '"Sorry about that pause. I\'m the profile agent, now running on OpenAI."' in text
     assert "Do not greet again" in text
+
+
+# --- Amazon Nova Sonic ---
+
+NOVA_KEYS = {"nova_aws_access_key_id": "AKIATEST", "nova_aws_secret_access_key": "secret"}
+
+
+def test_agent_legs_setting_moves_an_agent_and_rejects_a_typing_mistake():
+    assert parse_agent_legs("") == {}
+    assert parse_agent_legs("consultant=nova_sonic, tour = gemini_live") == {"consultant": "nova_sonic", "tour": "gemini_live"}
+    with pytest.raises(ValueError, match="unknown voice leg"):
+        parse_agent_legs("consultant=nova")
+    with pytest.raises(ValueError, match="unknown agent"):
+        parse_agent_legs("sales=nova_sonic")
+
+
+def on_nova(specs, agent="consultant"):
+    import dataclasses
+
+    return dataclasses.replace(specs[agent], leg="nova_sonic", voice=LEG_VOICES["nova_sonic"][agent])
+
+
+def test_a_nova_agent_runs_on_nova_only_when_the_server_has_the_aws_keys(specs):
+    spec = on_nova(specs)
+    assert resolve_spec(spec, settings(**NOVA_KEYS)) is spec
+    moved = resolve_spec(spec, settings())  # no keys: the first other ready leg
+    assert (moved.leg, moved.voice) == ("openai_realtime", LEG_VOICES["openai_realtime"]["consultant"])
+    # Nova is the last fallback: an agent whose leg is down moves to OpenAI or Gemini first.
+    assert ready_legs(settings(**NOVA_KEYS)) == ["openai_realtime", "gemini_live", "nova_sonic"]
+    assert ready_legs(settings()) == ["openai_realtime", "gemini_live"]
+
+
+def test_nova_leg_is_built_with_the_agent_tools_voice_and_model(specs):
+    spec = on_nova(specs)
+    tools = tools_for_agent(spec, voice_tool_schemas(specs))
+    service = build_leg(spec, instructions="You are the consultant.", settings=settings(**NOVA_KEYS), tools=tools)
+    assert isinstance(service, HandoffNovaSonic) and self_heals(service)
+    assert service._settings.voice == "matthew" and service._settings.model == "amazon.nova-2-5-sonic"
+    assert service._settings.system_instruction == "You are the consultant." and service._settings.endpointing_sensitivity == "HIGH"
+    assert service._tools is tools and service._region == "us-east-1"
+
+
+async def test_a_nova_agent_is_not_given_a_handoff_result(specs):
+    service = build_leg(on_nova(specs), instructions="x", settings=settings(**NOVA_KEYS))
+    sent = []
+
+    async def record(tool_call_id, *_args, **_kwargs):
+        sent.append(tool_call_id)
+
+    service._send_tool_result = record
+    handoff = FunctionCallResultFrame(
+        function_name="transfer_to_tour", tool_call_id="fc_1", arguments={}, result="Handed off.", properties=FunctionCallResultProperties(run_llm=False)
+    )
+    normal = FunctionCallResultFrame(function_name="end_call", tool_call_id="fc_2", arguments={}, result="Say goodbye.")
+
+    await service._handle_function_call_result(handoff)
+    await service._handle_function_call_result(normal)
+
+    assert sent == ["fc_2"] and {"fc_1", "fc_2"} <= service._completed_tool_calls
+
+
+async def test_nova_connects_when_the_agent_is_needed_and_disconnects_when_it_is_left(specs):
+    service = build_leg(on_nova(specs), instructions="x", settings=settings(**NOVA_KEYS))
+    steps = []
+
+    async def start_connecting():
+        steps.append("connect")
+        service._client = object()
+
+    async def handle_context(context):
+        steps.append("context")
+        service._context = context
+
+    async def disconnect():
+        steps.append("disconnect")
+        service._client = service._context = None
+
+    service._start_connecting, service._handle_context, service._disconnect = start_connecting, handle_context, disconnect
+
+    assert service._client is None  # nothing is open before the first handoff
+    await replay_and_respond(service, context := object())
+    assert steps == ["connect", "context"]
+    await replay_and_respond(service, context)  # the session is set up already: nothing is sent twice
+    await ensure_connected(service)
+    assert steps == ["connect", "context"]
+    await reset_session(service)
+    await replay_and_respond(service, context)
+    assert steps == ["connect", "context", "disconnect", "connect", "context"]
+
+
+async def test_nova_usage_keeps_speech_and_text_tokens_apart(specs):
+    from ai_call_center.voice.stats import PRICES, Usage
+
+    service = build_leg(on_nova(specs), instructions="x", settings=settings(**NOVA_KEYS))
+    reported = []
+
+    async def record(tokens):
+        reported.append(tokens)
+
+    service.start_llm_usage_metrics = record
+    await service._handle_usage_event(
+        {"usageEvent": {"details": {"delta": {"input": {"speechTokens": 1000, "textTokens": 200}, "output": {"speechTokens": 500, "textTokens": 50}}}}}
+    )
+    usage = Usage()
+    usage.add(reported[0])
+    assert (usage.audio_in, usage.text_in, usage.audio_out, usage.text_out) == (1000, 200, 500, 50)
+    assert usage.cost(PRICES["nova_sonic"]) == pytest.approx((1000 * 3.00 + 200 * 0.33 + 500 * 12.00 + 50 * 2.75) / 1_000_000)

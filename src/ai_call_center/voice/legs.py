@@ -4,6 +4,10 @@ Each agent gets its own service, pre-connected at call start, because a provider
 voice once it has spoken. A reconnect-and-replay swap on OpenAI was measured at 3-4 s of silence;
 switching between pre-connected services takes under 1 s.
 
+Amazon Nova Sonic is the exception: its service connects when a handoff reaches its agent, and
+disconnects when the agent is left. A Bedrock stream that carries no audio is closed by AWS, so
+a stream opened at call start would be dead by the time it is needed.
+
 The functions at the bottom (`reset_session`, `replay_and_respond`, ...) are the only place that
 knows how each provider's Pipecat service resets and replays. They use private members of those
 services, pinned by the Pipecat version in `uv.lock`.
@@ -17,7 +21,10 @@ import logging
 from google.genai.types import EndSensitivity, StartSensitivity
 from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import FunctionCallResultFrame, LLMFullResponseEndFrame, TTSStoppedFrame
+from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.frame_processor import FrameProcessorSetup
+from pipecat.services.aws.nova_sonic.llm import AWSNovaSonicLLMService
 from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, GeminiVADParams
 from pipecat.services.llm_service import LLMService
 from pipecat.services.openai.realtime.events import (
@@ -128,9 +135,67 @@ def build_gemini_live(spec: AgentSpec, *, instructions: str, settings: Settings,
     )
 
 
+class HandoffNovaSonic(AWSNovaSonicLLMService):
+    """Amazon Nova Sonic, with three changes.
+
+    1. It does not connect at setup. `ensure_connected` opens the stream when the agent is needed.
+    2. A tool result marked `run_llm=False` is not sent to Nova, for the same reason as on Gemini:
+       Nova answers every tool result, and after a handoff the next agent answers, not this one.
+    3. Token usage keeps speech and text apart, so the cost estimate can price them apart.
+    """
+
+    async def setup(self, setup: FrameProcessorSetup) -> None:
+        await super(AWSNovaSonicLLMService, self).setup(setup)  # the base setup, without Nova's connect
+        self._wants_connection = True
+
+    async def _handle_function_call_result(self, frame: FunctionCallResultFrame) -> None:
+        if frame.properties is not None and frame.properties.run_llm is False:
+            self._completed_tool_calls.add(frame.tool_call_id)
+            if self._assistant_is_responding:
+                self._assistant_is_responding = False
+                await self._report_assistant_response_ended()
+            return
+        await super()._handle_function_call_result(frame)
+
+    async def _handle_usage_event(self, event_json) -> None:
+        delta = event_json["usageEvent"].get("details", {}).get("delta", {})
+        tokens_in, tokens_out = delta.get("input", {}), delta.get("output", {})
+        speech_in, speech_out = tokens_in.get("speechTokens", 0), tokens_out.get("speechTokens", 0)
+        prompt = speech_in + tokens_in.get("textTokens", 0)
+        completion = speech_out + tokens_out.get("textTokens", 0)
+        if prompt or completion:
+            await self.start_llm_usage_metrics(
+                LLMTokenUsage(
+                    prompt_tokens=prompt,
+                    completion_tokens=completion,
+                    total_tokens=prompt + completion,
+                    input_audio_tokens=speech_in,
+                    output_audio_tokens=speech_out,
+                )
+            )
+
+
+def build_nova_sonic(spec: AgentSpec, *, instructions: str, settings: Settings, tools: ToolsSchema | None = None) -> LLMService:
+    """amazon.nova-2-5-sonic over a Bedrock two-way stream. The tools are fixed when the session opens."""
+    return HandoffNovaSonic(
+        access_key_id=settings.nova_aws_access_key_id,
+        secret_access_key=settings.nova_aws_secret_access_key.get_secret_value(),
+        region=settings.nova_aws_region,
+        tools=tools,
+        settings=AWSNovaSonicLLMService.Settings(
+            model=settings.nova_sonic_model,
+            system_instruction=instructions,
+            voice=spec.voice or default_voice(spec.name, "nova_sonic"),
+            endpointing_sensitivity=settings.nova_endpointing,
+        ),
+    )
+
+
+# The order is the fallback order: when an agent's own leg cannot run, the first other ready leg runs.
 LEG_BUILDERS = {
     "openai_realtime": build_openai_realtime,
     "gemini_live": build_gemini_live,
+    "nova_sonic": build_nova_sonic,
 }
 
 
@@ -140,6 +205,8 @@ def has_credentials(leg: str, settings: Settings) -> bool:
         return bool(settings.openai_api_key.get_secret_value())
     if leg == "gemini_live":
         return bool(settings.google_api_key.get_secret_value())
+    if leg == "nova_sonic":
+        return bool(settings.nova_aws_access_key_id and settings.nova_aws_secret_access_key.get_secret_value())
     return False
 
 
@@ -186,8 +253,9 @@ def build_leg(spec: AgentSpec, *, instructions: str, settings: Settings, tools: 
 
 def self_heals(service: LLMService) -> bool:
     """True when the Pipecat service reconnects by itself after an error. Gemini does (with session
-    resumption). OpenAI does not: its receive loop ends on any error event."""
-    return isinstance(service, GeminiLiveLLMService)
+    resumption). Nova does: on a stream error it opens a new stream and replays the context.
+    OpenAI does not: its receive loop ends on any error event."""
+    return isinstance(service, GeminiLiveLLMService | AWSNovaSonicLLMService)
 
 
 def first_answer_needs_run_frame(service: LLMService) -> bool:
@@ -203,6 +271,8 @@ async def ensure_connected(service: LLMService) -> None:
     elif isinstance(service, GeminiLiveLLMService) and service._session is None and service._connection_task is None:  # noqa: SLF001
         log.warning("%s was disconnected; reconnecting before the handoff", service.name)
         await service._connect()  # noqa: SLF001
+    elif isinstance(service, AWSNovaSonicLLMService) and service._client is None:  # noqa: SLF001
+        await service._start_connecting()  # noqa: SLF001 - the normal case: Nova connects when it is needed
 
 
 async def adopt_context(service: LLMService, context: LLMContext) -> None:
@@ -229,6 +299,8 @@ async def reset_session(service: LLMService) -> None:
         service._session_resumption_handle = None  # noqa: SLF001 - a resumed session would bring the old conversation back
         service._context = None  # noqa: SLF001 - so the new session is not seeded until the agent is active again
         await service._connect()  # noqa: SLF001
+    elif isinstance(service, AWSNovaSonicLLMService):
+        await service._disconnect()  # noqa: SLF001 - also drops its copy of the context; `ensure_connected` opens a new stream later
     else:  # pragma: no cover
         raise NotImplementedError(f"reset for {type(service).__name__}")
 
@@ -237,6 +309,7 @@ async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
     """Replay the shared context into the service's fresh session and have it answer.
 
     OpenAI: the service already holds the shared context from its first use; ask for a response.
+    Nova: open the stream if needed, then hand it the context; it sets up the session and answers.
     Gemini: seed the session with the context, with the turn marked complete. If the session is
     still opening, the service does this as soon as it is ready.
     """
@@ -245,5 +318,13 @@ async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
     elif isinstance(service, GeminiLiveLLMService):
         await adopt_context(service, context)
         await service._create_initial_response()  # noqa: SLF001
+    elif isinstance(service, AWSNovaSonicLLMService):
+        # Nova sets up its session from the first context it sees: tools, instructions, the
+        # conversation so far. The last message is our instruction to speak; Nova takes a system
+        # or developer message as the caller's turn, so it answers. If a context frame from the
+        # pipeline got here first, the session is set up already and there is nothing to do.
+        await ensure_connected(service)
+        if service._context is None:  # noqa: SLF001
+            await service._handle_context(context)  # noqa: SLF001
     else:  # pragma: no cover
         raise NotImplementedError(f"replay for {type(service).__name__}")

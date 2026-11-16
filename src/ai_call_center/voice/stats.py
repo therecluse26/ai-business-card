@@ -47,6 +47,9 @@ PRICES: dict[str, Price] = {
     # in, 3.75 to 4.50 out), so the higher ones are used. No cached price was found, so cached
     # tokens count at the full price. The estimate is therefore on the high side.
     "gemini_live": Price(text_in=0.75, text_in_cached=0.75, audio_in=3.00, audio_in_cached=3.00, text_out=4.50, audio_out=12.00),
+    # amazon.nova-2-5-sonic in us-east-1, from price lists that agree with each other but are not
+    # AWS's own page. No cached price was found, so cached tokens count at the full price.
+    "nova_sonic": Price(text_in=0.33, text_in_cached=0.33, audio_in=3.00, audio_in_cached=3.00, text_out=2.75, audio_out=12.00),
 }
 
 

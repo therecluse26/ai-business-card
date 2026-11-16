@@ -18,7 +18,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from ai_call_center.agents.specs import AgentSpec, LEGS, build_specs, load_profile
+from ai_call_center.agents.specs import AgentSpec, LEGS, build_specs, load_profile, parse_agent_legs
 from ai_call_center.config import get_settings
 from ai_call_center.graph.handoffs import handoff_tool_name, make_handoff_tool
 from ai_call_center.graph.state import CallContext, CallState
@@ -85,6 +85,7 @@ def default_specs() -> dict[str, AgentSpec]:
         owner_name=settings.owner_name,
         texting=settings.sms_enabled and bool(settings.portfolio_url),
         emailing=bool(settings.owner_email and settings.smtp_host),
+        legs=parse_agent_legs(settings.agent_legs),
     )
 
 

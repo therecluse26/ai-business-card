@@ -102,6 +102,18 @@ How a transfer runs (`telephony/transfers.py`):
    contact agent comes back with the whole conversation and says the owner will call back.
 5. Telnyx's built-in voice speaks only when the stream cannot start again.
 
+### When the owner's voicemail answers
+
+A voicemail answers a transfer like a person does. Without a check, the caller lands in the owner's voicemail.
+
+- `TRANSFER_VOICEMAIL_DETECTION=true` (the default) adds Telnyx answering machine detection to the transfer.
+- Telnyx listens to the first seconds after the answer and sends `call.machine.detection.ended`.
+- On the result `machine`, the server hangs up the owner's leg. The contact agent comes back to the caller, as
+  for a phone that rang out. The caller can hear the first seconds of the voicemail greeting.
+- On `human` or `not_sure`, the call goes on. Answer with a short "Hello": a long greeting can sound like a machine.
+- The same option parks the caller's leg when the owner's leg ends. So after a normal conversation, the
+  server hangs up the caller's leg when the owner hangs up.
+
 ### The agent hangs up after a goodbye
 
 Every agent has the `end_call` tool. Without it, a call stayed open after the goodbye until the caller hung up.
@@ -139,6 +151,24 @@ What differs between the providers is in `voice/legs.py`:
 - Gemini reconnects by itself after an error. The `ServiceWatchdog` reconnects OpenAI sessions only.
 
 Measured with caller audio at 8 kHz: the new agent's first audio came 0.63 to 0.98 s after a switch.
+
+### A third provider: Amazon Nova Sonic
+
+An agent can run on `amazon.nova-2-5-sonic`, on Amazon Bedrock. It is off until the server has AWS keys.
+
+1. Create an IAM user in your own AWS account with one permission: `bedrock:InvokeModelWithBidirectionalStream`.
+2. Put its key in `.env` as `NOVA_AWS_ACCESS_KEY_ID` and `NOVA_AWS_SECRET_ACCESS_KEY`. The names start with
+   `NOVA_` on purpose: `AWS_` variables in a shell can belong to another account.
+3. Run `uv run check-nova`. It opens one short session and prints what Nova said, or the AWS error.
+4. Move an agent: `AGENT_LEGS=consultant=nova_sonic`. Restart the server.
+
+How this leg differs from the other two:
+
+- It connects when a handoff reaches its agent, and disconnects when the agent is left. AWS closes a stream
+  that carries no audio, so a stream opened at call start would be dead when it is needed.
+- Without the keys, or when Nova is marked down, the agent runs on OpenAI or Gemini. Nova is the last fallback.
+- Nova has few English voices (`tiffany`, `matthew`, `amy`), so agents share voices when several run on Nova.
+- Status: built from the Pipecat service code and unit tests. It has not carried a real or simulated call yet.
 
 ### Caller memory and number lookup
 
@@ -294,6 +324,7 @@ src/ai_call_center/
   guardrails.py                  call limits at admission and the transfer hours
   notify.py                      lead emails to the owner over SMTP
   test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
+  check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests
   telephony/lookup.py            Telnyx Number Lookup for a new caller, cached
   telephony/transfers.py         live transfer: call the owner, bring the contact agent back on no answer
@@ -301,7 +332,7 @@ src/ai_call_center/
   voice/leveler.py               one loudness for every agent voice
   voice/health.py                which voice providers are answering; a failed one is avoided for 5 minutes
   voice/stats.py                 live figures for a call: answer time, handoff time, tokens, cost estimate
-  voice/legs.py                  builds one speech-to-speech service per agent (OpenAI or Gemini) and drives it
+  voice/legs.py                  builds one speech-to-speech service per agent (OpenAI, Gemini, or Nova) and drives it
   voice/tools.py                 the LangGraph tools as Pipecat function schemas
   voice/call_session.py          one phone call: pipeline, switcher, tool handlers, transfer gate, time limit
   app.py                         FastAPI server (uv run serve)

@@ -30,7 +30,8 @@ class FakeTelephony:
     async def start_streaming(self, call_control_id, *, stream_url):
         self._do("start_streaming", call_control_id, stream_url)
 
-    async def transfer(self, call_control_id, *, to, timeout_secs=None, state=None):
+    async def transfer(self, call_control_id, *, to, timeout_secs=None, state=None, detect_voicemail=False):
+        self.detect_voicemail = detect_voicemail
         self._do("transfer", call_control_id, to, timeout_secs, state)
 
     async def speak(self, call_control_id, text, *, then_hangup=False, state=None):
@@ -51,8 +52,9 @@ def snapshot() -> Snapshot:
     return Snapshot(messages=[{"role": "user", "content": "Connect me to the owner."}], handoffs=["contact"], lead_saved=True, caller_name="Ada")
 
 
-def owner_event(event_type: str) -> dict:
-    return {"event_type": event_type, "payload": {"call_control_id": OWNER_LEG, "client_state": encode_state({"transfer_of": CALL})}}
+def owner_event(event_type: str, *, tagged: bool = True, **payload) -> dict:
+    tag = {"client_state": encode_state({"transfer_of": CALL})} if tagged else {}
+    return {"event_type": event_type, "payload": {"call_control_id": OWNER_LEG, **tag, **payload}}
 
 
 def settings() -> Settings:
@@ -87,6 +89,47 @@ async def test_owner_picks_up_and_a_later_hangup_resumes_nothing():
     await handle_event(owner_event("call.hangup"), settings(), telephony, transfers=transfers)
     assert [entry[0] for entry in telephony.log] == ["stop_streaming", "transfer"]
     assert transfers.take_resume(CALL) is None
+
+
+# --- the owner's voicemail answers ---
+
+
+async def test_voicemail_answers_and_the_agent_comes_back():
+    telephony = FakeTelephony()
+    transfers = TransferManager(telephony, stream_url=STREAM, ring_secs=20, detect_voicemail=True)
+    await transfers.start(CALL, to=OWNER, snapshot=snapshot())
+    assert telephony.detect_voicemail is True
+    await handle_event(owner_event("call.answered"), settings(), telephony, transfers=transfers)
+    await handle_event(owner_event("call.bridged"), settings(), telephony, transfers=transfers)
+    # The detection event comes without the tag here: the manager knows the owner's leg by its id.
+    await handle_event(owner_event("call.machine.detection.ended", tagged=False, result="machine"), settings(), telephony, transfers=transfers)
+    assert telephony.log[-1] == ("hangup", OWNER_LEG)  # only the voicemail leg; the caller stays on the line
+    await handle_event(owner_event("call.hangup"), settings(), telephony, transfers=transfers)
+
+    assert telephony.log[-1] == ("start_streaming", CALL, STREAM)
+    resumed = transfers.take_resume(CALL)
+    assert resumed is not None and resumed.reason == "no_answer" and resumed.caller_name == "Ada"
+
+
+async def test_a_person_answers_and_the_call_ends_when_the_owner_hangs_up():
+    telephony = FakeTelephony()
+    transfers = TransferManager(telephony, stream_url=STREAM, ring_secs=20, detect_voicemail=True)
+    await transfers.start(CALL, to=OWNER, snapshot=snapshot())
+    await handle_event(owner_event("call.answered"), settings(), telephony, transfers=transfers)
+    for result in ("human", "not_sure"):  # only "machine" ends the owner's leg
+        await handle_event(owner_event("call.machine.detection.ended", result=result), settings(), telephony, transfers=transfers)
+    assert [entry[0] for entry in telephony.log] == ["stop_streaming", "transfer"]
+    await handle_event(owner_event("call.hangup"), settings(), telephony, transfers=transfers)
+
+    # The caller's leg is parked when the owner's leg ends, so the server ends it. No agent comes back.
+    assert telephony.log[-1] == ("hangup", CALL)
+    assert transfers.take_resume(CALL) is None
+
+
+async def test_without_voicemail_detection_the_transfer_command_is_as_before():
+    telephony = FakeTelephony()
+    await manager(telephony).start(CALL, to=OWNER, snapshot=snapshot())
+    assert telephony.detect_voicemail is False
 
 
 async def test_transfer_command_fails_and_the_agent_comes_back():

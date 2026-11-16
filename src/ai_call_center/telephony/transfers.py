@@ -13,6 +13,13 @@ owner or ends it.
 
 How the manager learns the outcome: the transfer command tags the new leg (the owner's phone)
 with `client_state`, and Telnyx sends that state back on every webhook for that leg.
+
+Voicemail: the owner's voicemail answers like a person does, so "answered" does not mean the
+owner is there. With `detect_voicemail`, Telnyx listens after the answer and reports "human" or
+"machine". On "machine" the manager hangs up the owner's leg and the agent comes back, as for a
+phone that rang out. The caller can hear the first seconds of the voicemail greeting. The same
+option keeps the caller's leg alive when the owner's leg ends, so the manager hangs up the
+caller's leg itself after a normal conversation.
 """
 
 from __future__ import annotations
@@ -30,7 +37,10 @@ APOLOGY = "Sorry, I could not connect the call. The owner will follow up with yo
 class TransferTelephony(Protocol):
     async def stop_streaming(self, call_control_id: str) -> None: ...
     async def start_streaming(self, call_control_id: str, *, stream_url: str) -> None: ...
-    async def transfer(self, call_control_id: str, *, to: str, timeout_secs: int | None = None, state: dict | None = None) -> None: ...
+    async def transfer(
+        self, call_control_id: str, *, to: str, timeout_secs: int | None = None, state: dict | None = None, detect_voicemail: bool = False
+    ) -> None: ...
+    async def hangup(self, call_control_id: str) -> None: ...
     async def speak(self, call_control_id: str, text: str, *, then_hangup: bool = False, state: dict | None = None) -> None: ...
 
 
@@ -63,16 +73,19 @@ class Fallback:
 class _Pending:
     snapshot: Snapshot
     answered: bool = False
+    voicemail: bool = False  # a machine answered the owner's leg
     fallback: Fallback | None = None  # set for a transfer made without an AI session to come back to
 
 
 class TransferManager:
     """One per server. Runs outside the call's Pipecat pipeline, because the pipeline ends when the stream stops."""
 
-    def __init__(self, telephony: TransferTelephony, *, stream_url: str, ring_secs: int = 25) -> None:
+    def __init__(self, telephony: TransferTelephony, *, stream_url: str, ring_secs: int = 25, detect_voicemail: bool = False) -> None:
         self.telephony = telephony
         self.stream_url = stream_url
         self.ring_secs = ring_secs
+        self.detect_voicemail = detect_voicemail
+        self._owner_legs: dict[str, str] = {}  # the owner's leg -> the caller's leg, while a transfer is pending
         self.unavailable = ""  # why no transfer can be made on this server; "" when one can
         self._pending: dict[str, _Pending] = {}
         self._resumes: dict[str, Snapshot] = {}
@@ -137,7 +150,7 @@ class TransferManager:
     async def _transfer_after_speech(self, call_control_id: str, fallback: Fallback) -> None:
         self._pending[call_control_id] = _Pending(Snapshot(), fallback=fallback)
         try:
-            await self.telephony.transfer(call_control_id, to=fallback.to, timeout_secs=self.ring_secs, state={"transfer_of": call_control_id})
+            await self._transfer(call_control_id, fallback.to)
             log.info("call %s: fallback transfer accepted; the owner's phone rings for up to %d s", call_control_id, self.ring_secs)
         except Exception:
             log.exception("call %s: the fallback transfer failed", call_control_id)
@@ -156,24 +169,51 @@ class TransferManager:
             self._pending.pop(call_control_id, None)
             return
         try:
-            await self.telephony.transfer(call_control_id, to=to, timeout_secs=self.ring_secs, state={"transfer_of": call_control_id})
+            await self._transfer(call_control_id, to)
             log.info("call %s: transfer command accepted; the owner's phone rings for up to %d s", call_control_id, self.ring_secs)
         except Exception:
             log.exception("call %s: transfer failed after the stream stopped", call_control_id)
             await self._resume(call_control_id, "failed")
 
-    async def on_event(self, event_type: str | None, call_control_id: str | None, state: dict) -> None:
-        """Feed every Telnyx webhook here. `state` is the decoded `client_state` of the event."""
-        caller_leg = state.get("transfer_of")
+    async def _transfer(self, call_control_id: str, to: str) -> None:
+        extra = {"detect_voicemail": True} if self.detect_voicemail else {}
+        await self.telephony.transfer(call_control_id, to=to, timeout_secs=self.ring_secs, state={"transfer_of": call_control_id}, **extra)
+
+    async def on_event(self, event_type: str | None, call_control_id: str | None, state: dict, result: str = "") -> None:
+        """Feed every Telnyx webhook here. `state` is the decoded `client_state` of the event.
+        `result` is the payload's `result`: who answered, on `call.machine.detection.ended`."""
+        # The owner's leg is known by its tag. Its call id is kept too, for an event that comes without the tag.
+        caller_leg = state.get("transfer_of") or self._owner_legs.get(call_control_id or "")
         if caller_leg:  # an event for the owner's leg
             pending = self._pending.get(caller_leg)
             if pending is None:
+                self._owner_legs.pop(call_control_id or "", None)
                 return
+            if call_control_id and call_control_id != caller_leg:
+                self._owner_legs[call_control_id] = caller_leg
             if event_type in {"call.answered", "call.bridged"}:
                 pending.answered = True
+            elif event_type == "call.machine.detection.ended":
+                log.info("call %s: the owner's leg was answered by: %s", caller_leg, result or "unknown")
+                if result == "machine" and not pending.voicemail and call_control_id:
+                    pending.voicemail = True
+                    try:
+                        await self.telephony.hangup(call_control_id)  # the hang-up event below brings the agent back
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("call %s: could not hang up the owner's voicemail (%s)", caller_leg, exc)
             elif event_type == "call.hangup":
-                if pending.answered:
+                self._owner_legs.pop(call_control_id or "", None)
+                if pending.voicemail:
+                    log.info("call %s: the owner's voicemail answered; bringing the agent back", caller_leg)
+                    await self._resume(caller_leg, "no_answer")
+                elif pending.answered:
                     self._pending.pop(caller_leg, None)  # a normal end: both sides talked
+                    if self.detect_voicemail:
+                        # The caller's leg is parked, not hung up, when the owner's leg ends. End it here.
+                        try:
+                            await self.telephony.hangup(caller_leg)
+                        except Exception as exc:  # noqa: BLE001 - the caller hung up first
+                            log.info("call %s: nothing to hang up after the owner left (%s)", caller_leg, exc)
                 else:
                     log.info("call %s: the owner did not pick up; bringing the agent back", caller_leg)
                     await self._resume(caller_leg, "no_answer")
@@ -182,6 +222,8 @@ class TransferManager:
         elif event_type == "call.hangup" and call_control_id:
             # The caller hung up. Nothing to resume.
             self._pending.pop(call_control_id, None)
+            for owner_leg in [leg for leg, caller in self._owner_legs.items() if caller == call_control_id]:
+                self._owner_legs.pop(owner_leg, None)
             self._resumes.pop(call_control_id, None)
             self._after_speech.pop(call_control_id, None)
 

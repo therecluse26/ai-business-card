@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     transfer_hours: str = "09:00-18:00"  # US Eastern; empty = a live transfer is allowed at any time
     transfer_days: str = "mon-fri"
     transfer_ring_secs: int = 25  # how long the owner's phone rings before the agent comes back to the caller
+    # The owner's voicemail answers the call like a person does. With this on, Telnyx listens to
+    # the first seconds after the answer; when it hears a machine, the server hangs up the
+    # owner's leg and the contact agent comes back to the caller.
+    transfer_voicemail_detection: bool = True
     # When no voice provider answers, a built-in voice apologises and transfers the caller to the
     # owner, inside the transfer hours. False = it asks the caller to call again, and hangs up.
     transfer_on_failure: bool = True
@@ -107,6 +111,19 @@ class Settings(BaseSettings):
     gemini_live_model: str = "models/gemini-3.8-live"
     gemini_vad_silence_ms: int = 400  # silence before the turn ends
     gemini_vad_start_sensitivity: Literal["low", "high"] = "low"  # "low" ignores more background noise
+
+    # Amazon Nova Sonic voice leg, on Amazon Bedrock. The names start with NOVA_ on purpose: the
+    # standard AWS_ variables in a shell can belong to another AWS account, and must not pay for calls.
+    # Without the two keys, agents set to nova_sonic run on another provider.
+    nova_aws_access_key_id: str = ""
+    nova_aws_secret_access_key: SecretStr = SecretStr("")
+    nova_aws_region: str = "us-east-1"  # Nova 2.5 Sonic: us-east-1, us-west-2, eu-north-1, ap-northeast-1
+    nova_sonic_model: str = "amazon.nova-2-5-sonic"
+    nova_endpointing: Literal["LOW", "MEDIUM", "HIGH"] = "HIGH"  # how fast Nova decides the caller has stopped; HIGH is fastest
+
+    # Move agents to another voice leg, for example "consultant=nova_sonic,tour=gemini_live".
+    # Empty = the defaults in agents/specs.py.
+    agent_legs: str = ""
 
     @property
     def webhook_url(self) -> str:

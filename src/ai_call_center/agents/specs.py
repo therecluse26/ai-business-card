@@ -53,6 +53,14 @@ LEG_VOICES: dict[str, dict[str, str]] = {
         "consultant": "Puck",  # male, bright
         "contact": "Kore",  # female
     },
+    # Nova has few English voices, so three agents share one. In normal use one agent runs on Nova.
+    "nova_sonic": {
+        "classifier": "tiffany",  # female, US
+        "profile": "matthew",  # male, US
+        "tour": "matthew",
+        "consultant": "matthew",
+        "contact": "amy",  # female, British
+    },
 }
 DEFAULT_VOICES: dict[str, str] = LEG_VOICES["openai_realtime"]
 
@@ -66,6 +74,22 @@ VOICE_LEVELS_DBFS: dict[str, float] = {
     "Charon": -15.0,
     "Puck": -20.4,
 }
+
+
+def parse_agent_legs(text: str) -> dict[str, str]:
+    """ "consultant=nova_sonic, tour=gemini_live" as {agent: leg}. An unknown agent or leg is an error,
+    so a typing mistake in `.env` stops the server at start and not in the middle of a call."""
+    legs: dict[str, str] = {}
+    for part in text.replace(";", ",").split(","):
+        if not part.strip():
+            continue
+        agent, _, leg = (piece.strip() for piece in part.partition("="))
+        if agent not in DEFAULT_LEGS:
+            raise ValueError(f"AGENT_LEGS: unknown agent {agent!r} (have: {', '.join(DEFAULT_LEGS)})")
+        if leg not in LEGS:
+            raise ValueError(f"AGENT_LEGS: unknown voice leg {leg!r} for {agent} (have: {', '.join(LEGS)})")
+        legs[agent] = leg
+    return legs
 
 
 def default_voice(agent: str, leg: str) -> str:
