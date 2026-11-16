@@ -28,6 +28,7 @@ dependencies = [
 chat = "ai_call_center.chat:main"
 serve = "ai_call_center.app:main"
 setup-transfer = "ai_call_center.telephony.outbound:main"
+test-email = "ai_call_center.test_email:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]

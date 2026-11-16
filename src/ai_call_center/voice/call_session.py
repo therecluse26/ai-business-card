@@ -62,13 +62,16 @@ from ai_call_center.leads import LeadStore
 from ai_call_center.notify import notifier_from_settings
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
-from ai_call_center.telephony.transfers import Snapshot, TransferManager
+from ai_call_center.telephony.transfers import Fallback, Snapshot, TransferManager
+from ai_call_center.voice.health import ProviderHealth
 from ai_call_center.voice.leveler import VoiceLeveler
+from ai_call_center.voice.stats import CallStats
 from ai_call_center.voice.legs import (
     adopt_context,
     build_leg,
     ensure_connected,
     first_answer_needs_run_frame,
+    ready_legs,
     replay_and_respond,
     reset_session,
     resolve_spec,
@@ -81,6 +84,15 @@ log = logging.getLogger(__name__)
 TELNYX_SAMPLE_RATE = 8000
 TRANSFER_FALLBACK_SECS = 4.0  # transfer anyway if the agent never says its goodbye line
 SWITCH_TIMEOUT_SECS = 2.0
+ANSWER_DEADLINE_SECS = 8.0  # an agent asked to speak (greeting, handoff) that stays silent this long has failed
+RECOVERIES_PER_SERVICE = 2
+RELAPSE_SECS = 10.0  # an error this soon after a recovery means the recovery did not help
+MAX_FAILOVERS = 2  # moves to another voice provider in one call; after that, the spoken fallback
+# An error with one of these marks will not go away with a reconnect: a bad key, or an account out of credit.
+PERMANENT_ERROR_MARKS = ("invalid_api_key", "incorrect api key", "insufficient_quota", "billing", "api key not valid", "permission_denied")
+PROVIDER_FAILED = "provider_failed"  # the active agent went silent; the caller heard a pause
+HANDOFF_REROUTED = "handoff_rerouted"  # a handoff's target was not answering; the caller heard no failure
+FAILOVER_REASONS = {PROVIDER_FAILED, HANDOFF_REROUTED}
 
 
 def voice_instructions(spec: AgentSpec, leg: str, *notes: str) -> str:
@@ -104,6 +116,16 @@ def connect_message(returning: bool) -> str:
             "first say you are the AI assistant on this line, then ask if you are speaking with that first name. Say nothing else."
         )
     return "The call has just connected. Greet the caller now."
+
+
+def failover_instruction(agent: str, platform: str) -> str:
+    """What an agent reads last when it takes the call back on another provider, after its first provider went silent."""
+    return (
+        f"The line went silent for a few seconds because of a technical problem. The call is still with the {agent} agent. "
+        f"You are the {agent} agent, now with a new voice. Speak now. "
+        f'Your first sentence must be exactly: "Sorry about that pause. I\'m the {agent} agent, now running on {platform}." '
+        "Then, if the caller's last question has no answer yet, answer it. If it was answered, ask in one short sentence what else they want to know. Do not greet again."
+    )
 
 
 TRANSFER_DID_NOT_CONNECT = "The transfer was attempted. It did not connect."
@@ -151,6 +173,7 @@ class VoiceCallState:
     handoffs: list[str] = field(default_factory=list)
     lead_saved: bool = False
     transfer_requested: bool = False
+    end_reason: str = ""  # why the session ended: "caller", "transfer", "limit", "failover"; "" while it runs
 
 
 class TransferGate(FrameProcessor):
@@ -163,6 +186,7 @@ class TransferGate(FrameProcessor):
         self._armed = False
         self._fired = False
         self._speaking = False
+        self.last_started = 0.0  # when the bot last began to speak (time.monotonic)
 
     def arm(self) -> None:
         if self._armed:
@@ -174,6 +198,7 @@ class TransferGate(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, BotStartedSpeakingFrame):
             self._speaking = True
+            self.last_started = time.monotonic()
         elif isinstance(frame, BotStoppedSpeakingFrame):
             self._speaking = False
             if self._armed:
@@ -201,40 +226,74 @@ class ServiceWatchdog(FrameProcessor):
     the rest of the call. The watchdog reconnects the session; if it is the active one, it
     replays the context and asks for a response. A Gemini service reconnects by itself, so the
     watchdog leaves it alone.
+
+    A service is dead when Pipecat has given up on it (`is_usable` is False), when a recovery
+    fails, when it errors again right after a recovery, or after `RECOVERIES_PER_SERVICE`
+    recoveries. The watchdog then calls `on_dead(leg, reason)`, and the session moves the call
+    to another provider.
     """
 
-    def __init__(self, legs: dict[str, VoiceLeg], switcher: LLMSwitcher, context: LLMContext, *, max_recoveries: int = 3) -> None:
+    def __init__(self, legs: dict[str, VoiceLeg], switcher: LLMSwitcher, context: LLMContext, *, on_dead=None) -> None:
         super().__init__()
         self._legs = legs
         self._switcher = switcher
         self._context = context
-        self._max = max_recoveries
-        self._count = 0
+        self._on_dead = on_dead
+        self._recoveries: dict[str, int] = {}
+        self._recovered_at: dict[str, float] = {}
+        self._recovering: set[str] = set()
+        self._dead: set[str] = set()
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
-        if isinstance(frame, ErrorFrame) and direction == FrameDirection.UPSTREAM and not frame.fatal:
-            vl = next((vl for vl in self._legs.values() if vl.service is frame.processor), None)
-            if vl is not None and not self_heals(vl.service):
-                self.create_task(self._recover(vl, frame.error))
+        if isinstance(frame, ErrorFrame) and direction == FrameDirection.UPSTREAM:
+            self._check(frame)
         await self.push_frame(frame, direction)
 
-    async def _recover(self, vl: VoiceLeg, error: str) -> None:
-        if self._count >= self._max:
-            log.error("%s: not recovering again (%d recoveries already); error: %s", vl.agent, self._count, error)
+    def _check(self, frame: ErrorFrame) -> None:
+        # The switcher reports the active service's last error as its own, so look at every
+        # service, not only at the one named in the frame.
+        for vl in self._legs.values():
+            if not vl.service.is_usable:
+                self._declare_dead(vl, f"the service gave up: {frame.error}")
+        vl = next((vl for vl in self._legs.values() if vl.service is frame.processor), None)
+        if vl is None or frame.fatal or vl.agent in self._dead or vl.agent in self._recovering or self_heals(vl.service):
             return
-        self._count += 1
+        if any(mark in str(frame.error).lower() for mark in PERMANENT_ERROR_MARKS):
+            self._declare_dead(vl, f"the provider refused the account: {frame.error}")
+            return
+        relapse = time.monotonic() - self._recovered_at.get(vl.agent, float("-inf")) < RELAPSE_SECS
+        if relapse or self._recoveries.get(vl.agent, 0) >= RECOVERIES_PER_SERVICE:
+            self._declare_dead(vl, f"{'the error came back after a recovery' if relapse else 'too many recoveries'}: {frame.error}")
+            return
+        self._recovering.add(vl.agent)
+        self.create_task(self._recover(vl, frame.error))
+
+    def _declare_dead(self, vl: VoiceLeg, reason: str) -> None:
+        if vl.agent in self._dead:
+            return
+        self._dead.add(vl.agent)
+        log.error("%s: voice service on %s is dead (%s)", vl.agent, vl.leg, reason[:200])
+        if self._on_dead is not None:
+            self._on_dead(vl, reason)
+
+    async def _recover(self, vl: VoiceLeg, error: str) -> None:
+        self._recoveries[vl.agent] = self._recoveries.get(vl.agent, 0) + 1
         t0 = time.monotonic()
         active = self._switcher.strategy.active_service is vl.service
         log.warning("%s: session error (%s); reconnecting%s", vl.agent, error[:200], " and replaying" if active else "")
-        async with vl.lock:
-            try:
+        try:
+            async with vl.lock:
                 await reset_session(vl.service)
                 if active:
                     await replay_and_respond(vl.service, self._context)
-                log.info("%s: recovered in %.0f ms", vl.agent, (time.monotonic() - t0) * 1000)
-            except Exception:
-                log.exception("%s: recovery failed", vl.agent)
+            log.info("%s: recovered in %.0f ms", vl.agent, (time.monotonic() - t0) * 1000)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("%s: recovery failed", vl.agent)
+            self._declare_dead(vl, f"recovery failed: {exc}")
+        finally:
+            self._recovered_at[vl.agent] = time.monotonic()
+            self._recovering.discard(vl.agent)
 
 
 @dataclass
@@ -257,7 +316,8 @@ class CallSession:
     specs: dict[str, AgentSpec] = field(default_factory=default_specs)
     lookups: CallerLookup | None = None
     transfers: TransferManager | None = None
-    resume: Snapshot | None = None  # set when the stream restarts after a transfer that did not connect
+    resume: Snapshot | None = None  # set when the stream restarts: after a transfer that did not connect, or to change provider
+    health: ProviderHealth | None = None  # which voice providers are answering; shared by all calls
 
     @property
     def call_control_id(self) -> str:
@@ -266,8 +326,13 @@ class CallSession:
     async def run(self) -> None:
         started = time.monotonic()
         resume = self.resume
-        # A new call starts with the classifier. A call that comes back from a transfer starts with the contact agent.
-        entry_agent = "contact" if resume else ENTRY_AGENT
+        # A new call starts with the classifier. A call that comes back from a transfer starts with the
+        # contact agent. A call that changes provider starts with the agent that was speaking.
+        entry_agent = resume.entry_agent if resume else ENTRY_AGENT
+        failover_resume = bool(resume and resume.reason in FAILOVER_REASONS)
+        health = self.health or ProviderHealth()
+        # Speed, tokens, and cost of this call. One object for the whole call, also across a stream restart.
+        stats = resume.stats if resume and isinstance(resume.stats, CallStats) else CallStats()
         state = VoiceCallState(active_agent=entry_agent, handoffs=list(resume.handoffs) if resume else [], lead_saved=bool(resume and resume.lead_saved))
         transfers = self.transfers or TransferManager(self.telephony, stream_url=self.settings.media_stream_url, ring_secs=self.settings.transfer_ring_secs)
         caller_number = self.call_data.get("from") or "unknown"
@@ -279,7 +344,9 @@ class CallSession:
         # Returning-caller memory: look the number up before any agent speaks. The greeting agent
         # gets a first name to confirm. The history stays here until the caller says yes.
         memory = recall(store, caller_number, exclude_call=self.call_control_id)
-        greeting = greeting_note(memory) if memory and not resume else ""
+        # The first-name question belongs to a new call. It is asked again only when the provider
+        # failed before the caller answered it.
+        greeting = greeting_note(memory) if memory and (not resume or (failover_resume and not resume.identity_confirmed)) else ""
         history = history_text(memory) if memory and memory.first_name else ""
         # Number lookup started at call.initiated; take the result if it is ready.
         info = await self.lookups.get(caller_number) if self.lookups else None
@@ -288,8 +355,9 @@ class CallSession:
             log.info("call %s: number lookup: line=%s carrier=%s area=%s name known: %s", self.call_control_id, info.line_type, info.carrier, info.state, bool(info.caller_name))
         if memory:
             log.info("call %s: returning caller (%d earlier calls, name known: %s)", self.call_control_id, memory.previous_calls, bool(memory.name))
-        # Each spec as it will run here: a leg with no API key falls back to OpenAI, voice included.
-        self.specs = {name: resolve_spec(spec, self.settings) for name, spec in self.specs.items()}
+        # Each spec as it will run here: a leg with no API key, or one marked down, runs on another
+        # provider, voice included.
+        self.specs = {name: resolve_spec(spec, self.settings, health.down()) for name, spec in self.specs.items()}
         schemas = voice_tool_schemas(self.specs)
         legs: dict[str, VoiceLeg] = {}
         for name, spec in self.specs.items():
@@ -319,6 +387,7 @@ class CallSession:
             texter=self.telephony if self.settings.sms_enabled else None,
             portfolio_url=self.settings.portfolio_url,
             transfer_hours=TransferHours.parse(self.settings.transfer_hours, self.settings.transfer_days),
+            started_at=stats.started_at,
         )
         entry = self.specs[entry_agent]
 
@@ -335,7 +404,17 @@ class CallSession:
             params=FastAPIWebsocketParams(audio_in_enabled=True, audio_out_enabled=True, add_wav_header=False, serializer=serializer),
         )
 
-        if resume:
+        entry_platform = LEG_PLATFORMS.get(entry.leg, entry.leg)
+        caller_spoke = bool(resume) and any(isinstance(m, dict) and m.get("role") == "user" for m in resume.messages)
+        if failover_resume:
+            log.info("call %s: the %s agent takes over on %s (%s; caller has spoken: %s)", self.call_control_id, entry_agent, entry.leg, resume.reason, caller_spoke)
+        if failover_resume and not caller_spoke:
+            # The provider failed before the caller said anything: greet as on a new call.
+            first_messages = [{"role": "developer", "content": connect_message(bool(greeting))}]
+        elif failover_resume:
+            instruction = handoff_instruction(entry_agent, entry_platform) if resume.reason == HANDOFF_REROUTED else failover_instruction(entry_agent, entry_platform)
+            first_messages = [*resume.messages, {"role": "developer", "content": instruction}]
+        elif resume:
             first_messages = [*after_transfer_attempt(resume.messages), {"role": "developer", "content": resume_message(resume.reason, self.settings.owner_name, state.lead_saved)}]
         else:
             first_messages = [{"role": "developer", "content": connect_message(bool(greeting))}]
@@ -344,25 +423,111 @@ class CallSession:
         # The first service in the list is active at start.
         switcher = LLMSwitcher(llms=[legs[entry_agent].service, *(vl.service for name, vl in legs.items() if name != entry_agent)])
 
+        def snapshot(**changes) -> Snapshot:
+            return Snapshot(
+                **{
+                    "messages": list(context.messages),
+                    "handoffs": list(state.handoffs),
+                    "lead_saved": state.lead_saved,
+                    "identity_confirmed": ctx.identity_confirmed,
+                    "caller_name": ctx.caller_name,
+                    "failovers": resume.failovers if resume else 0,
+                    "stats": stats,
+                    **changes,
+                }
+            )
+
         async def do_transfer() -> None:
             # The manager stops the media stream, which ends this session, and then transfers the
             # call. It keeps the conversation, so the contact agent can come back if the owner
             # does not pick up.
             log.info("call %s: transferring to the owner", self.call_control_id)
-            transfers.start(
-                self.call_control_id,
-                to=self.settings.owner_phone,
-                snapshot=Snapshot(
-                    messages=list(context.messages),
-                    handoffs=list(state.handoffs),
-                    lead_saved=state.lead_saved,
-                    identity_confirmed=ctx.identity_confirmed,
-                    caller_name=ctx.caller_name,
-                ),
+            state.end_reason = "transfer"
+            transfers.start(self.call_control_id, to=self.settings.owner_phone, snapshot=snapshot())
+
+        # --- a voice provider that stops answering ---
+        background: set[asyncio.Task] = set()
+        timers: list[asyncio.Task] = []
+
+        def spawn(coro) -> None:
+            task = asyncio.create_task(coro)
+            background.add(task)
+            task.add_done_callback(background.discard)
+
+        def spoken_fallback() -> Fallback:
+            owner = self.settings.owner_name
+            can_transfer = self.settings.transfer_on_failure and bool(self.settings.owner_phone) and transfer_closed_message(ctx) is None
+            return Fallback(
+                to=self.settings.owner_phone if can_transfer else "",
+                connecting=f"Sorry, the AI agents on this line have a technical problem. I am connecting you to {owner} now.",
+                no_answer=f"Sorry, {owner} could not take the call. Please call again later. Goodbye.",
             )
 
+        def start_fail_over(agent: str, kind: str, reason: str) -> bool:
+            """Move the call to another voice provider: restart the media stream, so a new session
+            builds its agents on a provider that answers. `agent` speaks first there. When no
+            provider is left, Telnyx's voice speaks, and the call goes to the owner or ends.
+            Returns False when the session is ending already."""
+            if state.end_reason or state.transfer_requested:
+                return False
+            failovers = resume.failovers if resume else 0
+            ready = ready_legs(self.settings, health.down())
+            if ready and failovers < MAX_FAILOVERS:
+                log.error("call %s: moving the %s agent to %s (%s)", self.call_control_id, agent, ready[0], reason[:160])
+                state.end_reason = "failover"
+                if kind == PROVIDER_FAILED:
+                    stats.failovers += 1
+                transfers.restart(self.call_control_id, snapshot=snapshot(reason=kind, entry_agent=agent, failovers=failovers + 1), fallback=spoken_fallback())
+            else:
+                log.error("call %s: no voice provider is answering (%s); using the spoken fallback", self.call_control_id, reason[:160])
+                state.end_reason = "fallback"
+                transfers.last_resort(self.call_control_id, fallback=spoken_fallback())
+            return True
+
+        async def fail_over(agent: str, kind: str, reason: str) -> None:
+            if start_fail_over(agent, kind, reason):
+                await runner.cancel()  # Telnyx closes the stream too; do not wait for it
+
+        def on_dead(vl: VoiceLeg, reason: str) -> None:
+            """A voice service has failed for good. Its provider is avoided for a few minutes."""
+            health.mark_down(vl.leg, reason)
+            dead_agents.add(vl.agent)
+            if vl.agent == state.active_agent:
+                spawn(fail_over(vl.agent, PROVIDER_FAILED, reason))
+
+        def reroute(target: str) -> bool:
+            """Called at a handoff. True when the target cannot answer and the call moves to another provider instead."""
+            vl = legs[target]
+            if target not in dead_agents and vl.service.is_usable and not health.is_down(vl.leg):
+                return False
+            health.mark_down(vl.leg, "a handoff target was not answering")
+            spawn(fail_over(target, HANDOFF_REROUTED, f"the {target} agent on {vl.leg} is not answering"))
+            return True
+
+        def expect_speech(vl: VoiceLeg) -> None:
+            """The agent was just asked to speak. If no audio starts in time, its service has failed."""
+            asked = time.monotonic()
+
+            async def check() -> None:
+                await asyncio.sleep(ANSWER_DEADLINE_SECS)
+                if gate.last_started < asked and not state.end_reason and not state.transfer_requested and state.active_agent == vl.agent:
+                    log.error("call %s: the %s agent did not speak within %.0f s", self.call_control_id, vl.agent, ANSWER_DEADLINE_SECS)
+                    on_dead(vl, f"no audio within {ANSWER_DEADLINE_SECS:.0f} s of a request to speak")
+
+            timers.append(asyncio.create_task(check()))
+
+        async def watch_services() -> None:
+            """Pipecat gives up on a service that cannot connect (`is_usable` goes False). The error
+            of a service that is not active does not reach the watchdog, so look once a second."""
+            while True:
+                await asyncio.sleep(1.0)
+                for vl in legs.values():
+                    if vl.agent not in dead_agents and not vl.service.is_usable:
+                        on_dead(vl, "the service gave up after repeated connection failures")
+
+        dead_agents: set[str] = set()
         gate = TransferGate(do_transfer)
-        watchdog = ServiceWatchdog(legs, switcher, context)
+        watchdog = ServiceWatchdog(legs, switcher, context, on_dead=on_dead)
         processors = [transport.input(), user_aggregator, watchdog, switcher]
         if self.settings.voice_level_dbfs:
             # Every voice at one loudness, so a handoff does not sound like a volume change.
@@ -376,6 +541,7 @@ class CallSession:
             )
         pipeline = Pipeline([*processors, transport.output(), gate, assistant_aggregator])
 
+        stats.bind({vl.service.name: vl.leg for vl in legs.values()}, lambda: legs[state.active_agent].leg)
         worker = PipelineWorker(
             pipeline,
             params=PipelineParams(
@@ -384,15 +550,12 @@ class CallSession:
                 enable_metrics=True,
                 enable_usage_metrics=True,
             ),
-            observers=[MetricsLogObserver()],
+            observers=[MetricsLogObserver(), stats],
             idle_timeout_secs=300,
         )
         runner = WorkerRunner(handle_sigint=False)
 
         # --- tool handlers: the voice model requests, this code acts ---
-        background: set[asyncio.Task] = set()
-        timers: list[asyncio.Task] = []
-
         async def on_save_lead(params: FunctionCallParams) -> None:
             args = {k: str(params.arguments.get(k) or "") for k in ("name", "need", "email", "company", "callback_number")}
             result, lead = await save_lead_record(ctx, **args)
@@ -415,6 +578,7 @@ class CallSession:
                     active_agent=state.active_agent,
                     lead_saved=state.lead_saved,
                     transfer_requested=state.transfer_requested,
+                    figures=stats.describe(),
                 )
             )
 
@@ -447,7 +611,9 @@ class CallSession:
 
         def make_handoff(target: str):
             async def on_handoff(params: FunctionCallParams) -> None:
-                await self._handoff(target, params, legs=legs, switcher=switcher, worker=worker, context=context, state=state, schemas=schemas)
+                await self._handoff(
+                    target, params, legs=legs, switcher=switcher, worker=worker, context=context, state=state, schemas=schemas, reroute=reroute, expect_speech=expect_speech, stats=stats
+                )
 
             return on_handoff
 
@@ -479,6 +645,7 @@ class CallSession:
             await tell_agent("The time limit is here. Say goodbye in one short sentence now, and say they can call again.")
             await asyncio.sleep(15)
             log.info("call %s: time limit reached; hanging up", self.call_control_id)
+            state.end_reason = "limit"
             try:
                 await self.telephony.hangup(self.call_control_id)
             except Exception:
@@ -488,12 +655,15 @@ class CallSession:
         @transport.event_handler("on_client_connected")
         async def on_client_connected(_transport, _client) -> None:
             timers.append(asyncio.create_task(enforce_time_limit()))
+            timers.append(asyncio.create_task(watch_services()))
             log.info("call %s connected after %.0f ms; agent=%s leg=%s voice=%s", self.call_control_id, (time.monotonic() - started) * 1000, entry.name, legs[entry_agent].leg, entry.voice)
             await _answer(legs[entry_agent], context, worker)
+            expect_speech(legs[entry_agent])
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(_transport, _client) -> None:
             log.info("call %s disconnected", self.call_control_id)
+            state.end_reason = state.end_reason or "caller"
             await runner.cancel()
 
         await runner.add_workers(worker)
@@ -502,14 +672,27 @@ class CallSession:
         finally:
             for timer in timers:
                 timer.cancel()
-            # The call is over. Write the short summary that the next call from this number will see.
-            try:
-                summary, caller_name = await summarize_call(context.messages, init_chat_model(self.settings.summary_model))
-                store.finish_call(self.call_control_id, agents=[ENTRY_AGENT, *state.handoffs], summary=summary, caller_name=caller_name)
-                log.info("call %s: summary saved (%d chars)", self.call_control_id, len(summary))
-            except Exception:
-                log.exception("call %s: could not save the call summary", self.call_control_id)
+            if not state.end_reason:
+                # Nothing ended this session: not the caller, a transfer, or the time limit. The
+                # pipeline stopped by itself, and the caller would sit in silence.
+                log.error("call %s: the pipeline ended by itself", self.call_control_id)
+                health.mark_down(legs[state.active_agent].leg, "the pipeline ended by itself")
+                start_fail_over(state.active_agent, PROVIDER_FAILED, "the pipeline ended by itself")
+            if state.end_reason == "failover":
+                # The call goes on in a new session, which writes the summary when the call ends.
+                log.info("call %s: session ended after %.0f s to change the voice provider", self.call_control_id, time.monotonic() - started)
+            else:
+                # The call is over. Write the short summary that the next call from this number will see.
+                try:
+                    summary, caller_name = await summarize_call(context.messages, init_chat_model(self.settings.summary_model))
+                    store.finish_call(self.call_control_id, agents=[ENTRY_AGENT, *state.handoffs], summary=summary, caller_name=caller_name)
+                    log.info("call %s: summary saved (%d chars)", self.call_control_id, len(summary))
+                except Exception:
+                    log.exception("call %s: could not save the call summary", self.call_control_id)
             store.close()
+        if state.end_reason == "failover":
+            return
+        log.info("call %s: figures: %s", self.call_control_id, stats.describe())
         log.info(
             "call %s finished after %.0f s; agents: %s; lead=%s transfer=%s",
             self.call_control_id,
@@ -530,6 +713,9 @@ class CallSession:
         context: LLMContext,
         state: VoiceCallState,
         schemas: dict,
+        reroute=None,
+        expect_speech=None,
+        stats: CallStats | None = None,
     ) -> None:
         """Switch the active voice service to the target agent and have it answer."""
         previous = legs[state.active_agent]
@@ -547,6 +733,8 @@ class CallSession:
             # made the new session replay a context without the result; when the result arrived
             # later it was sent to a session that never had that call id, which OpenAI rejects
             # and Pipecat treats as fatal.
+            if reroute is not None and reroute(target):
+                return  # the target's provider is not answering; a new session on another provider takes the handoff
             context.set_tools(tools_for_agent(spec, schemas))
             # The last message of a replayed context decides what the new session does with it.
             # After a bare tool result, a session sometimes only says it is ready to continue.
@@ -558,6 +746,10 @@ class CallSession:
                 await worker.queue_frames([ManuallySwitchServiceFrame(service=nxt.service)])
                 await _wait_for(lambda: switcher.strategy.active_service is nxt.service, SWITCH_TIMEOUT_SECS)
                 await _answer(nxt, context, worker)
+            if expect_speech is not None:
+                expect_speech(nxt)
+            if stats is not None:
+                stats.note_handoff(time.monotonic() - t0)
             log.info("call %s: handoff %s -> %s (leg=%s voice=%s) switched %.0f ms after the tool call", self.call_control_id, previous.agent, target, nxt.leg, spec.voice, (time.monotonic() - t0) * 1000)
             # The old service keeps a stale server-side conversation. Reset it in the background
             # (about 2.5 s) so a later handoff back to it replays the context cleanly.

@@ -105,10 +105,12 @@ class TelnyxTelephony:
             state=(port.state if port else "") or "",
         )
 
-    async def speak(self, call_control_id: str, text: str, *, then_hangup: bool = False) -> None:
+    async def speak(self, call_control_id: str, text: str, *, then_hangup: bool = False, state: dict | None = None) -> None:
         """Telnyx text-to-speech on the call. With `then_hangup`, the webhook handler hangs up when
-        Telnyx reports the speech has ended; a hang-up sent right away would cut the speech off."""
-        extra = {"client_state": encode_state({"then": "hangup"})} if then_hangup else {}
+        Telnyx reports the speech has ended; a hang-up sent right away would cut the speech off.
+        `state` is set as the call's `client_state`; it replaces any state set earlier."""
+        state = {"then": "hangup"} if then_hangup else state
+        extra = {"client_state": encode_state(state)} if state else {}
         await self.client.calls.actions.speak(
             call_control_id, payload=text, voice="Telnyx.KokoroTTS.af", command_id=self._cid(), **extra
         )

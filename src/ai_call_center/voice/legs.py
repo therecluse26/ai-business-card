@@ -134,21 +134,40 @@ LEG_BUILDERS = {
 }
 
 
-def available_leg(leg: str, settings: Settings) -> str:
-    """The leg that will run for a configured leg. A leg with no builder or no API key falls back to OpenAI."""
-    if leg == "gemini_live" and not settings.google_api_key.get_secret_value():
-        log.warning("voice leg gemini_live needs GOOGLE_API_KEY; using %s", FALLBACK_LEG)
-        return FALLBACK_LEG
-    if leg in LEG_BUILDERS:
-        return leg
-    log.warning("voice leg %r is not built yet; using %s", leg, FALLBACK_LEG)
-    return FALLBACK_LEG
+def has_credentials(leg: str, settings: Settings) -> bool:
+    """True when this server holds the API key that the leg needs."""
+    if leg == "openai_realtime":
+        return bool(settings.openai_api_key.get_secret_value())
+    if leg == "gemini_live":
+        return bool(settings.google_api_key.get_secret_value())
+    return False
 
 
-def resolve_spec(spec: AgentSpec, settings: Settings) -> AgentSpec:
+def ready_legs(settings: Settings, down: frozenset[str] = frozenset()) -> list[str]:
+    """The legs that can run now: built, with an API key, and not marked down."""
+    return [leg for leg in LEG_BUILDERS if has_credentials(leg, settings) and leg not in down]
+
+
+def available_leg(leg: str, settings: Settings, down: frozenset[str] = frozenset()) -> str:
+    """The leg that will run for a configured leg.
+
+    The configured leg runs when it is built, has an API key, and is not marked down. Otherwise
+    the first other leg that is ready runs. When no leg is ready, a leg with a key is tried anyway.
+    """
+    candidates = [leg, *(other for other in LEG_BUILDERS if other != leg)]
+    with_key = [c for c in candidates if c in LEG_BUILDERS and has_credentials(c, settings)]
+    healthy = [c for c in with_key if c not in down]
+    choice = (healthy or with_key or [FALLBACK_LEG])[0]
+    if choice != leg:
+        why = "is marked down" if leg in down else ("needs an API key" if leg in LEG_BUILDERS else "is not built yet")
+        log.warning("voice leg %s %s; using %s", leg, why, choice)
+    return choice
+
+
+def resolve_spec(spec: AgentSpec, settings: Settings, down: frozenset[str] = frozenset()) -> AgentSpec:
     """The spec as it will run on this server. On a fallback the voice changes too, because voice
     names belong to a provider."""
-    leg = available_leg(spec.leg, settings)
+    leg = available_leg(spec.leg, settings, down)
     if leg == spec.leg:
         return spec
     return dataclasses.replace(spec, leg=leg, voice=default_voice(spec.name, leg))

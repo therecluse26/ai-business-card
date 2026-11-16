@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     transfer_hours: str = "09:00-18:00"  # US Eastern; empty = a live transfer is allowed at any time
     transfer_days: str = "mon-fri"
     transfer_ring_secs: int = 25  # how long the owner's phone rings before the agent comes back to the caller
+    # When no voice provider answers, a built-in voice apologises and transfers the caller to the
+    # owner, inside the transfer hours. False = it asks the caller to call again, and hangs up.
+    transfer_on_failure: bool = True
 
     # Text messages (off until the number has a Telnyx messaging profile and a 10DLC campaign).
     sms_enabled: bool = False

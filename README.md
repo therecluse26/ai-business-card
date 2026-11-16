@@ -8,15 +8,16 @@ Stack: Telnyx (phone), Pipecat (audio), LangGraph + LangChain (routing, state, t
 
 ## Status
 
-M1 to M4 are done, and the guardrails of M5: the five agents run as a text chat and on a phone call.
+M1 to M5 are done: the five agents run as a text chat and on a phone call.
 On the phone, each agent has its own voice. Two agents run on Google Gemini Live and three on OpenAI
 Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
 call stats, transfer to the owner) run from the voice model's requests. The line recognises a
 returning caller, looks up a new caller's carrier and area, and limits calls, call length, and
-transfer hours.
+transfer hours. When a voice provider stops answering, the call moves to the other provider.
 
-Not built yet: a spoken fallback when every voice provider fails (M5), live cost and latency
-figures for the tour agent (M6), and the local pipeline leg (M7).
+The tour agent can tell the caller how fast the agents answered and what the call has cost so far.
+
+Not built yet: the local pipeline leg (M7). Its timing spike is done; see "Pipeline leg spike (M7)".
 
 | Agent | Job |
 |---|---|
@@ -150,6 +151,88 @@ Each limit is a setting in `.env`; `0` turns a limit off.
 A call over a limit is answered with no media stream, so no AI session opens. Telnyx speaks one
 sentence with the reason, and the server hangs up when the speech ends. The server never records a call.
 
+### When a voice provider fails (M5)
+
+A caller must not sit in silence. The server treats a voice service as dead in these cases:
+
+- The provider refuses the account: a bad API key, or no credit.
+- A reconnect fails, or the error comes back within 10 seconds of a reconnect, or two reconnects were not enough.
+- Pipecat gives up on the service after repeated connection failures.
+- The agent is asked to speak (greeting, handoff) and no audio starts within 8 seconds.
+
+What happens then:
+
+1. The provider is marked down for 5 minutes (`voice/health.py`). New calls build every agent on the other provider.
+2. If the dead service is the active agent, the server restarts the call's media stream. The new AI
+   session builds the same agent on the other provider, with the whole conversation. The agent says:
+   "Sorry about that pause. I'm the profile agent, now running on OpenAI."
+3. If a handoff reaches an agent whose provider is down, the same restart happens. The caller hears a normal handoff.
+4. If no provider is left, or the call has moved twice already, Telnyx's built-in voice apologises.
+   Inside the transfer hours it then transfers the caller to `OWNER_PHONE`. Outside them, or with
+   `TRANSFER_ON_FAILURE=false`, it asks the caller to call again, and hangs up.
+
+Measured with a simulated Telnyx stream on 2026-11-16: a bad OpenAI key moved the greeting to Gemini
+in 0.3 s plus the stream restart; with both keys bad, the built-in voice spoke 1.4 s after the call connected.
+
+### Live figures for the tour agent (M6)
+
+`get_call_stats` gives the tour agent measured figures for the call in progress (`voice/stats.py`).
+The server writes the same figures to the log when the call ends.
+
+| Figure | How it is measured |
+|---|---|
+| Answer time | From the last 20 ms of caller audio that held speech to the first agent audio, on the phone side. The same for both providers. Median and slowest, and the median for each provider. |
+| Handoff time | From the handoff tool call to the switch to the next agent's voice service. |
+| Tokens | What each provider reports for each answer: text and audio, in and out, cached and not. |
+| Cost | Tokens times the list prices in `PRICES`. Voice models only: not Telnyx minutes, the number lookup, or the summary model. |
+
+The prices were read on 2026-11-16. The OpenAI prices are from OpenAI's model page. For
+`gemini-3.8-live` the sources disagree on the text prices, so the table holds the higher ones and
+the estimate is on the high side. Check `PRICES` before you quote a cost to anyone.
+
+Measured on one simulated call of 129 s with three agents: median answer time 1.3 s, handoffs
+1.9 s on average, 11,030 tokens in and 2,551 out, about 4 cents.
+
+### Check the lead email
+
+After you fill in `OWNER_EMAIL` and the `SMTP_*` settings, send one sample lead email:
+
+```
+uv run test-email
+```
+
+It uses the same code path as a real lead and writes nothing to the lead table. On a failure it
+prints the server's answer and what to check.
+
+### Pipeline leg spike (M7)
+
+The pipeline leg is planned as a local speech-to-text model, Claude through LangGraph, and local
+Kokoro text-to-speech. `scripts/spike_pipeline_leg.py` times each step on the CPU with phone-quality
+audio. The leg itself is not built. Run the spike:
+
+```
+uv run --with kokoro-onnx --with moonshine-voice --with faster-whisper python scripts/spike_pipeline_leg.py
+```
+
+Measured on 2026-11-16 on a Ryzen 7 7840HS, no GPU. The caller audio was synthetic and clean, so
+the word errors are a best case.
+
+| Step | Time |
+|---|---|
+| Moonshine base, speech-to-text, 1.8 s to 7.4 s of speech | 58 ms to 247 ms, 0 word errors in 45 |
+| Moonshine tiny | 41 ms to 191 ms, 0 word errors |
+| Whisper base.en (int8) | 281 ms to 389 ms, 0 word errors |
+| Whisper small.en (int8) | 927 ms to 1087 ms |
+| Claude, first full sentence (median of 3) | haiku-5-5 1251 ms; opus-5-5 1660 ms; sonnet-5-5 2664 ms |
+| Kokoro, first audio | 171 ms for 1 word; 827 ms for 11 words; 931 ms for 18 words |
+
+What this means:
+
+- Kokoro makes a whole sentence before it gives any audio. A short first clause starts in about 0.2 s; a full sentence takes about 0.8 s.
+- Speech-to-text plus first audio stays under the 500 ms target only when the first clause is short.
+- Claude's first sentence takes 1.3 s or more. With the 0.4 s wait for the end of the caller's turn, the
+  pipeline leg would answer about 2.0 s to 2.7 s after the caller stops. The speech-to-speech legs measured 1.2 s to 1.4 s.
+
 ### Text messages (off by default)
 
 With `SMS_ENABLED=true` and `PORTFOLIO_URL` set, an agent can text that one link to the calling number,
@@ -174,11 +257,14 @@ src/ai_call_center/
   callers.py                     returning-caller memory: first-name question, history after a yes, summary at hangup
   guardrails.py                  call limits at admission and the transfer hours
   notify.py                      lead emails to the owner over SMTP
+  test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests
   telephony/lookup.py            Telnyx Number Lookup for a new caller, cached
   telephony/transfers.py         live transfer: call the owner, bring the contact agent back on no answer
   telephony/outbound.py          one-time setup of the outbound voice profile (uv run setup-transfer)
   voice/leveler.py               one loudness for every agent voice
+  voice/health.py                which voice providers are answering; a failed one is avoided for 5 minutes
+  voice/stats.py                 live figures for a call: answer time, handoff time, tokens, cost estimate
   voice/legs.py                  builds one speech-to-speech service per agent (OpenAI or Gemini) and drives it
   voice/tools.py                 the LangGraph tools as Pipecat function schemas
   voice/call_session.py          one phone call: pipeline, switcher, tool handlers, transfer gate, time limit

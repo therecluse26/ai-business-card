@@ -4,8 +4,8 @@ from pipecat.frames.frames import FunctionCallResultFrame, FunctionCallResultPro
 
 from ai_call_center.agents.specs import LEG_VOICES
 from ai_call_center.config import Settings
-from ai_call_center.voice.call_session import handoff_instruction
-from ai_call_center.voice.legs import HandoffGeminiLive, build_leg, resolve_spec
+from ai_call_center.voice.call_session import failover_instruction, handoff_instruction
+from ai_call_center.voice.legs import HandoffGeminiLive, build_leg, ready_legs, resolve_spec
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
 
@@ -58,4 +58,34 @@ async def test_a_gemini_agent_is_not_given_a_handoff_result(specs):
 def test_handoff_instruction_carries_the_exact_intro_line():
     text = handoff_instruction("tour", "OpenAI")
     assert '"Hi, I\'m the tour agent, running on OpenAI."' in text
+    assert "Do not greet again" in text
+
+
+def test_an_agent_moves_to_the_other_provider_when_its_own_is_marked_down(specs):
+    down_openai = frozenset({"openai_realtime"})
+    spec = resolve_spec(specs["classifier"], settings(), down_openai)
+    assert (spec.leg, spec.voice) == ("gemini_live", LEG_VOICES["gemini_live"]["classifier"])
+    assert resolve_spec(specs["profile"], settings(), down_openai) is specs["profile"]  # already on Gemini
+
+    spec = resolve_spec(specs["profile"], settings(), frozenset({"gemini_live"}))
+    assert (spec.leg, spec.voice) == ("openai_realtime", LEG_VOICES["openai_realtime"]["profile"])
+
+
+def test_a_provider_without_a_key_is_never_the_fallback(specs):
+    spec = resolve_spec(specs["classifier"], settings(google_api_key=""), frozenset({"openai_realtime"}))
+    assert spec is specs["classifier"]  # nothing else can run; the configured leg is tried anyway
+    assert ready_legs(settings(google_api_key=""), frozenset({"openai_realtime"})) == []
+    assert ready_legs(settings(), frozenset({"gemini_live"})) == ["openai_realtime"]
+
+
+def test_every_agent_keeps_its_own_voice_after_a_move(specs):
+    for down in ("openai_realtime", "gemini_live"):
+        moved = [resolve_spec(spec, settings(), frozenset({down})) for spec in specs.values()]
+        assert {spec.leg for spec in moved} == {"gemini_live" if down == "openai_realtime" else "openai_realtime"}
+        assert len({spec.voice for spec in moved}) == len(moved)
+
+
+def test_failover_instruction_carries_the_exact_apology_line():
+    text = failover_instruction("profile", "OpenAI")
+    assert '"Sorry about that pause. I\'m the profile agent, now running on OpenAI."' in text
     assert "Do not greet again" in text

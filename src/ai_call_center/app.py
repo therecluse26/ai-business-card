@@ -18,6 +18,7 @@ from ai_call_center.telephony import media, webhooks
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
 from ai_call_center.telephony.transfers import TransferManager
+from ai_call_center.voice.health import ProviderHealth
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
         max_call_minutes=settings.max_call_minutes,
         exempt_numbers=frozenset({settings.owner_phone}),
     )
+    app.state.health = ProviderHealth()  # which voice providers are answering; shared by all calls
     app.state.transfers = TransferManager(app.state.telephony, stream_url=settings.media_stream_url, ring_secs=settings.transfer_ring_secs)
     if settings.telnyx_app_id:
         try:

@@ -111,8 +111,9 @@ async def save_lead_record(
     return result, {"id": str(row_id), "name": lead.name, "email": lead.email, "company": lead.company, "need": lead.need}
 
 
-def describe_call(ctx: CallContext, *, visited: list[str], active_agent: str, lead_saved: bool, transfer_requested: bool) -> str:
-    """Live facts about the call, as one spoken paragraph. Shared by text and voice modes."""
+def describe_call(ctx: CallContext, *, visited: list[str], active_agent: str, lead_saved: bool, transfer_requested: bool, figures: str = "") -> str:
+    """Live facts about the call, as one spoken paragraph. Shared by text and voice modes.
+    `figures` are the measured speed, tokens, and cost of a phone call (`voice/stats.py`)."""
     seconds = int((datetime.now(UTC) - ctx.started_at).total_seconds())
     parts = []
     for agent in visited:
@@ -125,6 +126,7 @@ def describe_call(ctx: CallContext, *, visited: list[str], active_agent: str, le
         f"Current agent: {active_agent}. "
         f"Lead saved: {'yes' if lead_saved else 'no'}. "
         f"Transfer requested: {'yes' if transfer_requested else 'no'}."
+        + (f" {figures}" if figures else "")
     )
 
 
@@ -260,7 +262,8 @@ async def request_owner_transfer(reason: str, runtime: ToolRuntime[CallContext, 
 
 @tool
 def get_call_stats(runtime: ToolRuntime[CallContext, CallState]) -> str:
-    """Get live facts about this call: how long it has run, which agents have spoken, and on which voice provider each one ran."""
+    """Get live facts about this call: how long it has run, which agents have spoken, and on which voice provider each one ran.
+    On a phone call it also gives the measured answer speed, the handoff time, the tokens used, and an estimate of the model cost."""
     state = runtime.state
     return describe_call(
         runtime.context,
