@@ -5,6 +5,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from ai_call_center.telephony import TransferRequest
+from ai_call_center.notify import plain_text
 from tests.conftest import OWNER_PHONE, scripted, tool_call
 
 
@@ -80,10 +81,11 @@ async def test_save_lead_emails_owner_without_leaking_address(make_graph, ctx, c
     email = notifier.sent[0]
     assert email["To"] == "owner@example.test"
     assert email["Reply-To"] == "ada@example.com"
-    assert "Ada Lovelace" in email["Subject"]
-    body = email.get_content()
+    assert email["Subject"] == "Voice card: Message from Ada Lovelace (Analytical Engines)"
+    body = plain_text(email)
     assert "A voice agent for inbound sales calls." in body
-    assert ctx.caller_number in body
+    assert "Call back: +1 (555) 555-0123" in body and "Spoke with: classifier agent" in body
+    assert "tel:+15555550123" in email.get_body(preferencelist=("html",)).get_content()
     tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
     assert "emailed to the owner." in tool_msg.content and "by email" in tool_msg.content
     assert "owner@example.test" not in str(result["messages"])
@@ -91,7 +93,7 @@ async def test_save_lead_emails_owner_without_leaking_address(make_graph, ctx, c
 
 async def test_save_lead_keeps_row_when_email_fails(make_graph, ctx, config, leads):
     class BrokenNotifier:
-        async def send_lead(self, lead, *, row_id):
+        async def send_lead(self, lead, *, row_id, details=None):
             raise ConnectionError("SMTP down")
 
     ctx.notifier = BrokenNotifier()
@@ -122,7 +124,37 @@ def test_lead_email_drops_bad_reply_to_and_newlines():
 
     assert msg["Reply-To"] is None
     assert "\n" not in msg["Subject"] and "Bcc" not in msg.keys()
-    assert "12:30 PM EST" in msg.get_content()
+    assert "12:30 PM EST" in plain_text(msg)
+    # A "none" field is left out, not printed. A misheard email address is still shown, with no link.
+    assert "Company:" not in plain_text(msg) and "Email: not an email" in plain_text(msg)
+    assert "mailto:" not in msg.get_body(preferencelist=("html",)).get_content()
+
+
+def test_lead_email_escapes_caller_speech_and_shows_the_call_details():
+    from ai_call_center.leads import Lead
+    from ai_call_center.notify import CallDetails, lead_email
+
+    lead = Lead(name="Bill Williams", email="", company="", need='Wants to hire the owner. <script>alert("x")</script>',
+                caller_number="+13305550123", call_control_id="c", created_at="2026-11-16T18:01:52+00:00")
+    details = CallDetails(notes="Asked the tour agent what the call costs.", agents=("classifier", "tour", "contact"), seconds=169,
+                          earlier_calls=7, line="mobile on Example Wireless", area="Akron, OH", registered_name="WILLIAMS BILL")
+    msg = lead_email(lead, row_id=6, sender="from@example.test", to="owner@example.test", details=details)
+
+    html = msg.get_body(preferencelist=("html",)).get_content()
+    assert "<script>" not in html and "&lt;script&gt;" in html
+    text = plain_text(msg)
+    assert text.startswith("Bill Williams left you a message on your voice business card.")
+    for line in (
+        "Call length so far: 2 min 49 s",
+        "Also on this call: Asked the tour agent what the call costs.",
+        "Earlier calls from this number: 7",
+        "Phone line: mobile on Example Wireless, Akron, OH",
+        "Name on the phone account: Williams Bill",
+    ):
+        assert line in text
+
+    transfer = lead_email(lead, row_id=6, sender="from@example.test", to="owner@example.test", details=CallDetails(kind="transfer"))
+    assert transfer["Subject"] == "Voice card: Bill Williams asked to speak to you"
 
 
 async def test_save_lead_does_not_claim_an_email_when_smtp_is_not_set_up(make_graph, ctx, config):
@@ -160,7 +192,7 @@ async def test_text_portfolio_link_refuses_when_texting_is_off_or_a_landline(mak
 async def test_owner_gets_a_text_before_a_transfer_when_texting_is_on(make_graph, ctx, config, telephony):
     ctx.texter, ctx.caller_name = telephony, "Steve Park"
     model = scripted(tool_call("request_owner_transfer", reason="Wants a quote."), "Connecting you now.")
-    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config=config, context=ctx)
+    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes, connect me.")], "active_agent": "contact"}, config=config, context=ctx)
     assert telephony.texts == [(OWNER_PHONE, "AI line: connecting Steve Park to you now. Reason: Wants a quote.")]
     assert len(telephony.transfers) == 1
 
@@ -215,12 +247,129 @@ async def test_email_on_file_is_reused_only_after_the_caller_confirms_who_they_a
     assert "steve@acme.test" not in str(result["messages"])
 
     # Confirmed: the address goes from the store to the new row, and never into a message.
-    ctx.identity_confirmed = True
+    ctx.identity_confirmed, ctx.returning_name = True, "Steve Park"
     model = scripted(tool_call("save_lead", name="Steve Park", need="A shared project.", email="on file"), "Done.")
     result = await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config={"configurable": {"thread_id": "t2"}}, context=ctx)
     assert leads.all()[-1].email == "steve@acme.test" and leads.all()[-1].company == "Acme Roofing"
     assert "steve@acme.test" not in str(result["messages"])
     assert "by email" in next(m for m in result["messages"] if isinstance(m, ToolMessage)).content
+
+
+async def test_details_on_file_are_not_given_to_another_person_on_the_same_number(make_graph, ctx, config, leads):
+    from ai_call_center.leads import Lead, now_iso
+
+    leads.save(Lead(name="Steve Park", email="steve@acme.test", company="Acme Roofing", need="Old.", caller_number=ctx.caller_number, call_control_id="old", created_at=now_iso()))
+
+    # Bill confirmed that he is Bill. Steve's address and company belong to Steve.
+    ctx.identity_confirmed, ctx.returning_name = True, "Bill"
+    model = scripted(tool_call("save_lead", name="Bill Williams", need="Wants to hire the owner.", email="on file"), "Done.")
+    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config=config, context=ctx)
+    assert (leads.all()[-1].email, leads.all()[-1].company) == ("", "")
+
+    # A caller who confirmed as Steve, and then gives another name, gets nothing from the file either.
+    ctx.returning_name = "Steve Park"
+    model = scripted(tool_call("save_lead", name="Dana Cole", need="A question.", email="on file"), "Done.")
+    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config={"configurable": {"thread_id": "t2"}}, context=ctx)
+    assert (leads.all()[-1].email, leads.all()[-1].company) == ("", "")
+
+
+# --- the agent hangs up after the caller says goodbye ---
+
+
+async def test_end_call_hangs_up_after_a_goodbye(make_graph, ctx, config, telephony):
+    model = scripted(tool_call("end_call"), "Thanks for calling. Goodbye.")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("No, that is all. Thank you.")], "active_agent": "contact"}, config=config, context=ctx)
+
+    assert telephony.hangups == [ctx.call_control_id] and result["call_ended"] is True
+    assert "goodbye line" in next(m for m in result["messages"] if isinstance(m, ToolMessage)).content
+
+
+async def test_end_call_does_not_hang_up_on_a_caller_who_is_still_talking(make_graph, ctx, config, telephony):
+    model = scripted(tool_call("end_call"), "Sure. What else can I help with?")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Thanks. And what does he charge?")], "active_agent": "profile"}, config=config, context=ctx)
+
+    assert telephony.hangups == [] and not result.get("call_ended")
+    assert next(m for m in result["messages"] if isinstance(m, ToolMessage)).content.startswith("The call was not ended")
+
+
+def test_only_the_callers_own_goodbye_ends_the_call():
+    from ai_call_center.graph.tools import said_goodbye
+
+    for said in ("Bye.", "Okay, goodbye!", "No, that's all.", "That is everything, thanks.", "No thanks.", "Nope.", "I'm good.", "Have a great day.", "I have to go.", "You can hang up now."):
+        assert said_goodbye([f"caller: {said}"]), said
+    for said in ("Thanks. What else can you do?", "No, this is Bill.", "Tell me about his background.", "Yes.", "I would like to leave a message."):
+        assert not said_goodbye([f"caller: {said}"]), said
+    # The agent's goodbye does not count, and neither does an old one from the caller.
+    assert not said_goodbye(["agent: Goodbye!", "caller: Wait, one more question."])
+    assert not said_goodbye(["caller: Bye.", "caller: Actually, wait.", "caller: How does this work?"])
+
+
+# --- a message is not a transfer ---
+
+
+async def test_a_caller_who_wants_to_leave_a_message_is_not_transferred(make_graph, ctx, config, leads, telephony):
+    model = scripted(
+        tool_call("request_owner_transfer", reason="Interested in hiring the owner.", caller_name="Bill Williams"),
+        "Sure. What should I tell him?",
+    )
+    result = await make_graph(model).ainvoke(
+        {"messages": [HumanMessage("I would like to leave a message with the owner.")], "active_agent": "contact"}, config=config, context=ctx
+    )
+
+    assert telephony.transfers == [] and not result.get("transfer_requested")
+    assert leads.all() == []  # a held-back transfer saves nothing and emails nothing
+    tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert tool_msg.content.startswith("No transfer was made") and "save_lead" in tool_msg.content
+
+
+async def test_the_answer_to_the_agents_question_allows_the_transfer(make_graph, ctx, config, telephony):
+    model = scripted(
+        tool_call("request_owner_transfer", reason="A project.", caller_name="Ada"),
+        "Do you want me to take a message, or connect you to him now?",
+        tool_call("request_owner_transfer", call_id="call_2", reason="A project.", caller_name="Ada"),
+        "Connecting you now.",
+    )
+    graph = make_graph(model)
+    await graph.ainvoke({"messages": [HumanMessage("I need to reach him about a project.")], "active_agent": "contact"}, config=config, context=ctx)
+    assert telephony.transfers == []
+    await graph.ainvoke({"messages": [HumanMessage("The second one, please.")]}, config=config, context=ctx)
+    assert len(telephony.transfers) == 1
+
+
+def test_only_the_callers_own_words_count_as_a_request_for_a_live_call():
+    from ai_call_center.graph.tools import asked_for_the_owner
+
+    for said in ("Can I speak to him?", "I'd like to talk to the owner.", "Please transfer me.", "Connect me.", "Put me through.", "Is there a real person?"):
+        assert asked_for_the_owner([f"caller: {said}"]), said
+    for said in ("I would like to leave a message with him.", "Can you email him?", "Have him call me back.", "I want to hire him.", "Yes."):
+        assert not asked_for_the_owner([f"caller: {said}"]), said
+    # What the agent said does not count, and neither does an old turn.
+    assert not asked_for_the_owner(["agent: I can connect you to the owner.", "caller: No, a message."])
+    assert not asked_for_the_owner(["caller: Can I talk to him?", "caller: a", "caller: b", "caller: c", "caller: Just a message."])
+
+
+def test_call_notes_that_repeat_the_message_are_left_out_of_the_email():
+    from ai_call_center.graph.tools import says_the_same
+
+    message = "Bill is interested in hiring Brad to build a voice agent for his farm equipment company starting in January."
+    assert says_the_same("Caller wants to discuss hiring Brad for a voice agent project.", message)
+    assert not says_the_same("Asked the tour agent how the system works and what a call costs.", message)
+    assert not says_the_same("", message)
+
+
+async def test_a_saved_message_does_not_lead_to_a_transfer(make_graph, ctx, config):
+    model = scripted(tool_call("save_lead", name="Bill Williams", need="Wants to hire the owner for a voice agent project."), "He has your message.")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Yes, that is right.")], "active_agent": "contact"}, config=config, context=ctx)
+    tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert "Do not call request_owner_transfer" in tool_msg.content and "offer once to connect" not in tool_msg.content
+
+
+def test_the_contact_agent_can_say_it_emails_only_when_email_is_set_up(specs):
+    from ai_call_center.agents.specs import Profile, build_specs
+
+    assert "say you can pass their message" in specs["contact"].instructions
+    on = build_specs(Profile(summary="x", full="x"), owner_name="Test Owner", emailing=True)
+    assert "Yes, you can email Test Owner for the caller" in on["contact"].instructions
 
 
 async def test_no_transfer_is_attempted_when_the_server_cannot_make_one(make_graph, ctx, config, telephony):
@@ -255,7 +404,7 @@ async def test_a_transfer_does_not_save_a_second_lead_or_a_nameless_one(make_gra
         tool_call("request_owner_transfer", call_id="call_2", reason="A demo.", caller_name="Ada"),
         "Connecting you now.",
     )
-    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config={"configurable": {"thread_id": "t2"}}, context=ctx)
+    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes. Now connect me.")], "active_agent": "contact"}, config={"configurable": {"thread_id": "t2"}}, context=ctx)
     assert len(leads.all()) == 1
 
 

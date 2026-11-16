@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 
 from ai_call_center.config import Settings, get_settings
 from ai_call_center.leads import Lead
-from ai_call_center.notify import SmtpNotifier, notifier_from_settings
+from ai_call_center.notify import CallDetails, SmtpNotifier, notifier_from_settings
 
 
 def missing_settings(settings: Settings) -> list[str]:
@@ -31,10 +31,24 @@ def sample_lead() -> Lead:
         name="Test Caller (uv run test-email)",
         email="test.caller@example.com",
         company="Example Company",
-        need="This is a test of the lead email. No caller left this message.",
+        need=(
+            "This is a test of the lead email. No caller left this message. "
+            "A real message says what the caller wants, with the details they gave on the call."
+        ),
         caller_number="+15555550100",
         call_control_id="test-email",
         created_at=datetime.now(UTC).isoformat(),
+    )
+
+
+def sample_details() -> CallDetails:
+    return CallDetails(
+        notes="Sample only: asked the tour agent how the system works and what a call costs.",
+        agents=("classifier", "tour", "contact"),
+        seconds=154,
+        earlier_calls=2,
+        line="mobile on Example Wireless",
+        area="Akron, OH",
     )
 
 
@@ -59,7 +73,7 @@ async def run(settings: Settings | None = None) -> int:
         return 1
     print(f"Sending a sample lead email through {notifier.host}:{notifier.port} ({'TLS' if notifier.port == 465 else 'STARTTLS'}), from {notifier.sender} ...")
     try:
-        await notifier.send_lead(sample_lead(), row_id=0)
+        await notifier.send_lead(sample_lead(), row_id=0, details=sample_details())
     except Exception as exc:  # noqa: BLE001 - every failure is reported the same way
         print(f"FAILED: {type(exc).__name__}: {exc}")
         print(explain(exc))

@@ -84,9 +84,16 @@ It creates a profile named `ai-business-card` (US destinations only, 2 calls at 
 and assigns it to the application. Without a profile the server logs `LIVE TRANSFER IS OFF` at start,
 and the contact agent takes a message and offers no transfer.
 
+A message is the normal case, and a transfer needs the caller's own words. "Leave a message with
+the owner", "email the owner", and "have the owner call me" are messages: the contact agent takes the
+message with `save_lead`, and a saved message never leads to a transfer. Before a transfer, the server
+reads the caller's last four turns in the transcript. If none of them asks to speak, talk, or be
+connected (`LIVE_REQUEST` in `graph/tools.py`), no transfer is made and nothing is saved. The agent then
+asks one question: a message, or a live connection. The answer decides.
+
 How a transfer runs (`telephony/transfers.py`):
 
-1. A caller who asks for the owner gives only a name. `request_owner_transfer` saves the name and the
+1. A caller who asks to speak to the owner gives only a name. `request_owner_transfer` saves the name and the
    reason as a lead, so a call that is not answered still leaves a record.
 2. A gate waits for the agent's goodbye line to finish. Then the media stream stops and the transfer
    starts. Telnyx refuses a transfer while streaming is on (error 90045).
@@ -94,6 +101,18 @@ How a transfer runs (`telephony/transfers.py`):
 4. If the owner does not pick up, or Telnyx refuses the transfer, the media stream starts again. The
    contact agent comes back with the whole conversation and says the owner will call back.
 5. Telnyx's built-in voice speaks only when the stream cannot start again.
+
+### The agent hangs up after a goodbye
+
+Every agent has the `end_call` tool. Without it, a call stayed open after the goodbye until the caller hung up.
+
+- The agent calls `end_call` when the caller says goodbye, or says they need nothing else.
+- The server checks the caller's own words first. It reads the caller's last two turns for a goodbye
+  ("bye", "that's all", "no thanks", "I'm good", "I have to go"). If none is there, the call stays open and
+  the agent is told to go on. The log line is `end_call held back`.
+- If the check passes, the agent says one goodbye line. The server hangs up when the agent stops speaking,
+  through the same gate that a transfer uses. If the agent says nothing, the server hangs up after 4 seconds.
+- The call log and the summary are written as for any other call.
 
 ### One loudness for every voice
 
@@ -125,13 +144,17 @@ Measured with caller audio at 8 kHz: the new agent's first audio came 0.63 to 0.
 
 - At hangup a text model (`SUMMARY_MODEL`) writes a summary of at most 40 words. It is stored with the
   caller's number in the `calls` table. No audio is stored.
-- On the next call from that number, the classifier gets one thing: the first name the earlier caller gave.
-  It asks only "Am I speaking with <name>?". A phone number can be shared, so nothing else is said yet.
+- On the next call from that number, the classifier gets one thing: the first name the most recent caller
+  gave. It asks only "Am I speaking with <name>?". A phone number can be shared, so nothing else is said yet.
+- The newest name wins, from a saved lead or from the call log. When Bill calls after Steve and says
+  "No, this is Bill", the next call asks for Bill.
 - After a yes, the classifier calls `confirm_returning_caller`. Only then do the company, the saved
   interest, and the last three summaries enter the conversation. After a no, they never do, and no agent
   will say who called before.
-- A confirmed caller does not give their details again: `save_lead` reuses the email address on file.
-  The email address and the phone number never enter a prompt or a tool result.
+- The history holds one person's calls and leads only. What Steve left on a number is not released to
+  Bill on the same number, and it is not reused for him.
+- A confirmed caller does not give their details again: `save_lead` reuses the email address that the
+  same person left. The email address and the phone number never enter a prompt or a tool result.
 - `CALLER_LOOKUP` asks Telnyx Number Lookup for a new caller's carrier, line type, area, and registered
   name. Telnyx bills each lookup; the result is cached, so one number is looked up once. The agents are
   told not to open the call with it and not to treat the name as confirmed.
@@ -193,7 +216,20 @@ the estimate is on the high side. Check `PRICES` before you quote a cost to anyo
 Measured on one simulated call of 129 s with three agents: median answer time 1.3 s, handoffs
 1.9 s on average, 11,030 tokens in and 2,551 out, about 4 cents.
 
-### Check the lead email
+### The lead email
+
+When a caller confirms a message, or asks to speak to the owner, the owner gets one email
+(`notify.py`). It has an HTML part and a plain-text part with the same content:
+
+- The subject says who and what: "Message from <name> (<company>)" or "<name> asked to speak to you".
+- The caller's message comes first, with the details the caller gave.
+- "Reach them": the number to call back as a link, and the email address and company if given.
+- "About the call": the time, the call length, the agents the caller spoke with, what else they asked,
+  the number of earlier calls, and the carrier, line type, and area from the number lookup.
+- A field with nothing in it is left out. Every value is escaped, because it comes from a caller's speech.
+
+A free Zoho Mail account with its own domain sends through `smtp.zoho.com`, port 465.
+`smtppro.zoho.com` is for paid plans and answers a free account with `Access Restricted`.
 
 After you fill in `OWNER_EMAIL` and the `SMTP_*` settings, send one sample lead email:
 
@@ -251,7 +287,7 @@ src/ai_call_center/
   agents/specs.py                one AgentSpec per agent: instructions, tools, handoffs, voice leg
   graph/state.py                 CallState (checkpointed) and CallContext (per call)
   graph/handoffs.py              transfer_to_<agent> tools
-  graph/tools.py                 save_lead, request_owner_transfer, confirm_returning_caller, get_call_stats, text_portfolio_link
+  graph/tools.py                 save_lead, request_owner_transfer, confirm_returning_caller, get_call_stats, text_portfolio_link, end_call
   graph/build.py                 the agent loop; middleware swaps prompt and tools per active agent
   leads.py                       SQLite store: leads, the call log, cached number lookups
   callers.py                     returning-caller memory: first-name question, history after a yes, summary at hangup

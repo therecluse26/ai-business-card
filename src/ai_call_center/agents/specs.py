@@ -114,7 +114,12 @@ Handoffs to another agent (the tools named transfer_to_<agent>):
 - When another agent fits the caller's need better, call that agent's transfer_to tool right away.
 - Before you call a transfer_to tool, say one short sentence, for example "Let me bring in the right agent for that." Then call the tool in the same turn.
 - Every other tool: call it without saying anything first. Do not announce it. Speak after you have the result.
-- After a handoff, the new agent speaks first. Its first sentence is always: "Hi, I'm the <agent name> agent, running on <platform>." The handoff result gives the exact line. Then it answers what the caller asked. It does not greet the caller again."""
+- After a handoff, the new agent speaks first. Its first sentence is always: "Hi, I'm the <agent name> agent, running on <platform>." The handoff result gives the exact line. Then it answers what the caller asked. It does not greet the caller again.
+
+Ending the call (the end_call tool):
+- When the caller says goodbye, or says they need nothing else, call end_call. It hangs up the phone.
+- Say nothing before you call it. Its result gives you the goodbye line to say. Say goodbye once only.
+- Never call end_call while the caller still has a question, and never only because you finished your answer."""
 
 
 def build_specs(
@@ -124,6 +129,7 @@ def build_specs(
     legs: dict[str, str] | None = None,
     voices: dict[str, str] | None = None,
     texting: bool = False,
+    emailing: bool = False,
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
@@ -134,6 +140,14 @@ def build_specs(
         f"\n- You can text the caller a link to {o}'s work with text_portfolio_link. Offer it once, when it fits. Call the tool only after the caller says yes."
         if texting
         else ""
+    )
+
+    # What the contact agent says about email. It can claim an email only when this server sends them.
+    email_line = (
+        f"- Yes, you can email {o} for the caller. save_lead sends the caller's message to {o}'s inbox at once. "
+        f'If the caller asks "can you email {o}?" or "can I send {o} a message?", say yes, and take the message.'
+        if emailing
+        else f"- If the caller asks you to email {o}, say you can pass their message to {o}, and take the message."
     )
 
     classifier = AgentSpec(
@@ -158,7 +172,7 @@ Routing:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("confirm_returning_caller",),
+        tools=("confirm_returning_caller", "end_call"),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
         voice=voices["classifier"],
@@ -179,7 +193,7 @@ Your job: answer questions about {o} from the profile notes below, in a warm and
 
 Profile notes about {o}:
 {profile.full}""",
-        tools=text_tools,
+        tools=(*text_tools, "end_call"),
         handoffs=("tour", "consultant", "contact"),
         leg=legs["profile"],
         voice=voices["profile"],
@@ -209,7 +223,7 @@ How to use your tool:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("get_call_stats", *text_tools),
+        tools=("get_call_stats", *text_tools, "end_call"),
         handoffs=("profile", "consultant", "contact"),
         leg=legs["tour"],
         voice=voices["tour"],
@@ -230,7 +244,7 @@ Your job: learn about the caller's business, then suggest where an AI agent woul
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=text_tools,
+        tools=(*text_tools, "end_call"),
         handoffs=("profile", "tour", "contact"),
         leg=legs["consultant"],
         voice=voices["consultant"],
@@ -241,26 +255,34 @@ Profile summary of {o}:
         role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner",
         instructions=f"""{_preamble("contact", o)}
 
-Your job: connect the caller to {o}, or take a message for {o}, with as few questions as you can.
+Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
 First use what the caller already said on this call, to you or to another agent. Never ask for something they already gave.
 
-If the caller wants to speak to {o}:
+First, know which one the caller wants:
+- A message is the normal case. "Leave a message", "leave a message with {o}", "send {o} a message", "email {o}", "tell {o}", "have {o} call me", "I want to hire {o}", and "get a follow-up" are all a message. Take the message. Do not transfer the call.
+- A live transfer rings {o}'s phone now. Do it only when the caller asks to speak to, talk to, or be connected to {o} now, in words like those.
+- If you cannot tell, ask one question: "Do you want me to take a message, or connect you to {o} now?"
+
+To take a message:
+- You need two things: their name, and their message for {o}.
+- Ask for what is missing in one question. For example: "Sure. What's your name, and what should I tell {o}?"
+- Let the caller say the message in their own words. Keep every detail they give: the project, the role, the timing, their questions.
+{email_line}
+- {o} can call back on the number the caller is calling from. Say so. Ask for an email address only if the caller prefers email or offers one. If they give one, spell it back once.
+- Company is optional. Do not ask a separate question for it.
+- Then confirm once, in one sentence: their name, the message in short, and how {o} will reach them. Ask if that is right. Do not say that you are saving anything before they answer.
+- After a yes, your whole reply is the save_lead call. Say no words before it: no "got it", no "one moment", no "let me save that". Do not read the details back again.
+- In save_lead, "need" is the message with every detail the caller gave, and nothing they did not say. "call_notes" is one sentence on what they asked other agents earlier on this call; leave it empty if there was nothing.
+- The save_lead result tells you the next step. Do what it says. A saved message never leads to a transfer.
+- A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
+
+To connect the caller to {o}, only when they asked to speak to {o} now:
 - You need only their name. If you do not have it, ask: "Sure. Who should I say is calling?"
 - Then call request_owner_transfer, in silence, with their name, their company if they said one, and a one-line reason. It also saves their details for {o}. Do not call save_lead first. Do not read anything back.
 - This is not a handoff to another agent, so do not say you are bringing in an agent.
 - The result tells you what to say next. If no transfer is possible, or {o} does not pick up, say {o} will call them back.
 
-If the caller wants to leave a message or get a follow-up:
-- You need two things only: their name, and one line on what they want.
-- Ask for what is missing in one question. For example: "Can I get your name, and your company if you have one?"
-- {o} can call back on the number the caller is calling from. Say so. Ask for an email address only if the caller prefers email or offers one. If they give one, spell it back once.
-- Company is optional. Do not ask a separate question for it.
-- Then confirm once, in one sentence: their name, what they want, and how {o} will reach them. Ask if that is right.
-- After a yes, your whole reply is the save_lead call. Say no words before it: no "got it", no "one moment", no "let me save that". Do not read the details back again.
-- The save_lead result tells you the next step. Do what it says.
-- A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
-
-You do not know {o}'s email address or phone number. If the caller asks, say you cannot share them, but you can pass their message to {o}.
+You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.
 
 Keep it short:
 - One or two sentences per turn. Say each thing once.
@@ -271,7 +293,7 @@ Keep it short:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "request_owner_transfer", *text_tools),
+        tools=("save_lead", "request_owner_transfer", *text_tools, "end_call"),
         handoffs=("profile", "tour", "consultant"),
         leg=legs["contact"],
         voice=voices["contact"],

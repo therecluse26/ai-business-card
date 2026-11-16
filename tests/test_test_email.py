@@ -4,7 +4,7 @@ import smtplib
 
 from ai_call_center import test_email
 from ai_call_center.config import Settings
-from ai_call_center.notify import SmtpNotifier
+from ai_call_center.notify import SmtpNotifier, plain_text
 
 
 def settings(**over) -> Settings:
@@ -37,7 +37,8 @@ async def test_the_sample_lead_goes_to_the_owner_and_says_it_is_a_test(monkeypat
     assert len(sent) == 1
     msg = sent[0]
     assert msg["To"] == "owner@example.com" and msg["From"] == "card@example.com"
-    assert "test of the lead email" in msg.get_content()
+    assert "test of the lead email" in plain_text(msg)
+    assert "Spoke with: classifier agent, tour agent, contact agent" in plain_text(msg)
     out = capsys.readouterr().out
     assert "Sent." in out and "owner@example.com" not in out  # the owner's address is not printed
 

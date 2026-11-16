@@ -10,7 +10,7 @@ def test_every_graph_tool_has_a_voice_schema(specs):
     assert set(schemas) == set(all_tools(specs))
     lead = schemas["save_lead"]
     assert lead.required == ["name", "need"]  # the owner can call back on the caller's number
-    assert set(lead.properties) == {"name", "need", "email", "company", "callback_number"}
+    assert set(lead.properties) == {"name", "need", "email", "company", "callback_number", "call_notes"}
     assert lead.properties["email"] == {"type": "string"}
     assert schemas["get_call_stats"].properties == {}
 
@@ -18,9 +18,10 @@ def test_every_graph_tool_has_a_voice_schema(specs):
 def test_agent_tool_sets_match_text_mode(specs):
     schemas = voice_tool_schemas(specs)
     names = {name: [t.name for t in tools_for_agent(spec, schemas).standard_tools] for name, spec in specs.items()}
-    assert names["classifier"] == ["confirm_returning_caller", "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact"]
+    assert names["classifier"] == ["confirm_returning_caller", "end_call", "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact"]
     assert names["contact"][:2] == ["save_lead", "request_owner_transfer"]
     assert "transfer_to_contact" not in names["contact"]
+    assert all("end_call" in tools for tools in names.values())  # any agent can hang up after a goodbye
 
 
 def test_each_agent_has_its_own_voice(specs):

@@ -2,9 +2,11 @@
 and the end-of-call summary that feeds the next call.
 
 A phone number can be shared, so a number is not a person. Before the caller says who they are,
-the greeting agent knows one thing: the first name the earlier caller gave. It asks "Am I speaking
-with <name>?" and nothing else. Only after a yes does `confirm_returning_caller` release the
-history: company, saved interest, and a one- or two-sentence summary of each recent call.
+the greeting agent knows one thing: the first name the most recent caller gave. It asks "Am I
+speaking with <name>?" and nothing else. Only after a yes does `confirm_returning_caller` release
+the history: company, saved interest, and a one- or two-sentence summary of each recent call.
+The history holds that person's calls only. Calls and leads that another name left on the same
+number stay out of it.
 What never reaches a prompt or a tool result: the email address and the phone number.
 """
 
@@ -14,14 +16,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
-from ai_call_center.leads import CallRecord, LeadStore, NumberInfo
+from ai_call_center.leads import CallRecord, LeadStore, NumberInfo, first_name_of
 
 log = logging.getLogger(__name__)
 
@@ -47,20 +49,51 @@ def recall(store: LeadStore, caller_number: str, *, exclude_call: str = "") -> C
     """What the store knows about this number. None for a first-time or hidden number."""
     if caller_number in UNKNOWN_NUMBERS:
         return None
-    lead = store.latest_lead_for(caller_number)
-    recent = store.calls_for(caller_number, exclude=exclude_call)
-    count = store.call_count_for(caller_number, exclude=exclude_call)
-    if lead is None and not recent:
+    # A lead saved on the call in progress is not history yet.
+    leads = [lead for lead in store.leads_for(caller_number) if lead.call_control_id != exclude_call]
+    calls = store.calls_for(caller_number, exclude=exclude_call, limit=HISTORY_ROWS)
+    if not leads and not calls:
         return None
-    name = lead.name if lead else next((c.caller_name for c in recent if c.caller_name), "")
+    # The newest name wins, from a lead or from the call log. So when Bill calls after Steve, the
+    # next greeting asks for Bill.
+    named = [(lead.created_at, lead.name) for lead in leads if lead.name.strip()]
+    named += [(call.started_at, call.caller_name) for call in calls if call.caller_name.strip()]
+    newest = max(named, key=_moment)[1] if named else ""
+    who = first_name_of(newest)
+    if not who:
+        # Nobody gave a name. There is nothing to confirm, so no history can be released.
+        return CallerMemory(name="", company="", need="", previous_calls=store.call_count_for(caller_number, exclude=exclude_call), recent=calls[:RECENT_CALLS])
+    # Only this person's rows. Another name on the same number is another person.
+    own_leads = [lead for lead in leads if first_name_of(lead.name) == who]
+    # A call with no name in the log still belongs to them when their lead came from that call.
+    lead_calls = {lead.call_control_id for lead in own_leads}
+    own_calls = [
+        call
+        for call in calls
+        if first_name_of(call.caller_name) == who or (not call.caller_name.strip() and call.call_control_id in lead_calls)
+    ]
+    lead = own_leads[0] if own_leads else None
     return CallerMemory(
-        name=name,
+        # A lead holds the name as the caller confirmed it; the call log holds what a model heard.
+        name=lead.name if lead else newest,
         company=lead.company if lead and lead.company.lower() != "none" else "",
         need=lead.need if lead else "",
-        previous_calls=count,
-        recent=recent,
-        contact_on_file=store.latest_lead_for(caller_number, with_email=True) is not None,
+        previous_calls=len(own_calls),
+        recent=own_calls[:RECENT_CALLS],
+        contact_on_file=any(lead.email for lead in own_leads),
     )
+
+
+RECENT_CALLS = 3  # call summaries that the history holds
+HISTORY_ROWS = 30  # calls read per number, to find one person's calls among them
+
+
+def _moment(pair: tuple[str, str]) -> datetime:
+    try:
+        when = datetime.fromisoformat(pair[0])
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
 def _when(iso_utc: str) -> str:
@@ -83,7 +116,7 @@ def greeting_note(memory: CallerMemory) -> str:
     return "\n".join(
         [
             "Returning caller note:",
-            f"- This phone number has called before. The earlier caller gave the first name {name}.",
+            f"- This phone number has called before. The most recent caller gave the first name {name}.",
             "- A phone number can be shared. You do not know yet who is on the line, and you know nothing else about earlier calls yet.",
             f'- This replaces the normal greeting. Say you are the AI assistant on this line. Then ask only: "Am I speaking with {name}?" Stop and wait for the answer.',
             '- Until the caller says yes, say nothing about an earlier call: no topic, no company, no date, and no "welcome back".',

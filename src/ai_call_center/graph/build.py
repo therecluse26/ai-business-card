@@ -22,13 +22,13 @@ from ai_call_center.agents.specs import AgentSpec, LEGS, build_specs, load_profi
 from ai_call_center.config import get_settings
 from ai_call_center.graph.handoffs import handoff_tool_name, make_handoff_tool
 from ai_call_center.graph.state import CallContext, CallState
-from ai_call_center.graph.tools import confirm_returning_caller, get_call_stats, request_owner_transfer, save_lead, text_portfolio_link
+from ai_call_center.graph.tools import confirm_returning_caller, end_call, get_call_stats, request_owner_transfer, save_lead, text_portfolio_link
 
 ENTRY_AGENT = "classifier"
 
 
 def all_tools(specs: dict[str, AgentSpec]) -> dict[str, BaseTool]:
-    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, text_portfolio_link, confirm_returning_caller]
+    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, text_portfolio_link, confirm_returning_caller, end_call]
     tools += [make_handoff_tool(spec) for spec in specs.values()]
     return {t.name: t for t in tools}
 
@@ -84,6 +84,7 @@ def default_specs() -> dict[str, AgentSpec]:
         load_profile(settings.profile_path),
         owner_name=settings.owner_name,
         texting=settings.sms_enabled and bool(settings.portfolio_url),
+        emailing=bool(settings.owner_email and settings.smtp_host),
     )
 
 

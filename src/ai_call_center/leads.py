@@ -125,14 +125,26 @@ class LeadStore:
         ).fetchone()
         return (row[0], Lead(*row[1:])) if row else None
 
-    def latest_lead_for(self, caller_number: str, *, with_email: bool = False) -> Lead | None:
-        """The newest lead from this number. With `with_email`, the newest one that holds an email address."""
-        row = self._conn.execute(
+    def leads_for(self, caller_number: str, *, limit: int = 20) -> list[Lead]:
+        """Leads from this number, newest first."""
+        rows = self._conn.execute(
             "SELECT name, email, company, need, caller_number, call_control_id, created_at FROM leads"
-            f" WHERE caller_number = ?{" AND email != ''" if with_email else ''} ORDER BY id DESC LIMIT 1",
-            (caller_number,),
-        ).fetchone()
-        return Lead(*row) if row else None
+            " WHERE caller_number = ? ORDER BY id DESC LIMIT ?",
+            (caller_number, limit),
+        ).fetchall()
+        return [Lead(*row) for row in rows]
+
+    def latest_lead_for(self, caller_number: str, *, with_email: bool = False, first_name: str = "") -> Lead | None:
+        """The newest lead from this number. With `with_email`, the newest one that holds an email address.
+        With `first_name`, the newest one from that person: a phone number can be shared."""
+        want = first_name_of(first_name)
+        for lead in self.leads_for(caller_number):
+            if with_email and not lead.email:
+                continue
+            if want and first_name_of(lead.name) != want:
+                continue
+            return lead
+        return None
 
     # --- calls ---
 
@@ -211,6 +223,12 @@ class LeadStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+def first_name_of(name: str) -> str:
+    """The first name, lower case, with no punctuation: the key that tells two people on one number apart."""
+    words = name.split()
+    return "".join(ch for ch in words[0].casefold() if ch.isalnum()) if words else ""
 
 
 def now_iso() -> str:

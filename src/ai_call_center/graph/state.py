@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Literal, NotRequired
@@ -10,7 +11,7 @@ from typing import Annotated, Literal, NotRequired
 from langchain.agents import AgentState
 
 from ai_call_center.guardrails import TransferHours
-from ai_call_center.leads import LeadStore
+from ai_call_center.leads import LeadStore, NumberInfo
 from ai_call_center.notify import Notifier
 from ai_call_center.telephony import Telephony, Texter
 
@@ -20,6 +21,7 @@ class CallState(AgentState):
     handoffs: NotRequired[Annotated[list[str], operator.add]]
     lead: NotRequired[dict[str, str] | None]
     transfer_requested: NotRequired[bool]
+    call_ended: NotRequired[bool]
 
 
 @dataclass
@@ -36,6 +38,12 @@ class CallContext:
     caller_greeting: str = ""  # for the greeting agent only: the first name to confirm, nothing else
     caller_history: str = ""  # notes from earlier calls; released by confirm_returning_caller after a yes
     identity_confirmed: bool = False  # the caller said they are the earlier caller
+    returning_name: str = ""  # the name the greeting asks about; after a yes, only this person's details are reused
+    earlier_calls: int = 0  # finished calls from this number before this one, for the lead email
+    number_info: NumberInfo | None = None  # the number lookup result, for the lead email
+    # "caller: ..." and "agent: ..." lines of the call so far. The transfer check reads the caller's own words from it.
+    transcript: Callable[[], list[str]] | None = None
+    transfer_question_asked: bool = False  # the agent was told to ask "connect now, or take a message?"
     caller_lookup: str = ""  # public carrier data for the number, for every agent's prompt
     caller_name: str = ""  # set when the caller confirms who they are or saves a lead; "" when unknown
     transfer_unavailable: str = ""  # why a live transfer cannot be made on this server; "" when it can

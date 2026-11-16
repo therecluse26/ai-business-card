@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 
 from langchain.tools import ToolRuntime, tool
@@ -11,8 +12,9 @@ from langgraph.types import Command
 
 from ai_call_center.agents.specs import LEGS
 from ai_call_center.graph.state import CallContext, CallState
-from ai_call_center.callers import UNKNOWN_NUMBERS
-from ai_call_center.leads import Lead, now_iso
+from ai_call_center.callers import UNKNOWN_NUMBERS, transcript_lines
+from ai_call_center.leads import Lead, first_name_of, now_iso
+from ai_call_center.notify import CallDetails
 
 log = logging.getLogger(__name__)
 
@@ -25,17 +27,57 @@ def release_caller_history(ctx: CallContext) -> str:
     if not ctx.caller_history:
         return "No earlier calls are on record for this caller. Treat them as a new caller."
     ctx.identity_confirmed = True
+    ctx.caller_name = ctx.returning_name or ctx.caller_name
     return ctx.caller_history
 
 
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9']+", text.casefold()) if len(w) > 3}
+
+
+def says_the_same(notes: str, message: str) -> bool:
+    """True when the notes only repeat the message: half of their words or more are in it."""
+    words = _words(notes)
+    return bool(words) and len(words & _words(message)) / len(words) >= 0.5
+
+
+def call_details(ctx: CallContext, *, kind: str, notes: str, visited: list[str], message: str = "") -> CallDetails:
+    """Facts about this call for the lead email. None of it goes back to a model."""
+    info = ctx.number_info
+    return CallDetails(
+        kind=kind,
+        # A voice model often fills the notes with the message again. The email says it once.
+        notes="" if says_the_same(notes, message) else notes.strip(),
+        agents=tuple(visited),
+        seconds=int((datetime.now(UTC) - ctx.started_at).total_seconds()),
+        earlier_calls=ctx.earlier_calls,
+        confirmed_returning=ctx.identity_confirmed,
+        line=" ".join(part for part in (info.line_type, f"on {info.carrier}" if info.carrier else "") if part) if info else "",
+        area=", ".join(part for part in (info.city.title(), info.state) if part) if info else "",
+        registered_name=info.caller_name if info else "",
+    )
+
+
 async def save_lead_record(
-    ctx: CallContext, *, name: str, need: str, email: str = "", company: str = "", callback_number: str = ""
+    ctx: CallContext,
+    *,
+    name: str,
+    need: str,
+    email: str = "",
+    company: str = "",
+    callback_number: str = "",
+    call_notes: str = "",
+    visited: list[str] | None = None,
+    kind: str = "message",
 ) -> tuple[str, dict[str, str]]:
     """Store the lead and email it. Returns the text for the model and the lead as saved.
 
     Only a name and a need are required: the owner can call back on the number the call came from.
     A caller who confirmed their identity can reuse the email address on file; the address goes
-    from the store to the new row and never enters a prompt or a tool result.
+    from the store to the new row and never enters a prompt or a tool result. Only details that
+    the same person left are reused: a phone number can be shared.
+
+    `call_notes`, `visited`, and `kind` go to the owner's email only. They are not stored.
 
     Shared by the LangGraph tool (text mode) and the voice tool handler (phone mode).
     """
@@ -44,14 +86,17 @@ async def save_lead_record(
     wants_file = email in ON_FILE
     if wants_file:
         email = ""
-    if ctx.identity_confirmed and ctx.caller_number not in UNKNOWN_NUMBERS:
-        prior = ctx.leads.latest_lead_for(ctx.caller_number, with_email=True) or ctx.leads.latest_lead_for(ctx.caller_number)
+    confirmed = first_name_of(ctx.returning_name)
+    if ctx.identity_confirmed and confirmed and ctx.caller_number not in UNKNOWN_NUMBERS and first_name_of(name) in ("", confirmed):
+        prior = ctx.leads.latest_lead_for(ctx.caller_number, with_email=True, first_name=confirmed) or ctx.leads.latest_lead_for(
+            ctx.caller_number, first_name=confirmed
+        )
         if prior is not None:
             email = email or prior.email
             company = company or prior.company
             name = name or prior.name
     if not name or not need:
-        return "Not saved: a name and one line on what the caller wants are both needed. Ask for what is missing, then call save_lead again.", {}
+        return "Not saved: the caller's name and their message are both needed. Ask for what is missing, then call save_lead again.", {}
     hidden = ctx.caller_number in UNKNOWN_NUMBERS
     if hidden and not email and not callback_number:
         return (
@@ -87,7 +132,7 @@ async def save_lead_record(
         reach += "; no email address was on file"
     # The result text never contains the owner's address, so the agent cannot repeat it.
     try:
-        await ctx.notifier.send_lead(lead, row_id=row_id)
+        await ctx.notifier.send_lead(lead, row_id=row_id, details=call_details(ctx, kind=kind, notes=call_notes, visited=visited or [], message=need))
         if not getattr(ctx.notifier, "delivers", True):
             # Email is not set up on this server. The agent must not claim an email was sent.
             result = f"Lead saved as record {row_id}. The owner will see it. Say the owner has their details; do not say an email was sent."
@@ -95,13 +140,12 @@ async def save_lead_record(
             result = f"Lead saved as record {row_id} and emailed to the owner."
         result += f" The owner can reach the caller {reach}."
         # The next step comes from here, not from the model's memory of its instructions.
-        if transfer_closed_message(ctx) is None:
-            result += (
-                " Next, in this same turn: tell them the owner has their details, and offer once to connect them to the owner now. "
-                "If they already asked to speak to the owner, call request_owner_transfer now instead."
-            )
-        else:
-            result += " A live transfer is not possible right now, so do not offer one. Tell the caller the owner has their details and will follow up."
+        # A caller who left a message did not ask for a live call, so no transfer follows from a save.
+        result += (
+            " Next, in this same turn: tell the caller, in one sentence, that the owner has their message and will follow up. Use the owner's name. "
+            "Then ask if there is anything else. If they say no or say goodbye, call end_call. "
+            "Do not call request_owner_transfer, and do not offer a transfer: the caller chose to leave a message."
+        )
     except Exception:
         log.exception("Lead %s saved, but the owner email failed", row_id)
         result = (
@@ -138,17 +182,29 @@ async def save_lead(
     email: str = "",
     company: str = "",
     callback_number: str = "",
+    call_notes: str = "",
 ) -> Command:
-    """Save the caller's details as a lead for the owner. Call this once, after the caller confirms your one-sentence read-back.
+    """Send the caller's message to the owner: it is stored, and emailed to the owner's inbox at once. Use this when the caller wants to leave a message, send or email the owner something, or get a follow-up. Call it once, after the caller confirms your one-sentence read-back.
 
     Args:
         name: The caller's name.
-        need: One or two sentences on what the caller wants.
+        need: The caller's message for the owner, with every detail the caller gave, such as the project, the role, the timing, and their questions. Use only what the caller said: add nothing, guess nothing, and do not list what they left out. One sentence is right when the caller said little.
         email: The caller's email address, only if they gave one. "on file" reuses the address from an earlier call. Leave empty otherwise.
         company: The caller's company, only if they gave one. Leave empty otherwise.
         callback_number: A phone number the caller asked to be called on, only if it differs from the number they are calling from.
+        call_notes: One sentence for the owner on what the caller asked other agents earlier on this call, for example "Asked the tour agent how the system works and what a call costs." Never repeat the message here. Leave empty if the caller only left the message.
     """
-    result, lead = await save_lead_record(runtime.context, name=name, need=need, email=email, company=company, callback_number=callback_number)
+    state = runtime.state
+    result, lead = await save_lead_record(
+        runtime.context,
+        name=name,
+        need=need,
+        email=email,
+        company=company,
+        callback_number=callback_number,
+        call_notes=call_notes,
+        visited=["classifier", *state.get("handoffs", [])],
+    )
     update: dict = {"messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)]}
     if lead:
         update["lead"] = lead
@@ -194,15 +250,52 @@ async def text_owner_before_transfer(ctx: CallContext, reason: str) -> None:
         log.exception("pre-transfer text to the owner failed")
 
 
-async def note_caller_before_transfer(ctx: CallContext, *, lead_saved: bool, caller_name: str, company: str, reason: str) -> dict[str, str]:
+async def note_caller_before_transfer(
+    ctx: CallContext, *, lead_saved: bool, caller_name: str, company: str, reason: str, visited: list[str] | None = None
+) -> dict[str, str]:
     """Before a live transfer, make sure the owner has a record of who called, so a call that is
     not answered still leaves a lead. Returns the lead saved now, or {} when one exists already
     or no name is known."""
     name = caller_name.strip() or ctx.caller_name
     if lead_saved or not name:
         return {}
-    _result, lead = await save_lead_record(ctx, name=name, need=reason.strip() or "Asked to speak to the owner.", company=company)
+    _result, lead = await save_lead_record(
+        ctx, name=name, need=reason.strip() or "Asked to speak to the owner.", company=company, visited=visited, kind="transfer"
+    )
     return lead
+
+
+# Words a caller uses to ask for a live call. "Leave a message", "email him", and "have him call
+# me" hold none of them.
+LIVE_REQUEST = re.compile(
+    r"\b(speak|spoke|talk|transfer|connect|patch)\w*|\bput me through\b|\bon the (phone|line)\b|\b(real|live) person\b|\bhuman\b",
+    flags=re.IGNORECASE,
+)
+CALLER_TURNS_CHECKED = 4
+
+
+def asked_for_the_owner(lines: list[str]) -> bool:
+    """True when one of the caller's last turns asks, in the caller's own words, for a live call."""
+    said = [line for line in lines if line.startswith("caller:")][-CALLER_TURNS_CHECKED:]
+    return any(LIVE_REQUEST.search(line.removeprefix("caller:")) for line in said)
+
+
+def transfer_question(ctx: CallContext, lines: list[str]) -> str | None:
+    """None when the transfer can go ahead. Otherwise the text for the model: no transfer yet, ask first.
+
+    A transfer rings the owner's phone, so the model's reading of the caller is not enough. The
+    caller's own words must ask for a live call. When they do not, the agent asks one question.
+    The answer to that question decides, so the check passes on the next request.
+    """
+    if ctx.transfer_question_asked or asked_for_the_owner(lines):
+        return None
+    ctx.transfer_question_asked = True
+    return (
+        "No transfer was made, and nothing was saved. The caller did not ask, in their own words, to speak to the owner now. "
+        "A caller who wants to leave a message, send an email, or get a call back wants a message: take it and call save_lead. "
+        "If you are not sure which one they want, ask one question: do they want to leave a message, or be connected to the owner's phone now? Use the owner's name. "
+        "Call request_owner_transfer again only if they choose the live connection."
+    )
 
 
 def transfer_closed_message(ctx: CallContext, now: datetime | None = None) -> str | None:
@@ -221,6 +314,49 @@ def transfer_closed_message(ctx: CallContext, now: datetime | None = None) -> st
     )
 
 
+# What a caller says when the call is over for them. Checked on the caller's own words, because a
+# hang-up in the middle of a conversation is worse than a call that stays open.
+GOODBYE = re.compile(
+    r"\b(bye|goodbye|good night|nothing else|take care|see you|all set|hang up|gotta go)\b"
+    r"|\b(that's|that is|that'll be|that will be) (all|it|everything)\b"
+    r"|\bno,? (thanks|thank you)\b"
+    r"|\bhave a (good|great|nice)\b"
+    r"|\btalk (to you )?(later|soon)\b"
+    r"|\b(i'm|i am|we're|we are) (done|good|fine|finished)\b"
+    r"|\b(have|got|need) to go\b"
+    r"|\bend (the|this) call\b",
+    flags=re.IGNORECASE,
+)
+ONLY_NO = re.compile(r"^\W*(no|nope|nah)\W*$", flags=re.IGNORECASE)  # the answer to "anything else?"
+GOODBYE_TURNS_CHECKED = 2
+
+
+def said_goodbye(lines: list[str]) -> bool:
+    """True when one of the caller's last two turns says the call is over for them."""
+    said = [line.removeprefix("caller:") for line in lines if line.startswith("caller:")][-GOODBYE_TURNS_CHECKED:]
+    return any(GOODBYE.search(text) or ONLY_NO.match(text) for text in said)
+
+
+CALL_NOT_ENDED = (
+    "The call was not ended: the caller did not say goodbye, and did not say they are done. Do not say goodbye. "
+    "Answer what they last said, or ask if there is anything else you can help with."
+)
+SAY_GOODBYE = (
+    'Say one short goodbye line now, for example: "Thanks for calling. Goodbye." Say nothing after it. '
+    "The call ends when you stop speaking."
+)
+
+
+@tool
+async def end_call(runtime: ToolRuntime[CallContext, CallState]) -> Command:
+    """Hang up the phone call. Call this when the caller says goodbye, or says they need nothing else. Say nothing before you call it: the result gives you the goodbye line to say. Never call it while the caller still has a question."""
+    ctx = runtime.context
+    if not said_goodbye(transcript_lines(runtime.state.get("messages", []))):
+        return Command(update={"messages": [ToolMessage(content=CALL_NOT_ENDED, tool_call_id=runtime.tool_call_id)]})
+    await ctx.telephony.hangup(ctx.call_control_id)
+    return Command(update={"call_ended": True, "messages": [ToolMessage(content=SAY_GOODBYE, tool_call_id=runtime.tool_call_id)]})
+
+
 @tool
 async def text_portfolio_link(runtime: ToolRuntime[CallContext, CallState]) -> str:
     """Text the caller a link to the owner's work, to the number they are calling from. Call this only after the caller says yes to a text."""
@@ -231,7 +367,7 @@ async def text_portfolio_link(runtime: ToolRuntime[CallContext, CallState]) -> s
 
 @tool
 async def request_owner_transfer(reason: str, runtime: ToolRuntime[CallContext, CallState], caller_name: str = "", company: str = "") -> Command:
-    """Transfer this live call to the owner's phone. Call this when the caller wants to speak to the owner. It also saves the caller's name and reason for the owner, so save_lead is not needed first. Say nothing before you call it: the result gives you the one line to say.
+    """Ring the owner's phone and move this live call to it. Call this only when the caller asked, in their own words, to speak to, talk to, or be connected to the owner now. Never call it for a caller who wants to leave a message, send or email the owner something, or get a call back: that is save_lead. It also saves the caller's name and reason for the owner, so save_lead is not needed first. Say nothing before you call it: the result gives you the one line to say.
 
     Args:
         reason: One line on why the caller wants to speak to the owner.
@@ -240,7 +376,13 @@ async def request_owner_transfer(reason: str, runtime: ToolRuntime[CallContext, 
     """
     ctx = runtime.context
     update: dict = {}
-    if lead := await note_caller_before_transfer(ctx, lead_saved=bool(runtime.state.get("lead")), caller_name=caller_name, company=company, reason=reason):
+    state = runtime.state
+    if question := transfer_question(ctx, transcript_lines(state.get("messages", []))):
+        return Command(update={"messages": [ToolMessage(content=question, tool_call_id=runtime.tool_call_id)]})
+    visited = ["classifier", *state.get("handoffs", [])]
+    if lead := await note_caller_before_transfer(
+        ctx, lead_saved=bool(state.get("lead")), caller_name=caller_name, company=company, reason=reason, visited=visited
+    ):
         update["lead"] = lead
     if closed := transfer_closed_message(ctx):
         return Command(update={**update, "messages": [ToolMessage(content=closed, tool_call_id=runtime.tool_call_id)]})

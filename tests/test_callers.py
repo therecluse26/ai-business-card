@@ -41,6 +41,40 @@ def test_name_comes_from_the_call_log_when_no_lead_exists(leads):
     assert recall(leads, NUMBER).name == "Dana"
 
 
+def test_the_newest_name_wins_and_the_history_holds_only_that_person(leads):
+    # Steve left a lead with an email address. Later, Bill called from the same number and left no lead.
+    _lead(leads, created_at="2026-11-16T03:10:45+00:00")
+    leads.start_call("call-1", NUMBER)
+    leads.finish_call("call-1", agents=["classifier", "contact"], summary="Steve asked about a shared project.", caller_name="Steve")
+    leads._conn.execute("UPDATE calls SET started_at = '2026-11-16T03:08:30+00:00' WHERE call_control_id = 'call-1'")
+    leads.start_call("call-2", NUMBER)
+    leads.finish_call("call-2", agents=["classifier", "profile"], summary="Bill asked about the owner.", caller_name="Bill")
+    leads._conn.execute("UPDATE calls SET started_at = '2026-11-16T14:32:29+00:00' WHERE call_control_id = 'call-2'")
+
+    memory = recall(leads, NUMBER)
+
+    assert memory.first_name == "Bill"  # the next greeting asks for Bill, not for Steve
+    assert 'Am I speaking with Bill?' in greeting_note(memory)
+    assert [c.summary for c in memory.recent] == ["Bill asked about the owner."] and memory.previous_calls == 1
+    assert (memory.company, memory.need, memory.contact_on_file) == ("", "", False)
+    text = history_text(memory)
+    assert "Steve" not in text and "Acme" not in text and "on file" not in text
+
+    # Steve calls again: his name is the newest, and his own history comes back.
+    leads.start_call("call-3", NUMBER)
+    leads.finish_call("call-3", agents=["classifier"], summary="Steve asked for an update.", caller_name="Steve Park")
+    leads._conn.execute("UPDATE calls SET started_at = '2026-11-16T15:00:00+00:00' WHERE call_control_id = 'call-3'")
+    memory = recall(leads, NUMBER)
+    assert memory.name == "Steve Park" and memory.company == "Acme Roofing" and memory.contact_on_file
+    assert [c.call_control_id for c in memory.recent] == ["call-3", "call-1"]
+
+
+def test_a_lead_from_the_call_in_progress_is_not_history(leads):
+    leads.start_call("call-2", NUMBER)
+    _lead(leads, name="Bill Williams", call_control_id="call-2")
+    assert recall(leads, NUMBER, exclude_call="call-2") is None
+
+
 def test_greeting_note_holds_the_first_name_and_nothing_else(leads):
     _lead(leads)
     leads.start_call("call-1", NUMBER)

@@ -43,19 +43,24 @@ from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPI
 from pipecat.workers.runner import WorkerRunner
 
 from ai_call_center.agents.specs import LEG_PLATFORMS, LEGS, VOICE_LEVELS_DBFS, AgentSpec
-from ai_call_center.callers import UNKNOWN_NUMBERS, greeting_note, history_text, lookup_text, recall, summarize_call
+from ai_call_center.callers import UNKNOWN_NUMBERS, greeting_note, history_text, lookup_text, recall, summarize_call, transcript_lines
 from ai_call_center.config import Settings
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.graph.state import CallContext
 from ai_call_center.graph.tools import (
+    CALL_NOT_ENDED,
+    SAY_GOODBYE,
+    asked_for_the_owner,
     describe_call,
     note_caller_before_transfer,
     release_caller_history,
+    said_goodbye,
     save_lead_record,
     text_owner_before_transfer,
     text_portfolio_link_to_caller,
     transfer_closed_message,
+    transfer_question,
 )
 from ai_call_center.guardrails import HIDDEN_NUMBER, TransferHours
 from ai_call_center.leads import LeadStore
@@ -84,6 +89,7 @@ log = logging.getLogger(__name__)
 TELNYX_SAMPLE_RATE = 8000
 TRANSFER_FALLBACK_SECS = 4.0  # transfer anyway if the agent never says its goodbye line
 SWITCH_TIMEOUT_SECS = 2.0
+TRANSCRIPT_WAIT_SECS = 0.8  # how long a transfer request waits for the transcript of the caller's last turn
 ANSWER_DEADLINE_SECS = 8.0  # an agent asked to speak (greeting, handoff) that stays silent this long has failed
 RECOVERIES_PER_SERVICE = 2
 RELAPSE_SECS = 10.0  # an error this soon after a recovery means the recovery did not help
@@ -173,12 +179,14 @@ class VoiceCallState:
     handoffs: list[str] = field(default_factory=list)
     lead_saved: bool = False
     transfer_requested: bool = False
-    end_reason: str = ""  # why the session ended: "caller", "transfer", "limit", "failover"; "" while it runs
+    end_reason: str = ""  # why the session ended: "caller", "agent", "transfer", "limit", "failover"; "" while it runs
+    ending: bool = False  # end_call was accepted; the hang-up waits for the goodbye line
 
 
 class TransferGate(FrameProcessor):
     """Sits after the transport output. When armed, it transfers the call as soon as the bot
-    stops speaking, so the caller hears the whole goodbye line first."""
+    stops speaking, so the caller hears the whole goodbye line first. `arm(action)` runs another
+    action at that moment instead: the hang-up of `end_call`."""
 
     def __init__(self, on_transfer) -> None:
         super().__init__()
@@ -188,10 +196,16 @@ class TransferGate(FrameProcessor):
         self._speaking = False
         self.last_started = 0.0  # when the bot last began to speak (time.monotonic)
 
-    def arm(self) -> None:
+    @property
+    def speaking(self) -> bool:
+        return self._speaking
+
+    def arm(self, action=None) -> None:
         if self._armed:
             return
         self._armed = True
+        if action is not None:
+            self._on_transfer = action
         self.create_task(self._fire_after(TRANSFER_FALLBACK_SECS))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
@@ -380,6 +394,9 @@ class CallSession:
             caller_greeting=greeting,
             caller_history=history,
             identity_confirmed=bool(resume and resume.identity_confirmed),
+            returning_name=memory.name if memory else "",
+            earlier_calls=store.call_count_for(caller_number, exclude=self.call_control_id) if caller_number not in UNKNOWN_NUMBERS else 0,
+            number_info=info,
             caller_lookup=lookup_block,
             caller_name=resume.caller_name if resume else "",
             transfer_unavailable=transfers.unavailable,
@@ -419,6 +436,7 @@ class CallSession:
         else:
             first_messages = [{"role": "developer", "content": connect_message(bool(greeting))}]
         context = LLMContext(messages=first_messages, tools=tools_for_agent(entry, schemas))
+        ctx.transcript = lambda: transcript_lines(context.messages)
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
         # The first service in the list is active at start.
         switcher = LLMSwitcher(llms=[legs[entry_agent].service, *(vl.service for name, vl in legs.items() if name != entry_agent)])
@@ -557,8 +575,8 @@ class CallSession:
 
         # --- tool handlers: the voice model requests, this code acts ---
         async def on_save_lead(params: FunctionCallParams) -> None:
-            args = {k: str(params.arguments.get(k) or "") for k in ("name", "need", "email", "company", "callback_number")}
-            result, lead = await save_lead_record(ctx, **args)
+            args = {k: str(params.arguments.get(k) or "") for k in ("name", "need", "email", "company", "callback_number", "call_notes")}
+            result, lead = await save_lead_record(ctx, **args, visited=[ENTRY_AGENT, *state.handoffs])
             state.lead_saved = state.lead_saved or bool(lead)
             await params.result_callback(result)
 
@@ -567,7 +585,6 @@ class CallSession:
             # enter the conversation; from here every agent can see them in the shared context.
             if ctx.caller_history:
                 log.info("call %s: caller confirmed their identity; history released", self.call_control_id)
-                ctx.caller_name = memory.name if memory else ""
             await params.result_callback(release_caller_history(ctx))
 
         async def on_call_stats(params: FunctionCallParams) -> None:
@@ -587,9 +604,24 @@ class CallSession:
 
         async def on_transfer(params: FunctionCallParams) -> None:
             reason = str(params.arguments.get("reason") or "")
+            # A transfer rings the owner's phone, so the caller's own words must ask for it.
+            # The provider's transcript of the last turn can arrive after the tool call: wait for it briefly.
+            waited = 0.0
+            while not ctx.transfer_question_asked and not asked_for_the_owner(ctx.transcript()) and waited < TRANSCRIPT_WAIT_SECS:
+                await asyncio.sleep(0.1)
+                waited += 0.1
+            if question := transfer_question(ctx, ctx.transcript()):
+                log.info("call %s: transfer held back; the caller did not ask for a live call", self.call_control_id)
+                await params.result_callback(question)
+                return
             # The owner gets a record of who called, even if the transfer is refused or not answered.
             if await note_caller_before_transfer(
-                ctx, lead_saved=state.lead_saved, caller_name=str(params.arguments.get("caller_name") or ""), company=str(params.arguments.get("company") or ""), reason=reason
+                ctx,
+                lead_saved=state.lead_saved,
+                caller_name=str(params.arguments.get("caller_name") or ""),
+                company=str(params.arguments.get("company") or ""),
+                reason=reason,
+                visited=[ENTRY_AGENT, *state.handoffs],
             ):
                 state.lead_saved = True
             if closed := transfer_closed_message(ctx):
@@ -609,6 +641,38 @@ class CallSession:
                 f"The call moves to {owner}'s phone the moment you stop speaking."
             )
 
+        async def do_hangup() -> None:
+            log.info("call %s: the agent ended the call after the caller said goodbye", self.call_control_id)
+            state.end_reason = "agent"
+            try:
+                await self.telephony.hangup(self.call_control_id)
+            except Exception:
+                log.exception("call %s: the hang-up for end_call failed", self.call_control_id)
+            await runner.cancel()
+
+        async def on_end_call(params: FunctionCallParams) -> None:
+            if state.ending or state.transfer_requested:
+                await params.result_callback("The call is ending already. Say nothing more.", properties=FunctionCallResultProperties(run_llm=False))
+                return
+            # The caller's own words must end the call. The transcript of the last turn can arrive
+            # after the tool call: wait for it briefly.
+            waited = 0.0
+            while not said_goodbye(ctx.transcript()) and waited < TRANSCRIPT_WAIT_SECS:
+                await asyncio.sleep(0.1)
+                waited += 0.1
+            if not said_goodbye(ctx.transcript()):
+                log.info("call %s: end_call held back; the caller did not say goodbye", self.call_control_id)
+                await params.result_callback(CALL_NOT_ENDED)
+                return
+            state.ending = True
+            if gate.speaking:
+                # The agent said its goodbye before it called the tool. Do not ask for a second one.
+                gate.arm(do_hangup)
+                await params.result_callback("The call ends when you stop speaking.", properties=FunctionCallResultProperties(run_llm=False))
+                return
+            gate.arm(do_hangup)
+            await params.result_callback(SAY_GOODBYE)
+
         def make_handoff(target: str):
             async def on_handoff(params: FunctionCallParams) -> None:
                 await self._handoff(
@@ -623,6 +687,7 @@ class CallSession:
             vl.service.register_function("get_call_stats", on_call_stats)
             vl.service.register_function("request_owner_transfer", on_transfer)
             vl.service.register_function("text_portfolio_link", on_text_link)
+            vl.service.register_function("end_call", on_end_call)
             for name in self.specs:
                 vl.service.register_function(handoff_tool_name(name), make_handoff(name))
 

@@ -87,6 +87,8 @@ async def run(caller_number: str = "+10000000000") -> None:
         mode="text",
         caller_greeting=greeting_note(memory) if memory else "",
         caller_history=history_text(memory) if memory and memory.first_name else "",
+        returning_name=memory.name if memory else "",
+        earlier_calls=store.call_count_for(caller_number, exclude=call_id),
         transfer_hours=TransferHours.parse(settings.transfer_hours, settings.transfer_days),
     )
     config = {"configurable": {"thread_id": ctx.call_control_id}}
@@ -120,6 +122,9 @@ async def run(caller_number: str = "+10000000000") -> None:
         active = result.get("active_agent", "classifier")
         if result.get("transfer_requested"):
             print(f"\n[call transferred to {telephony.transfers[-1].to}; hanging up]")
+            break
+        if result.get("call_ended"):
+            print("\n[the agent ended the call]")
             break
         try:
             text = read_caller_input(f"\ncaller ({active})> ")
