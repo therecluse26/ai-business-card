@@ -1,0 +1,3 @@
+# NixOS: prebuilt wheels (numpy, onnxruntime) need a Python that runs through nix-ld.
+# The uv-managed interpreter does; the system Python from /nix/store does not.
+python-preference = "only-managed"

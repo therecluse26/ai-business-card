@@ -17,6 +17,14 @@ LEGS: dict[str, str] = {
     "pipeline_claude": "a local speech-to-text model, Claude through LangGraph, and local Kokoro text-to-speech",
 }
 
+# Short platform names, for the introduction line an agent says after a handoff.
+LEG_PLATFORMS: dict[str, str] = {
+    "openai_realtime": "OpenAI",
+    "gemini_live": "Google Gemini",
+    "nova_sonic": "Amazon Nova",
+    "pipeline_claude": "Claude",
+}
+
 DEFAULT_LEGS: dict[str, str] = {
     "classifier": "openai_realtime",
     "profile": "gemini_live",
@@ -26,6 +34,17 @@ DEFAULT_LEGS: dict[str, str] = {
 }
 
 SPECIALISTS: tuple[str, ...] = ("profile", "tour", "consultant", "contact")
+
+# One voice per agent, so a caller hears the handoff. Genders alternate along the common handoff
+# paths: the classifier (female) hands to male voices; contact (female) is reached from male ones.
+# These are OpenAI Realtime voice names; a Gemini leg will need its own map.
+DEFAULT_VOICES: dict[str, str] = {
+    "classifier": "marin",  # female
+    "profile": "cedar",  # male
+    "tour": "ash",  # male
+    "consultant": "ballad",  # male
+    "contact": "coral",  # female
+}
 
 
 @dataclass(frozen=True)
@@ -68,12 +87,15 @@ Facts about {owner}:
 
 Handoffs:
 - When another agent fits the caller's need better, call that agent's transfer tool right away.
-- Before you call a transfer tool, say one short sentence, for example "Let me bring in the right agent for that."
-- After a handoff, the new agent continues the conversation. It introduces itself in one sentence."""
+- Before you call a transfer tool, say one short sentence, for example "Let me bring in the right agent for that." Then call the tool in the same turn.
+- After a handoff, the new agent speaks first. Its first sentence is always: "Hi, I'm the <agent name> agent, running on <platform>." The handoff result gives the exact line. Then it answers what the caller asked. It does not greet the caller again."""
 
 
-def build_specs(profile: Profile, *, owner_name: str, legs: dict[str, str] | None = None) -> dict[str, AgentSpec]:
+def build_specs(
+    profile: Profile, *, owner_name: str, legs: dict[str, str] | None = None, voices: dict[str, str] | None = None
+) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
+    voices = {**DEFAULT_VOICES, **(voices or {})}
     o = owner_name
 
     classifier = AgentSpec(
@@ -99,6 +121,7 @@ Profile summary of {o}:
         tools=(),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
+        voice=voices["classifier"],
     )
 
     profile_agent = AgentSpec(
@@ -119,6 +142,7 @@ Profile notes about {o}:
         tools=(),
         handoffs=("tour", "consultant", "contact"),
         leg=legs["profile"],
+        voice=voices["profile"],
     )
 
     tour = AgentSpec(
@@ -147,6 +171,7 @@ Profile summary of {o}:
         tools=("get_call_stats",),
         handoffs=("profile", "consultant", "contact"),
         leg=legs["tour"],
+        voice=voices["tour"],
     )
 
     consultant = AgentSpec(
@@ -167,6 +192,7 @@ Profile summary of {o}:
         tools=(),
         handoffs=("profile", "tour", "contact"),
         leg=legs["consultant"],
+        voice=voices["consultant"],
     )
 
     contact = AgentSpec(
@@ -182,7 +208,7 @@ Collect, one at a time: name, email address, company, and what they are interest
 - Only after the caller confirms, call save_lead with the four details. It saves them and emails them to {o}.
 - After save_lead, tell the caller that {o} now has their details by email and will follow up.
 - You do not know {o}'s email address. If the caller asks for it, say you cannot share it, but you can pass their message to {o}.
-- Then offer to transfer the call to {o} now. If the caller says yes, call request_owner_transfer with a one-line reason.
+- Then offer to transfer the call to {o} now. If the caller says yes, call request_owner_transfer with a one-line reason. The tool result tells you what to say next.
 - If the caller says no, or {o} does not answer, say {o} will follow up, and thank them.
 - If the caller does not want to share details, respect that. Offer the other agents instead.
 
@@ -191,6 +217,7 @@ Profile summary of {o}:
         tools=("save_lead", "request_owner_transfer"),
         handoffs=("profile", "tour", "consultant"),
         leg=legs["contact"],
+        voice=voices["contact"],
     )
 
     return {s.name: s for s in (classifier, profile_agent, tour, consultant, contact)}
