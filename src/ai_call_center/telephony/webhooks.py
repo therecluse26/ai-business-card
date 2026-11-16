@@ -8,7 +8,10 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Request, Response
 
 from ai_call_center.config import Settings, get_settings
-from ai_call_center.telephony.telnyx_client import TelnyxTelephony
+from ai_call_center.guardrails import CallGuard
+from ai_call_center.telephony.lookup import CallerLookup
+from ai_call_center.telephony.telnyx_client import TelnyxTelephony, decode_state
+from ai_call_center.telephony.transfers import TransferManager
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,17 +23,42 @@ def verify_and_parse(telephony: TelnyxTelephony, raw: str, headers) -> dict:
     return json.loads(raw)["data"]
 
 
-async def handle_event(data: dict, settings: Settings, telephony: TelnyxTelephony) -> None:
+async def handle_event(
+    data: dict,
+    settings: Settings,
+    telephony: TelnyxTelephony,
+    lookups: CallerLookup | None = None,
+    guard: CallGuard | None = None,
+    transfers: TransferManager | None = None,
+) -> None:
     event_type = data.get("event_type")
     payload = data.get("payload") or {}
     ccid = payload.get("call_control_id")
+    state = decode_state(payload.get("client_state"))
     log.info("telnyx event %s call=%s state=%s", event_type, ccid, payload.get("state"))
+    if transfers is not None:
+        await transfers.on_event(event_type, ccid, state)  # the owner's leg of a live transfer: answered, or not
 
     if event_type == "call.initiated" and payload.get("direction") == "incoming":
-        log.info("incoming call from %s to %s", payload.get("from"), payload.get("to"))
+        caller = payload.get("from") or ""
+        log.info("incoming call from %s to %s", caller, payload.get("to"))
+        admission = guard.admit(caller) if guard is not None else None
+        if admission is not None and not admission.allowed:
+            # Turned away before any AI session opens: a short spoken reason, then a hang-up.
+            log.warning("call %s from %s turned away: %s", ccid, caller, admission.reason)
+            await telephony.answer_and_say(ccid, admission.message)
+            return
+        if lookups is not None:
+            lookups.start(caller)  # runs while we answer; the session reads the result
         await telephony.answer_with_stream(ccid, stream_url=settings.media_stream_url)
     elif event_type == "call.answered":
-        pass  # streaming was requested on answer; Telnyx opens the WebSocket next
+        # A normal call needs nothing here: streaming was requested on answer. A call that was
+        # turned away carries the sentence to say.
+        if text := state.get("say"):
+            await telephony.speak(ccid, text, then_hangup=True)
+    elif event_type == "call.speak.ended":
+        if state.get("then") == "hangup":
+            await telephony.hangup(ccid)
     elif event_type == "streaming.failed":
         log.error("streaming failed: %s", payload.get("failure_reason"))
     elif event_type == "call.hangup":
@@ -47,5 +75,5 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks) -> Respo
     except Exception as exc:  # noqa: BLE001 - any failure here means "not from Telnyx"
         log.warning("rejected webhook: %s", exc)
         return Response(status_code=400)
-    background.add_task(handle_event, data, settings, telephony)
+    background.add_task(handle_event, data, settings, telephony, getattr(request.app.state, "lookups", None), getattr(request.app.state, "guard", None), getattr(request.app.state, "transfers", None))
     return Response(status_code=200)

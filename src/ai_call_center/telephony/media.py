@@ -23,5 +23,18 @@ async def media_stream(websocket: WebSocket) -> None:
         await websocket.close()
         return
     log.info("media stream for call %s (stream %s, encoding %s)", call_data.get("call_id"), call_data.get("stream_id"), call_data.get("outbound_encoding"))
-    session = CallSession(websocket=websocket, call_data=call_data, settings=get_settings(), telephony=websocket.app.state.telephony)
+    transfers = getattr(websocket.app.state, "transfers", None)
+    # A stream that starts again after a transfer that did not connect: the contact agent returns.
+    resume = transfers.take_resume(call_data.get("call_id")) if transfers else None
+    if resume is not None:
+        log.info("call %s: media stream restarted after a transfer that did not connect (%s)", call_data.get("call_id"), resume.reason)
+    session = CallSession(
+        websocket=websocket,
+        call_data=call_data,
+        settings=get_settings(),
+        telephony=websocket.app.state.telephony,
+        lookups=getattr(websocket.app.state, "lookups", None),
+        transfers=transfers,
+        resume=resume,
+    )
     await session.run()

@@ -18,7 +18,8 @@ from ai_call_center.graph.handoffs import handoff_tool_name
 def function_schema(tool: BaseTool) -> FunctionSchema:
     """One Pipecat FunctionSchema from a LangChain tool: same name, description, and arguments."""
     schema = tool.tool_call_schema.model_json_schema()
-    properties = {k: {kk: vv for kk, vv in v.items() if kk != "title"} for k, v in schema.get("properties", {}).items()}
+    # "title" and "default" are dropped: the voice providers accept a smaller JSON Schema than LangChain writes.
+    properties = {k: {kk: vv for kk, vv in v.items() if kk not in {"title", "default"}} for k, v in schema.get("properties", {}).items()}
     return FunctionSchema(name=tool.name, description=tool.description, properties=properties, required=schema.get("required", []))
 
 

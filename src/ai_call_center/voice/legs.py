@@ -1,13 +1,24 @@
-"""Voice legs: build the Pipecat speech-to-speech service for one agent spec.
+"""Voice legs: build the Pipecat speech-to-speech service for one agent spec, and drive it.
 
-Each agent gets its own service, pre-connected at call start, because OpenAI fixes a session's
-voice once it has spoken. A reconnect-and-replay swap was measured at 3-4 s of silence; switching
-between pre-connected services takes under 1 s."""
+Each agent gets its own service, pre-connected at call start, because a provider fixes a session's
+voice once it has spoken. A reconnect-and-replay swap on OpenAI was measured at 3-4 s of silence;
+switching between pre-connected services takes under 1 s.
+
+The functions at the bottom (`reset_session`, `replay_and_respond`, ...) are the only place that
+knows how each provider's Pipecat service resets and replays. They use private members of those
+services, pinned by the Pipecat version in `uv.lock`.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 
+from google.genai.types import EndSensitivity, StartSensitivity
+from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
+from pipecat.frames.frames import FunctionCallResultFrame, LLMFullResponseEndFrame, TTSStoppedFrame
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService, GeminiVADParams
 from pipecat.services.llm_service import LLMService
 from pipecat.services.openai.realtime.events import (
     AudioConfiguration,
@@ -21,10 +32,12 @@ from pipecat.services.openai.realtime.events import (
 )
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
-from ai_call_center.agents.specs import AgentSpec
+from ai_call_center.agents.specs import AgentSpec, default_voice
 from ai_call_center.config import Settings
 
 log = logging.getLogger(__name__)
+
+FALLBACK_LEG = "openai_realtime"
 
 
 def turn_detection(settings: Settings) -> TurnDetection | SemanticTurnDetection:
@@ -45,9 +58,9 @@ def noise_reduction(settings: Settings) -> InputAudioNoiseReduction | None:
     return InputAudioNoiseReduction(type=settings.openai_noise_reduction)
 
 
-def build_openai_realtime(spec: AgentSpec, *, instructions: str, settings: Settings) -> LLMService:
+def build_openai_realtime(spec: AgentSpec, *, instructions: str, settings: Settings, tools: ToolsSchema | None = None) -> LLMService:
     """gpt-realtime-2.1-mini over the Realtime WebSocket. Audio stays PCM 24 kHz inside Pipecat;
-    the Telnyx serializer converts to and from 8 kHz PCMU."""
+    the Telnyx serializer converts to and from 8 kHz PCMU. Tools come from the shared context."""
     return OpenAIRealtimeLLMService(
         api_key=settings.openai_api_key.get_secret_value(),
         settings=OpenAIRealtimeLLMService.Settings(
@@ -67,22 +80,151 @@ def build_openai_realtime(spec: AgentSpec, *, instructions: str, settings: Setti
     )
 
 
+def gemini_vad(settings: Settings) -> GeminiVADParams:
+    """Gemini's own turn detection. Low start sensitivity ignores more background noise."""
+    return GeminiVADParams(
+        silence_duration_ms=settings.gemini_vad_silence_ms,
+        prefix_padding_ms=200,
+        start_sensitivity=(
+            StartSensitivity.START_SENSITIVITY_LOW if settings.gemini_vad_start_sensitivity == "low" else StartSensitivity.START_SENSITIVITY_HIGH
+        ),
+        end_sensitivity=EndSensitivity.END_SENSITIVITY_HIGH,
+    )
+
+
+class HandoffGeminiLive(GeminiLiveLLMService):
+    """Gemini Live, with one change: a tool result marked `run_llm=False` is not sent to Gemini.
+
+    Our handoff tools return such a result, because the next agent answers, not this one. Gemini
+    answers every tool result it receives, so the old agent would speak the new agent's opening
+    line in the old voice. Without the result the model waits, silent, until we reset its session.
+    """
+
+    async def _handle_function_call_result(self, frame: FunctionCallResultFrame) -> None:
+        if frame.properties is not None and frame.properties.run_llm is False:
+            self._completed_tool_calls.add(frame.tool_call_id)  # so a later context frame does not send it either
+            if self._bot_is_responding:
+                # The model's turn never completes now. End it here, so the sentence the agent
+                # just said is stored as its own message in the shared context.
+                await self._set_bot_is_responding(False)
+                await self.push_frame(TTSStoppedFrame())
+                await self.push_frame(LLMFullResponseEndFrame())
+            return
+        await super()._handle_function_call_result(frame)
+
+
+def build_gemini_live(spec: AgentSpec, *, instructions: str, settings: Settings, tools: ToolsSchema | None = None) -> LLMService:
+    """gemini-3.8-live over the Live API. The agent's tools are fixed when the session opens:
+    a Gemini session cannot change tools later, and taking them from the context costs a reconnect."""
+    return HandoffGeminiLive(
+        api_key=settings.google_api_key.get_secret_value(),
+        tools=tools,
+        settings=GeminiLiveLLMService.Settings(
+            model=settings.gemini_live_model,
+            system_instruction=instructions,
+            voice=spec.voice or default_voice(spec.name, "gemini_live"),
+            vad=gemini_vad(settings),
+        ),
+    )
+
+
 LEG_BUILDERS = {
     "openai_realtime": build_openai_realtime,
+    "gemini_live": build_gemini_live,
 }
 
-def available_leg(leg: str) -> str:
-    """The leg to use for a configured leg. Legs without a builder fall back to OpenAI (until M3)."""
+
+def available_leg(leg: str, settings: Settings) -> str:
+    """The leg that will run for a configured leg. A leg with no builder or no API key falls back to OpenAI."""
+    if leg == "gemini_live" and not settings.google_api_key.get_secret_value():
+        log.warning("voice leg gemini_live needs GOOGLE_API_KEY; using %s", FALLBACK_LEG)
+        return FALLBACK_LEG
     if leg in LEG_BUILDERS:
         return leg
-    log.warning("voice leg %r is not built yet; using openai_realtime", leg)
-    return "openai_realtime"
+    log.warning("voice leg %r is not built yet; using %s", leg, FALLBACK_LEG)
+    return FALLBACK_LEG
 
 
-def build_leg(leg: str, spec: AgentSpec, *, instructions: str, settings: Settings) -> LLMService:
+def resolve_spec(spec: AgentSpec, settings: Settings) -> AgentSpec:
+    """The spec as it will run on this server. On a fallback the voice changes too, because voice
+    names belong to a provider."""
+    leg = available_leg(spec.leg, settings)
+    if leg == spec.leg:
+        return spec
+    return dataclasses.replace(spec, leg=leg, voice=default_voice(spec.name, leg))
+
+
+def build_leg(spec: AgentSpec, *, instructions: str, settings: Settings, tools: ToolsSchema | None = None) -> LLMService:
     try:
-        builder = LEG_BUILDERS[leg]
+        builder = LEG_BUILDERS[spec.leg]
     except KeyError as exc:
-        raise ValueError(f"voice leg {leg!r} is not available yet (have: {sorted(LEG_BUILDERS)})") from exc
-    return builder(spec, instructions=instructions, settings=settings)
+        raise ValueError(f"voice leg {spec.leg!r} is not available yet (have: {sorted(LEG_BUILDERS)})") from exc
+    return builder(spec, instructions=instructions, settings=settings, tools=tools)
 
+
+# --- driving a service: connect, reset, replay ---
+
+
+def self_heals(service: LLMService) -> bool:
+    """True when the Pipecat service reconnects by itself after an error. Gemini does (with session
+    resumption). OpenAI does not: its receive loop ends on any error event."""
+    return isinstance(service, GeminiLiveLLMService)
+
+
+def first_answer_needs_run_frame(service: LLMService) -> bool:
+    """OpenAI sets up its session from the first context frame, so its first answer must come from
+    an LLMRunFrame through the pipeline. Gemini can be seeded directly every time."""
+    return isinstance(service, OpenAIRealtimeLLMService)
+
+
+async def ensure_connected(service: LLMService) -> None:
+    if isinstance(service, OpenAIRealtimeLLMService) and service._websocket is None:  # noqa: SLF001
+        log.warning("%s was disconnected; reconnecting before the handoff", service.name)
+        await service._connect()  # noqa: SLF001
+    elif isinstance(service, GeminiLiveLLMService) and service._session is None and service._connection_task is None:  # noqa: SLF001
+        log.warning("%s was disconnected; reconnecting before the handoff", service.name)
+        await service._connect()  # noqa: SLF001
+
+
+async def adopt_context(service: LLMService, context: LLMContext) -> None:
+    """Prepare a service to become the active one. Call this before the switch.
+
+    Gemini: hand it the shared context now. A context frame can reach the service right after the
+    switch; if that frame were its first context, Pipecat would reconnect the session (about 0.5 s)
+    and send it tool results that belong to other agents' sessions.
+    """
+    if isinstance(service, GeminiLiveLLMService):
+        service._context = context  # noqa: SLF001
+        await service._process_completed_function_calls(send_new_results=False)  # noqa: SLF001
+
+
+async def reset_session(service: LLMService) -> None:
+    """Give the service a fresh server-side session with no conversation in it.
+
+    OpenAI: about 2.4 s. Gemini: about 0.4 s.
+    """
+    if isinstance(service, OpenAIRealtimeLLMService):
+        await service.reset_conversation()
+    elif isinstance(service, GeminiLiveLLMService):
+        await service._disconnect()  # noqa: SLF001
+        service._session_resumption_handle = None  # noqa: SLF001 - a resumed session would bring the old conversation back
+        service._context = None  # noqa: SLF001 - so the new session is not seeded until the agent is active again
+        await service._connect()  # noqa: SLF001
+    else:  # pragma: no cover
+        raise NotImplementedError(f"reset for {type(service).__name__}")
+
+
+async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
+    """Replay the shared context into the service's fresh session and have it answer.
+
+    OpenAI: the service already holds the shared context from its first use; ask for a response.
+    Gemini: seed the session with the context, with the turn marked complete. If the session is
+    still opening, the service does this as soon as it is ready.
+    """
+    if isinstance(service, OpenAIRealtimeLLMService):
+        await service._create_response()  # noqa: SLF001
+    elif isinstance(service, GeminiLiveLLMService):
+        await adopt_context(service, context)
+        await service._create_initial_response()  # noqa: SLF001
+    else:  # pragma: no cover
+        raise NotImplementedError(f"replay for {type(service).__name__}")

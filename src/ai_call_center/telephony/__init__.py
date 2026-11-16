@@ -12,6 +12,12 @@ class Telephony(Protocol):
         """Transfer the live call to a phone number or SIP URI."""
 
 
+@runtime_checkable
+class Texter(Protocol):
+    async def send_text(self, to: str, body: str) -> None:
+        """Send one SMS from the line's number. Raise on failure."""
+
+
 @dataclass
 class TransferRequest:
     call_control_id: str
@@ -23,6 +29,10 @@ class RecordingTelephony:
     """Records transfer requests instead of making them. Used by tests and chat.py."""
 
     transfers: list[TransferRequest] = field(default_factory=list)
+    texts: list[tuple[str, str]] = field(default_factory=list)  # (to, body)
 
     async def transfer(self, call_control_id: str, *, to: str) -> None:
         self.transfers.append(TransferRequest(call_control_id=call_control_id, to=to))
+
+    async def send_text(self, to: str, body: str) -> None:
+        self.texts.append((to, body))

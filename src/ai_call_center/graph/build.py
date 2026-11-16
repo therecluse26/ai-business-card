@@ -22,13 +22,13 @@ from ai_call_center.agents.specs import AgentSpec, LEGS, build_specs, load_profi
 from ai_call_center.config import get_settings
 from ai_call_center.graph.handoffs import handoff_tool_name, make_handoff_tool
 from ai_call_center.graph.state import CallContext, CallState
-from ai_call_center.graph.tools import get_call_stats, request_owner_transfer, save_lead
+from ai_call_center.graph.tools import confirm_returning_caller, get_call_stats, request_owner_transfer, save_lead, text_portfolio_link
 
 ENTRY_AGENT = "classifier"
 
 
 def all_tools(specs: dict[str, AgentSpec]) -> dict[str, BaseTool]:
-    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats]
+    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, text_portfolio_link, confirm_returning_caller]
     tools += [make_handoff_tool(spec) for spec in specs.values()]
     return {t.name: t for t in tools}
 
@@ -60,6 +60,11 @@ def build_graph(
         spec = specs[name]
         ctx = request.runtime.context if request.runtime is not None else None
         prompt = f"{spec.instructions}\n\n{mode_line(spec, ctx)}"
+        if ctx is not None and ctx.caller_lookup:
+            prompt = f"{prompt}\n\n{ctx.caller_lookup}"
+        # Only the greeting agent learns that the number has called before, and only a first name.
+        if ctx is not None and ctx.caller_greeting and name == ENTRY_AGENT:
+            prompt = f"{prompt}\n\n{ctx.caller_greeting}"
         return await handler(request.override(system_message=SystemMessage(content=prompt), tools=tools_for(spec, tools)))
 
     return create_agent(
@@ -75,7 +80,11 @@ def build_graph(
 
 def default_specs() -> dict[str, AgentSpec]:
     settings = get_settings()
-    return build_specs(load_profile(settings.profile_path), owner_name=settings.owner_name)
+    return build_specs(
+        load_profile(settings.profile_path),
+        owner_name=settings.owner_name,
+        texting=settings.sms_enabled and bool(settings.portfolio_url),
+    )
 
 
 # Claude binds each thinking block to the system prompt and the tool list that produced it.

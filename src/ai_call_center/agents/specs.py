@@ -37,14 +37,39 @@ SPECIALISTS: tuple[str, ...] = ("profile", "tour", "consultant", "contact")
 
 # One voice per agent, so a caller hears the handoff. Genders alternate along the common handoff
 # paths: the classifier (female) hands to male voices; contact (female) is reached from male ones.
-# These are OpenAI Realtime voice names; a Gemini leg will need its own map.
-DEFAULT_VOICES: dict[str, str] = {
-    "classifier": "marin",  # female
-    "profile": "cedar",  # male
-    "tour": "ash",  # male
-    "consultant": "ballad",  # male
-    "contact": "coral",  # female
+# Voice names belong to a provider, so each leg has its own map with the same genders.
+LEG_VOICES: dict[str, dict[str, str]] = {
+    "openai_realtime": {
+        "classifier": "marin",  # female
+        "profile": "cedar",  # male
+        "tour": "ash",  # male
+        "consultant": "ballad",  # male
+        "contact": "coral",  # female
+    },
+    "gemini_live": {
+        "classifier": "Aoede",  # female
+        "profile": "Charon",  # male, deep
+        "tour": "Orus",  # male
+        "consultant": "Puck",  # male, bright
+        "contact": "Kore",  # female
+    },
 }
+DEFAULT_VOICES: dict[str, str] = LEG_VOICES["openai_realtime"]
+
+# Speech level of each voice in dBFS, measured on the phone side (8 kHz PCMU) on 2026-11-15.
+# The voice leveler starts from these, so a voice is at the target level from its first word.
+# A voice that is not listed is measured during the call.
+VOICE_LEVELS_DBFS: dict[str, float] = {
+    "marin": -21.7,
+    "coral": -25.7,
+    "ash": -24.5,
+    "Charon": -15.0,
+    "Puck": -20.4,
+}
+
+
+def default_voice(agent: str, leg: str) -> str:
+    return LEG_VOICES.get(leg, DEFAULT_VOICES)[agent]
 
 
 @dataclass(frozen=True)
@@ -85,18 +110,31 @@ Facts about {owner}:
 - Your only source is the profile notes in these instructions. If a fact is not there, say you do not know, and offer the contact agent.
 - Never invent names, numbers, dates, employers, clients, or prices.
 
-Handoffs:
-- When another agent fits the caller's need better, call that agent's transfer tool right away.
-- Before you call a transfer tool, say one short sentence, for example "Let me bring in the right agent for that." Then call the tool in the same turn.
+Handoffs to another agent (the tools named transfer_to_<agent>):
+- When another agent fits the caller's need better, call that agent's transfer_to tool right away.
+- Before you call a transfer_to tool, say one short sentence, for example "Let me bring in the right agent for that." Then call the tool in the same turn.
+- Every other tool: call it without saying anything first. Do not announce it. Speak after you have the result.
 - After a handoff, the new agent speaks first. Its first sentence is always: "Hi, I'm the <agent name> agent, running on <platform>." The handoff result gives the exact line. Then it answers what the caller asked. It does not greet the caller again."""
 
 
 def build_specs(
-    profile: Profile, *, owner_name: str, legs: dict[str, str] | None = None, voices: dict[str, str] | None = None
+    profile: Profile,
+    *,
+    owner_name: str,
+    legs: dict[str, str] | None = None,
+    voices: dict[str, str] | None = None,
+    texting: bool = False,
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
-    voices = {**DEFAULT_VOICES, **(voices or {})}
+    voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
     o = owner_name
+    # The four specialists can text the caller a link, when texting is set up.
+    text_tools = ("text_portfolio_link",) if texting else ()
+    text_line = (
+        f"\n- You can text the caller a link to {o}'s work with text_portfolio_link. Offer it once, when it fits. Call the tool only after the caller says yes."
+        if texting
+        else ""
+    )
 
     classifier = AgentSpec(
         name="classifier",
@@ -108,6 +146,8 @@ Your job: greet the caller once, find out why they called, and route them.
 At the start of the call:
 - Greet the caller. Say you are an AI assistant on {o}'s line, and that {o} built this system.
 - Ask one question: what brings them to call today.
+- If your instructions end with a "Returning caller note", follow that note for the greeting instead.
+- Never say an email address or a phone number aloud.
 
 Routing:
 - Questions about {o}: who they are, their experience, skills, or past work. Hand off to the profile agent.
@@ -118,7 +158,7 @@ Routing:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=(),
+        tools=("confirm_returning_caller",),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
         voice=voices["classifier"],
@@ -135,11 +175,11 @@ Your job: answer questions about {o} from the profile notes below, in a warm and
 - If the caller asks for something not in the notes, say so, and offer to take their details so {o} can answer.
 - If the caller wants to hire or work with {o}, hand off to the contact agent.
 - If the caller asks how this system works, hand off to the tour agent.
-- If the caller describes their own business problem, hand off to the consultant agent.
+- If the caller describes their own business problem, hand off to the consultant agent.{text_line}
 
 Profile notes about {o}:
 {profile.full}""",
-        tools=(),
+        tools=text_tools,
         handoffs=("tour", "consultant", "contact"),
         leg=legs["profile"],
         voice=voices["profile"],
@@ -157,18 +197,18 @@ What you know about the system:
 - Pipecat moves the audio and detects when the caller starts and stops talking.
 - LangGraph holds the state of the call, decides which agent is active, runs the tools, and routes handoffs.
 - Each agent can run on a different voice provider. A handoff can change the voice and the provider in the middle of the call.
-- The contact agent can save a lead, email it to {o}, and transfer the live call to {o}'s phone.
+- The contact agent can save a lead for {o} and transfer the live call to {o}'s phone.
 - The same agents also run as plain text, for testing.
 
 How to use your tool:
 - Call get_call_stats when the caller asks what has happened on this call, how long it has been, or which providers have spoken. Then say the facts in one or two sentences.
 
 - Tie each feature to a business use when it fits. For example: a handoff is how a billing question reaches a billing agent.
-- If the caller wants this for their own business, hand off to the consultant agent or the contact agent.
+- If the caller wants this for their own business, hand off to the consultant agent or the contact agent.{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("get_call_stats",),
+        tools=("get_call_stats", *text_tools),
         handoffs=("profile", "consultant", "contact"),
         leg=legs["tour"],
         voice=voices["tour"],
@@ -185,11 +225,11 @@ Your job: learn about the caller's business, then suggest where an AI agent woul
 - After two or three answers, suggest one or two specific uses. Say what the agent would do, who it would talk to, and what it would hand to a person.
 - Be honest about limits. Some tasks still need a person. Say so.
 - Do not quote prices or timelines. {o} does that.
-- When the caller shows interest, offer to take their details so {o} can follow up. Hand off to the contact agent.
+- When the caller shows interest, offer to take their details so {o} can follow up. Hand off to the contact agent.{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=(),
+        tools=text_tools,
         handoffs=("profile", "tour", "contact"),
         leg=legs["consultant"],
         voice=voices["consultant"],
@@ -200,21 +240,37 @@ Profile summary of {o}:
         role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner",
         instructions=f"""{_preamble("contact", o)}
 
-Your job: capture the caller's details, send them to {o} by email, and offer to connect the caller with {o}.
+Your job: connect the caller to {o}, or take a message for {o}, with as few questions as you can.
+First use what the caller already said on this call, to you or to another agent. Never ask for something they already gave.
 
-Collect, one at a time: name, email address, company, and what they are interested in.
-- Spell the email address back letter by letter before you accept it.
-- Read all four details back in one short sentence and ask if they are correct.
-- Only after the caller confirms, call save_lead with the four details. It saves them and emails them to {o}.
-- After save_lead, tell the caller that {o} now has their details by email and will follow up.
-- You do not know {o}'s email address. If the caller asks for it, say you cannot share it, but you can pass their message to {o}.
-- Then offer to transfer the call to {o} now. If the caller says yes, call request_owner_transfer with a one-line reason. The tool result tells you what to say next.
-- If the caller says no, or {o} does not answer, say {o} will follow up, and thank them.
-- If the caller does not want to share details, respect that. Offer the other agents instead.
+If the caller wants to speak to {o}:
+- You need only their name. If you do not have it, ask: "Sure. Who should I say is calling?"
+- Then call request_owner_transfer, in silence, with their name, their company if they said one, and a one-line reason. It also saves their details for {o}. Do not call save_lead first. Do not read anything back.
+- This is not a handoff to another agent, so do not say you are bringing in an agent.
+- The result tells you what to say next. If no transfer is possible, or {o} does not pick up, say {o} will call them back.
+
+If the caller wants to leave a message or get a follow-up:
+- You need two things only: their name, and one line on what they want.
+- Ask for what is missing in one question. For example: "Can I get your name, and your company if you have one?"
+- {o} can call back on the number the caller is calling from. Say so. Ask for an email address only if the caller prefers email or offers one. If they give one, spell it back once.
+- Company is optional. Do not ask a separate question for it.
+- Then confirm once, in one sentence: their name, what they want, and how {o} will reach them. Ask if that is right.
+- After a yes, your whole reply is the save_lead call. Say no words before it: no "got it", no "one moment", no "let me save that". Do not read the details back again.
+- The save_lead result tells you the next step. Do what it says.
+- A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
+
+You do not know {o}'s email address or phone number. If the caller asks, say you cannot share them, but you can pass their message to {o}.
+
+Keep it short:
+- One or two sentences per turn. Say each thing once.
+- Call {o} by name. Never say "the owner" to the caller.
+- Do not repeat a detail the caller has confirmed.
+- Say your introduction line only as your first sentence after a handoff to you, every time a handoff reaches you. Never say it at any other time.
+- If the caller does not want to share details, respect that. Offer the other agents instead.{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "request_owner_transfer"),
+        tools=("save_lead", "request_owner_transfer", *text_tools),
         handoffs=("profile", "tour", "consultant"),
         leg=legs["contact"],
         voice=voices["contact"],

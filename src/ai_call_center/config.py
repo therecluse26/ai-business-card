@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     llm_model: str = "anthropic:claude-opus-5-5"
+    summary_model: str = "anthropic:claude-haiku-5-5"  # writes the two-sentence call summary at hangup
     owner_name: str = "the owner"
     owner_phone: str = "+15555550100"
     profile_path: Path = Path("profile.md")
@@ -62,6 +63,22 @@ class Settings(BaseSettings):
     telnyx_phone_number: str = ""
     telnyx_app_id: str = ""
 
+    # Guardrails for a public number. 0 turns a limit off.
+    max_call_minutes: int = 10  # the agent warns one minute before; the call ends at the limit
+    max_calls_per_number_per_day: int = 5  # the owner's phone (OWNER_PHONE) is exempt
+    max_concurrent_calls: int = 3
+    daily_minutes_cap: int = 120  # all callers together, per 24 hours; this bounds the daily model cost
+    transfer_hours: str = "09:00-18:00"  # US Eastern; empty = a live transfer is allowed at any time
+    transfer_days: str = "mon-fri"
+    transfer_ring_secs: int = 25  # how long the owner's phone rings before the agent comes back to the caller
+
+    # Text messages (off until the number has a Telnyx messaging profile and a 10DLC campaign).
+    sms_enabled: bool = False
+    portfolio_url: str = ""  # the link an agent can text to a caller
+
+    # Number lookup on each new caller (Telnyx bills each lookup; results are cached per number).
+    caller_lookup: Literal["off", "carrier", "carrier+name"] = "carrier+name"
+
     # Public HTTPS URL of this server (Tailscale Funnel or ngrok), no trailing slash.
     public_url: str = ""
     port: int = 8000
@@ -77,6 +94,16 @@ class Settings(BaseSettings):
     openai_vad_threshold: float = 0.6  # "server" only: 0.0-1.0; higher ignores more background noise
     openai_noise_reduction: Literal["near_field", "far_field", "off"] = "near_field"  # a handset at the ear
     openai_vad_eagerness: Literal["low", "medium", "high", "auto"] = "high"  # "semantic" only
+
+    # One loudness for every agent voice, in dBFS (speech level). Voices differ by up to 10 dB,
+    # most of all across providers. 0 turns the leveler off.
+    voice_level_dbfs: float = -22.0
+
+    # Gemini Live voice leg. Without GOOGLE_API_KEY, agents set to gemini_live run on OpenAI.
+    google_api_key: SecretStr = SecretStr("")
+    gemini_live_model: str = "models/gemini-3.8-live"
+    gemini_vad_silence_ms: int = 400  # silence before the turn ends
+    gemini_vad_start_sensitivity: Literal["low", "high"] = "low"  # "low" ignores more background noise
 
     @property
     def webhook_url(self) -> str:

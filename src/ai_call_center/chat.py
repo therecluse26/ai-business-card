@@ -10,10 +10,13 @@ import select
 import sys
 from uuid import uuid4
 
+from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from ai_call_center.agents.specs import DEFAULT_LEGS
+from ai_call_center.callers import greeting_note, history_text, recall, summarize_call
+from ai_call_center.guardrails import TransferHours
 from ai_call_center.config import get_settings
 from ai_call_center.graph.build import build_graph, default_model, default_specs
 from ai_call_center.graph.state import CallContext
@@ -62,26 +65,36 @@ def print_new_messages(messages: list, start: int) -> None:
             print(f"  [result] {msg.content}")
 
 
-async def run() -> None:
+async def run(caller_number: str = "+10000000000") -> None:
     settings = get_settings()
     specs = default_specs()
     graph = build_graph(default_model(), specs, checkpointer=InMemorySaver())
     telephony = RecordingTelephony()
     notifier = notifier_from_settings(settings)
+    call_id = f"chat-{uuid4().hex[:8]}"
+    store = LeadStore(settings.leads_db)
+    # `uv run chat --from +15551234567` pretends to call from that number, to test caller memory.
+    store.start_call(call_id, caller_number)
+    memory = recall(store, caller_number, exclude_call=call_id)
     ctx = CallContext(
-        call_control_id=f"chat-{uuid4().hex[:8]}",
-        caller_number="+10000000000",
+        call_control_id=call_id,
+        caller_number=caller_number,
         owner_phone=settings.owner_phone,
-        leads=LeadStore(settings.leads_db),
+        leads=store,
         telephony=telephony,
         notifier=notifier,
         legs=dict(DEFAULT_LEGS),
         mode="text",
+        caller_greeting=greeting_note(memory) if memory else "",
+        caller_history=history_text(memory) if memory and memory.first_name else "",
+        transfer_hours=TransferHours.parse(settings.transfer_hours, settings.transfer_days),
     )
     config = {"configurable": {"thread_id": ctx.call_control_id}}
     print(f"Voice business card, text mode. Model: {settings.llm_model}. Type /quit to hang up.\n")
 
     seen = 0
+    result_messages: list = []
+    handoffs: list[str] = []
     text = CALL_CONNECTED
     active = "classifier"
     while True:
@@ -101,6 +114,8 @@ async def run() -> None:
             text = text or "[silence]"
             continue
         print_new_messages(result["messages"], seen)
+        result_messages = result["messages"]
+        handoffs = result.get("handoffs", [])
         seen = len(result["messages"])
         active = result.get("active_agent", "classifier")
         if result.get("transfer_requested"):
@@ -115,6 +130,11 @@ async def run() -> None:
             break
         if not text:
             text = "[silence]"
+    if result_messages:
+        summary, caller_name = await summarize_call(result_messages, init_chat_model(settings.summary_model))
+        store.finish_call(call_id, agents=["classifier", *handoffs], summary=summary, caller_name=caller_name)
+        if summary:
+            print(f"\n[call summary saved for {caller_number}: {summary}]")
     leads = ctx.leads.all()
     print(f"\n[hung up] active agent: {active}; leads saved this process: {len(leads)}")
     if isinstance(notifier, RecordingNotifier) and notifier.sent:
@@ -123,7 +143,9 @@ async def run() -> None:
 
 def main() -> None:
     try:
-        asyncio.run(run())
+        args = sys.argv[1:]
+        number = args[args.index("--from") + 1] if "--from" in args and len(args) > args.index("--from") + 1 else "+10000000000"
+        asyncio.run(run(number))
     except KeyboardInterrupt:
         sys.exit(130)
 

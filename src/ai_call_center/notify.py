@@ -102,6 +102,7 @@ class RecordingNotifier:
 
     sent: list[EmailMessage] = field(default_factory=list)
     to: str = "owner@example.invalid"
+    delivers: bool = True  # False when it stands in for missing SMTP settings: nothing reaches the owner
 
     async def send_lead(self, lead: Lead, *, row_id: int) -> None:
         self.sent.append(lead_email(lead, row_id=row_id, sender="voice-card@example.invalid", to=self.to))
@@ -119,4 +120,4 @@ def notifier_from_settings(settings) -> Notifier:
             to=settings.owner_email,
         )
     log.warning("OWNER_EMAIL or SMTP_HOST is not set. Lead emails are recorded, not sent.")
-    return RecordingNotifier()
+    return RecordingNotifier(delivers=False)
