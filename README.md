@@ -71,6 +71,23 @@ settles in the shared context, the switcher activates the target agent's session
 replays the context and answers. The session the caller left is reset in the background, so a
 handoff back to it is clean.
 
+### Handoff rules in voice mode
+
+- **The agent that gets the call answers the caller.** A handoff is refused while the caller has not spoken to the new agent. Without this rule, two agents passed one caller back and forth.
+- **An agent cannot hand the call to itself.**
+- **The caller's audio is silence until the greeting starts.** A click on the line at the start of a call was answered with a second greeting.
+- **A session gets only the tool results of its own tool calls.** When the call returns to an OpenAI agent, the results that other agents wrote are marked as known, and the audio item of its old session is forgotten. OpenAI rejects both, and the session then restarts.
+- **A tool result goes to Amazon Nova as a JSON object.** Bedrock rejects a plain sentence.
+- **The next agent reads the caller's last words.** Pipecat can commit a caller's turn more than 1.5 s after a Nova agent calls a handoff tool. The handoff waits 0.5 s, then adds the words to the shared context itself.
+- **The next agent reads the caller's name.** When the caller gave or confirmed a name, the handoff message says it, and says never to ask for it again.
+
+### The greeting
+
+The first words of a call are exact (`greeting_words` in `agents/specs.py`); the first message of the call gives them to the greeting agent word for word.
+
+- New caller: "Hi, you've reached <owner>'s AI business card. I'm an AI assistant that <first name> built. I can tell you about <first name>, explain how this phone system works, talk through how AI could help your business, or take a message for <first name>. What brings you to call today?"
+- A number that gave a first name before: the first two sentences, then "Am I speaking with <name>?".
+
 ### Live transfer to the owner
 
 A transfer is an outbound call from the Telnyx application to `OWNER_PHONE`. Telnyx refuses it
@@ -95,6 +112,11 @@ How a transfer runs (`telephony/transfers.py`):
 
 1. A caller who asks to speak to the owner gives only a name. `request_owner_transfer` saves the name and the
    reason as a lead, so a call that is not answered still leaves a record.
+   This happens only when the owner's phone will ring. A transfer that is refused (outside
+   `TRANSFER_HOURS`, or not possible on this server) sends no email at that moment: the agent offers
+   to take a message, and that message is the one email. If the caller hangs up without a message,
+   the "asked to speak to you" email goes out when the call ends. A message that the caller leaves
+   after a transfer nobody answered is a new record with its own email.
 2. A gate waits for the agent's goodbye line to finish. Then the media stream stops and the transfer
    starts. Telnyx refuses a transfer while streaming is on (error 90045).
 3. The owner's phone rings for `TRANSFER_RING_SECS` (25). If the owner picks up, the two are connected.
@@ -102,7 +124,26 @@ How a transfer runs (`telephony/transfers.py`):
    contact agent comes back with the whole conversation and says the owner will call back.
 5. Telnyx's built-in voice speaks only when the stream cannot start again.
 
-### When the owner's voicemail answers
+### Call screening: the owner accepts with a key
+
+`TRANSFER_SCREENING=true` is the default. The server then does not use the Telnyx transfer command.
+
+1. The agent says "I am calling Brad now. Please hold." The server stops the media stream.
+2. The server plays a ring tone to the caller, in a loop. It calls the owner's phone as a separate call.
+3. The owner answers. A Telnyx voice says: "Voice card call from Dana Reyes. <the reason>. Press 1 to accept.
+   Press 2 to decline." The caller still hears the ring tone.
+4. On key 1, the server stops the ring tone and connects the two calls.
+5. On key 2, or no key, the server hangs up the owner's call. The contact agent comes back to the caller.
+
+The caller never hears the owner's phone, so the caller never hears a voicemail greeting. A voicemail cannot
+press 1. The question is asked twice, and each time the owner has `TRANSFER_ACCEPT_SECS` (6) seconds for a key.
+With `TRANSFER_VOICEMAIL_DETECTION=true`, a detected machine ends the wait a few seconds after the answer.
+
+- The ring tone is made in code (`telephony/hold_audio.py`) and served at `/audio/ringback.wav`.
+- `TRANSFER_HOLD_AUDIO_URL` replaces it with any WAV or MP3 file, for example hold music you have a licence for.
+- Screening needs `TELNYX_APP_ID` and `PUBLIC_URL`. Without the app id, the server uses the plain transfer below.
+
+### When the owner's voicemail answers (without call screening)
 
 A voicemail answers a transfer like a person does. Without a check, the caller lands in the owner's voicemail.
 
@@ -156,7 +197,8 @@ Measured with caller audio at 8 kHz: the new agent's first audio came 0.63 to 0.
 
 An agent can run on `amazon.nova-2-5-sonic`, on Amazon Bedrock. It is off until the server has AWS keys.
 
-1. Create an IAM user in your own AWS account with one permission: `bedrock:InvokeModelWithBidirectionalStream`.
+1. Create an IAM user in your own AWS account with one permission: `bedrock:InvokeModel` on
+   `arn:aws:bedrock:*::foundation-model/amazon.nova-*`. The two-way stream is authorized under that action.
 2. Put its key in `.env` as `NOVA_AWS_ACCESS_KEY_ID` and `NOVA_AWS_SECRET_ACCESS_KEY`. The names start with
    `NOVA_` on purpose: `AWS_` variables in a shell can belong to another account.
 3. Run `uv run check-nova`. It opens one short session and prints what Nova said, or the AWS error.
@@ -168,7 +210,11 @@ How this leg differs from the other two:
   that carries no audio, so a stream opened at call start would be dead when it is needed.
 - Without the keys, or when Nova is marked down, the agent runs on OpenAI or Gemini. Nova is the last fallback.
 - Nova has few English voices (`tiffany`, `matthew`, `amy`), so agents share voices when several run on Nova.
-- Status: built from the Pipecat service code and unit tests. It has not carried a real or simulated call yet.
+- Bedrock answers "Invalid input request" when the request to speak arrives in the same instant as a long
+  conversation history. The leg waits `NOVA_SETTLE_SECS` (0.3 s) between the two.
+- Nova answers only while microphone audio arrives. `check-nova` sends silence for that reason.
+- Status: `check-nova` passes, and simulated calls ran a handoff into Nova, an answer, and a handoff out.
+  It has not carried a real phone call yet.
 
 ### Caller memory and number lookup
 
@@ -178,6 +224,8 @@ How this leg differs from the other two:
   gave. It asks only "Am I speaking with <name>?". A phone number can be shared, so nothing else is said yet.
 - The newest name wins, from a saved lead or from the call log. When Bill calls after Steve and says
   "No, this is Bill", the next call asks for Bill.
+- After a yes, who the caller is is settled for the whole call. No agent asks for the name again or
+  asks the caller to confirm it.
 - After a yes, the classifier calls `confirm_returning_caller`. Only then do the company, the saved
   interest, and the last three summaries enter the conversation. After a no, they never do, and no agent
   will say who called before.
@@ -245,6 +293,15 @@ the estimate is on the high side. Check `PRICES` before you quote a cost to anyo
 
 Measured on one simulated call of 129 s with three agents: median answer time 1.3 s, handoffs
 1.9 s on average, 11,030 tokens in and 2,551 out, about 4 cents.
+
+### A message is saved only after the caller's yes
+
+A save emails the owner at once, so the voice session checks the caller's own words first
+(`message_confirm_question` in `graph/tools.py`). The agent must have asked if the message is right,
+and the caller's answer must be a short yes. If not, the first `save_lead` call is held back and the
+agent says the message back. The check holds a save back once only. If the caller hangs up before a
+yes, the held message is saved when the call ends, with the note "The call ended before the caller
+confirmed this message."
 
 ### The lead email
 
@@ -327,7 +384,8 @@ src/ai_call_center/
   check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests
   telephony/lookup.py            Telnyx Number Lookup for a new caller, cached
-  telephony/transfers.py         live transfer: call the owner, bring the contact agent back on no answer
+  telephony/transfers.py         live transfer: call the owner, ask for a key, bring the contact agent back on no answer
+  telephony/hold_audio.py        the ring tone a caller hears while the owner's phone rings
   telephony/outbound.py          one-time setup of the outbound voice profile (uv run setup-transfer)
   voice/leveler.py               one loudness for every agent voice
   voice/health.py                which voice providers are answering; a failed one is avoided for 5 minutes

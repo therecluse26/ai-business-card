@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     owner_phone: str = "+15555550100"
     profile_path: Path = Path("profile.md")
     leads_db: Path = Path("data/leads.sqlite3")
+    # Everything the server prints also goes to this file, so a call can be studied after it ended.
+    # At start the file of the run before is kept as <name>.previous. Empty = no file.
+    server_log: str = "data/server.log"
 
     # Lead emails to the owner. Never shown to an agent.
     owner_email: str = ""
@@ -75,6 +78,14 @@ class Settings(BaseSettings):
     # the first seconds after the answer; when it hears a machine, the server hangs up the
     # owner's leg and the contact agent comes back to the caller.
     transfer_voicemail_detection: bool = True
+    # Call screening. The server calls the owner as a separate call; the caller hears a ring tone
+    # and never hears the owner's phone. A voice tells the owner who is calling and asks for a
+    # key: 1 connects the two calls, 2 or no key sends the caller back to the contact agent.
+    # A voicemail cannot press 1. False = the plain transfer, with the voicemail detection above.
+    transfer_screening: bool = True
+    transfer_accept_secs: int = 6  # how long the owner has to press a key after the question; it is asked twice
+    # What the caller hears while they wait: a WAV or MP3 file. Empty = a ring tone made by this server.
+    transfer_hold_audio_url: str = ""
     # When no voice provider answers, a built-in voice apologises and transfers the caller to the
     # owner, inside the transfer hours. False = it asks the caller to call again, and hangs up.
     transfer_on_failure: bool = True
@@ -128,6 +139,13 @@ class Settings(BaseSettings):
     @property
     def webhook_url(self) -> str:
         return f"{self.public_url.rstrip('/')}/webhooks/telnyx"
+
+    @property
+    def hold_audio_url(self) -> str:
+        """Where Telnyx fetches the waiting sound; "" when this server has no public URL."""
+        if self.transfer_hold_audio_url:
+            return self.transfer_hold_audio_url
+        return f"{self.public_url.rstrip('/')}/audio/ringback.wav" if self.public_url else ""
 
     @property
     def media_stream_url(self) -> str:

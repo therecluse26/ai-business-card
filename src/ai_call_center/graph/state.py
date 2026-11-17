@@ -44,9 +44,13 @@ class CallContext:
     # "caller: ..." and "agent: ..." lines of the call so far. The transfer check reads the caller's own words from it.
     transcript: Callable[[], list[str]] | None = None
     transfer_question_asked: bool = False  # the agent was told to ask "connect now, or take a message?"
+    message_confirm_asked: bool = False  # the agent was told to say the message back before it is saved
+    held_message: dict[str, str] | None = None  # a save_lead call that waits for the caller's yes; saved at the end of the call if no yes came
     caller_lookup: str = ""  # public carrier data for the number, for every agent's prompt
     caller_name: str = ""  # set when the caller confirms who they are or saves a lead; "" when unknown
     transfer_unavailable: str = ""  # why a live transfer cannot be made on this server; "" when it can
+    transfer_note_id: int = 0  # the record that only says "asked to speak to the owner"; 0 when there is none
+    refused_transfer: dict[str, str] | None = None  # who asked for a live call that was refused; emailed at the end of the call if no message came
     caller_line_type: str = ""  # from the number lookup: "mobile", "fixed line", ...
     texter: Texter | None = None  # None when texting is off
     portfolio_url: str = ""

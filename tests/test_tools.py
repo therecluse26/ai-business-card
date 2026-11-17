@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
+from ai_call_center.graph.tools import note_caller_before_transfer, note_refused_transfer_at_call_end, save_lead_record
 from ai_call_center.telephony import TransferRequest
 from ai_call_center.notify import plain_text
 from tests.conftest import OWNER_PHONE, scripted, tool_call
@@ -341,7 +342,11 @@ def test_only_the_callers_own_words_count_as_a_request_for_a_live_call():
 
     for said in ("Can I speak to him?", "I'd like to talk to the owner.", "Please transfer me.", "Connect me.", "Put me through.", "Is there a real person?"):
         assert asked_for_the_owner([f"caller: {said}"]), said
+    for said in ("Can you call Brad?", "could you please call him now", "Would you ring the owner?"):  # the caller asks the agent to ring someone now
+        assert asked_for_the_owner([f"caller: {said}"]), said
     for said in ("I would like to leave a message with him.", "Can you email him?", "Have him call me back.", "I want to hire him.", "Yes."):
+        assert not asked_for_the_owner([f"caller: {said}"]), said
+    for said in ("Can you call me back?", "Can you have Brad call me?", "Could you call my office tomorrow?", "Can you call back later?"):
         assert not asked_for_the_owner([f"caller: {said}"]), said
     # What the agent said does not count, and neither does an old turn.
     assert not asked_for_the_owner(["agent: I can connect you to the owner.", "caller: No, a message."])
@@ -408,11 +413,50 @@ async def test_a_transfer_does_not_save_a_second_lead_or_a_nameless_one(make_gra
     assert len(leads.all()) == 1
 
 
-async def test_a_refused_transfer_still_keeps_the_caller_details(make_graph, ctx, config, leads, telephony):
+async def test_a_refused_transfer_sends_no_email_until_the_call_ends_without_a_message(make_graph, ctx, config, leads, telephony, notifier):
     ctx.transfer_unavailable = "the Telnyx application has no outbound voice profile"
     model = scripted(tool_call("request_owner_transfer", reason="Wants a quote.", caller_name="Ada"), "He will call you back.")
     await make_graph(model).ainvoke({"messages": [HumanMessage("Connect me.")], "active_agent": "contact"}, config=config, context=ctx)
-    assert [lead.name for lead in leads.all()] == ["Ada"] and telephony.transfers == []
+    # Nothing goes out at the refusal: the agent offers to take a message next.
+    assert leads.all() == [] and notifier.sent == [] and telephony.transfers == []
+
+    # The caller hangs up without a message. The owner still learns who asked.
+    lead = await note_refused_transfer_at_call_end(ctx, lead_saved=False)
+    assert lead["name"] == "Ada" and [(saved.name, saved.need) for saved in leads.all()] == [("Ada", "Wants a quote.")]
+    assert len(notifier.sent) == 1
+    assert await note_refused_transfer_at_call_end(ctx, lead_saved=True) == {} and len(notifier.sent) == 1  # once only
+
+
+async def test_a_message_after_a_refused_transfer_is_the_only_email(make_graph, ctx, config, leads, telephony, notifier):
+    # The real call of 2026-11-16: "Can you call Brad?" outside the transfer hours, then a message.
+    ctx.transfer_unavailable = "the Telnyx application has no outbound voice profile"
+    model = scripted(
+        tool_call("request_owner_transfer", reason="Caller Steve Stevens wants to speak to the owner now.", caller_name="Steve Stevens"),
+        tool_call("save_lead", call_id="call_2", name="Steve Stevens", need="I like the cut of your jib."),
+        "He has your message.",
+    )
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Can you call him?")], "active_agent": "contact"}, config=config, context=ctx)
+
+    _refusal, saved = (m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert "Lead saved as record 1" in saved.content
+    assert [lead.need for lead in leads.all()] == ["I like the cut of your jib."] and len(notifier.sent) == 1
+    assert await note_refused_transfer_at_call_end(ctx, lead_saved=True) == {} and len(notifier.sent) == 1
+
+
+async def test_a_message_after_a_transfer_that_nobody_answered_is_saved_and_emailed(ctx, leads, notifier):
+    # The owner's phone rang, so a record of who called exists. The message is still new.
+    note = await note_caller_before_transfer(ctx, lead_saved=False, caller_name="Ada Lovelace", company="", reason="Ada Lovelace wants to speak to the owner now.")
+    assert note["name"] == "Ada Lovelace" and ctx.transfer_note_id == 1
+
+    again, _ = await save_lead_record(ctx, name="Ada Lovelace", need="Ada wants to speak to the owner.")
+    assert again.startswith("Already saved on this call as record 1")  # the same request in other words is not a message
+
+    text, lead = await save_lead_record(ctx, name="Ada Lovelace", need="Please send me a quote for a booking agent.")
+    assert "Lead saved as record 2" in text and lead["need"] == "Please send me a quote for a booking agent."
+    assert [saved.need for saved in leads.all()][-1] == "Please send me a quote for a booking agent." and len(notifier.sent) == 2
+
+    third, _ = await save_lead_record(ctx, name="Ada Lovelace", need="One more thought about the quote.")
+    assert third.startswith("Already saved on this call as record 2")  # one message per call, as before
 
 
 async def test_the_same_caller_is_not_saved_twice_on_one_call(make_graph, ctx, config, leads, notifier):
@@ -428,3 +472,71 @@ async def test_the_same_caller_is_not_saved_twice_on_one_call(make_graph, ctx, c
     assert second.content.startswith("Already saved on this call as record 1")
     assert "Lead saved as record 2" in third.content  # a new email address is new information
     assert [lead.email for lead in leads.all()] == ["", "ada@example.test"]
+
+
+async def test_a_refused_transfer_tells_the_agent_that_it_has_the_name(make_graph, ctx, config):
+    ctx.transfer_unavailable = "the Telnyx application has no outbound voice profile"
+    model = scripted(tool_call("request_owner_transfer", reason="Wants a quote.", caller_name="Ada Lovelace"), "He will call you back.")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Connect me.")], "active_agent": "contact"}, config=config, context=ctx)
+
+    (refusal,) = (m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert "You have the caller's name (Ada Lovelace). Do not ask for it again: ask only for the message." in refusal.content
+    assert ctx.caller_name == "Ada Lovelace"  # the next agent on this call reads it in the handoff message
+
+
+def test_the_greeting_says_whose_line_this_is_and_what_a_caller_can_do(specs):
+    from ai_call_center.agents.specs import menu_line, opening_line
+
+    assert opening_line("Ada Lovelace") == "Hi, you've reached Ada Lovelace's AI business card. I'm an AI assistant that Ada built."
+    assert "take a message for Ada" in menu_line("Ada Lovelace")
+    from ai_call_center.agents.specs import greeting_words
+    from ai_call_center.voice.call_session import connect_message
+
+    new, back = greeting_words("Ada Lovelace"), greeting_words("Ada Lovelace", "Steve")
+    assert new.startswith(opening_line("Ada Lovelace")) and menu_line("Ada Lovelace") in new and new.endswith("What brings you to call today?")
+    # A caller who may be a returning caller hears who this is, and one question. Nothing about an earlier call.
+    assert back == f'{opening_line("Ada Lovelace")} Am I speaking with Steve?'
+    assert f'"{back}"' in connect_message(back) and "nothing before or after them" in connect_message(back)
+    text = specs["classifier"].instructions
+    assert "Your opening line is exactly:" in text and "What you can help with is exactly:" in text and "What brings you to call today?" in text
+    assert "contact" not in [name for name, spec in specs.items() if "Your opening line" in spec.instructions]  # only the greeting agent
+
+
+def test_a_message_is_saved_only_after_the_caller_says_yes_to_it(ctx):
+    from ai_call_center.graph.tools import confirmed_the_message, message_confirm_question
+
+    asked = ["agent: I'll tell him you want a quote, and he can call you back on this number. Is that right?"]
+    for yes in ("Yes, that is right.", "Yep.", "That's correct, thanks.", "Sounds good."):
+        assert confirmed_the_message([*asked, f"caller: {yes}"]), yes
+    assert confirmed_the_message([*asked, "caller: Yes.", "caller: That is right."])  # one turn in two parts
+    # The message itself, a change, and silence are not a yes.
+    told = "caller: Okay. Then take a message. Tell him I like the cut of his jib and I want to give him a million dollars."
+    not_asked = ["agent: Sure, what's your name and what should I tell him?", "caller: Yes, that is right."]  # a yes to another question
+    for lines in ([told], [*asked, "caller: No, the number is wrong."], [*asked, "caller: Yes, but wait, change the name."], asked, [], not_asked):
+        assert not confirmed_the_message(lines), lines
+
+    # The save is held back once. The caller's answer decides, so the second call passes.
+    first = message_confirm_question(ctx, [told])
+    assert first.startswith("Not saved yet") and 'ask: "Is that right?"' in first and "Do not ask for their name again." in first
+    assert message_confirm_question(ctx, [told]) is None
+
+    ctx.message_confirm_asked = False
+    assert message_confirm_question(ctx, [*asked, "caller: Yes."]) is None and not ctx.message_confirm_asked
+
+
+async def test_a_message_that_waited_for_a_yes_is_saved_when_the_call_ends(ctx, leads, notifier):
+    from ai_call_center.graph.tools import NOT_CONFIRMED_NOTE, confirmed_the_message, save_held_message_at_call_end
+
+    # Other words for the same question count too.
+    assert confirmed_the_message(["agent: Please confirm, should I save that for him?", "caller: Yes, that is right."])
+
+    assert await save_held_message_at_call_end(ctx) == {}  # nothing waits
+    ctx.held_message = {"name": "Ada Lovelace", "need": "Please send me a quote.", "call_notes": ""}
+    lead = await save_held_message_at_call_end(ctx)
+    assert lead["need"] == "Please send me a quote." and [saved.name for saved in leads.all()] == ["Ada Lovelace"]
+    assert NOT_CONFIRMED_NOTE in plain_text(notifier.sent[0]) and ctx.held_message is None
+
+    # A message that the caller did confirm leaves nothing to save at the end.
+    ctx.held_message = {"name": "Ada Lovelace", "need": "Please send me a quote.", "call_notes": ""}
+    await save_lead_record(ctx, name="Ada Lovelace", need="Please send me a quote.", email="ada@example.test")
+    assert ctx.held_message is None and await save_held_message_at_call_end(ctx) == {}

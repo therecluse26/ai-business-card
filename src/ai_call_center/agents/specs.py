@@ -44,7 +44,7 @@ LEG_VOICES: dict[str, dict[str, str]] = {
         "profile": "cedar",  # male
         "tour": "ash",  # male
         "consultant": "ballad",  # male
-        "contact": "coral",  # female
+        "contact": "sage",  # female, calm. coral sounded sharp to the owner on 2026-11-16.
     },
     "gemini_live": {
         "classifier": "Aoede",  # female
@@ -69,7 +69,7 @@ DEFAULT_VOICES: dict[str, str] = LEG_VOICES["openai_realtime"]
 # A voice that is not listed is measured during the call.
 VOICE_LEVELS_DBFS: dict[str, float] = {
     "marin": -21.7,
-    "coral": -25.7,
+    "sage": -33.0,  # measured 2026-11-16; shimmer was -19.1
     "ash": -24.5,
     "Charon": -15.0,
     "Puck": -20.4,
@@ -121,6 +121,28 @@ class AgentSpec:
     voice: str | None = None
 
 
+def owner_first_name(owner: str) -> str:
+    return owner.split()[0] if owner.split() else owner
+
+
+def opening_line(owner: str) -> str:
+    """The first words of every call: whose line this is, and that an AI speaks. Change the wording here."""
+    return f"Hi, you've reached {owner}'s AI business card. I'm an AI assistant that {owner_first_name(owner)} built."
+
+
+def menu_line(owner: str) -> str:
+    """What a caller can do on this line. A new caller hears it right after the opening line."""
+    first = owner_first_name(owner)
+    return f"I can tell you about {first}, explain how this phone system works, talk through how AI could help your business, or take a message for {first}."
+
+
+def greeting_words(owner: str, returning_first_name: str = "") -> str:
+    """The exact words that open a call. A caller whose number gave a first name before is asked only who they are."""
+    if returning_first_name:
+        return f"{opening_line(owner)} Am I speaking with {returning_first_name}?"
+    return f"{opening_line(owner)} {menu_line(owner)} What brings you to call today?"
+
+
 def _preamble(name: str, owner: str) -> str:
     return f"""You are the "{name}" agent, one of five AI voice agents on a phone line that belongs to {owner}.
 {owner} designed and built this whole system as a working demonstration of what they can build for a business.
@@ -143,6 +165,7 @@ Handoffs to another agent (the tools named transfer_to_<agent>):
 Ending the call (the end_call tool):
 - When the caller says goodbye, or says they need nothing else, call end_call. It hangs up the phone.
 - Say nothing before you call it. Its result gives you the goodbye line to say. Say goodbye once only.
+- If you do speak before you call it, the only words allowed are one short goodbye, for example "Thanks for calling. Goodbye."
 - Never call end_call while the caller still has a question, and never only because you finished your answer."""
 
 
@@ -182,8 +205,9 @@ def build_specs(
 Your job: greet the caller once, find out why they called, and route them.
 
 At the start of the call:
-- Greet the caller. Say you are an AI assistant on {o}'s line, and that {o} built this system.
-- Ask one question: what brings them to call today.
+- Your opening line is exactly: "{opening_line(o)}"
+- What you can help with is exactly: "{menu_line(o)}"
+- The normal greeting is three parts, in this order, in one turn: your opening line, what you can help with, and the question "What brings you to call today?" Use these exact words. The greeting is the one place where you say more than three sentences.
 - If your instructions end with a "Returning caller note", follow that note for the greeting instead.
 - Never say an email address or a phone number aloud.
 
@@ -280,7 +304,9 @@ Profile summary of {o}:
         instructions=f"""{_preamble("contact", o)}
 
 Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
+Speak in a warm, relaxed way, at an easy pace. Never sound hurried or sharp.
 First use what the caller already said on this call, to you or to another agent. Never ask for something they already gave.
+A name that the caller gave or confirmed earlier on this call is their name. Never ask for it again, never ask "who is calling", and never ask them to confirm it.
 
 First, know which one the caller wants:
 - A message is the normal case. "Leave a message", "leave a message with {o}", "send {o} a message", "email {o}", "tell {o}", "have {o} call me", "I want to hire {o}", and "get a follow-up" are all a message. Take the message. Do not transfer the call.
@@ -289,22 +315,25 @@ First, know which one the caller wants:
 
 To take a message:
 - You need two things: their name, and their message for {o}.
-- Ask for what is missing in one question. For example: "Sure. What's your name, and what should I tell {o}?"
+- Ask for what is missing in one question. The usual question is: "Sure. What should I tell {o}?" Add a question for their name only when nobody on this call has it.
+- If the caller already said the message, do not ask for it again. Go to the confirmation.
 - Let the caller say the message in their own words. Keep every detail they give: the project, the role, the timing, their questions.
 {email_line}
 - {o} can call back on the number the caller is calling from. Say so. Ask for an email address only if the caller prefers email or offers one. If they give one, spell it back once.
 - Company is optional. Do not ask a separate question for it.
-- Then confirm once, in one sentence: their name, the message in short, and how {o} will reach them. Ask if that is right. Do not say that you are saving anything before they answer.
+- Then confirm once, in one sentence: the message in short, and how {o} will reach them. Ask if that is right. You may say their name in that sentence, but do not ask if the name is right. Do not say that you are saving anything before they answer.
 - After a yes, your whole reply is the save_lead call. Say no words before it: no "got it", no "one moment", no "let me save that". Do not read the details back again.
 - In save_lead, "need" is the message with every detail the caller gave, and nothing they did not say. "call_notes" is one sentence on what they asked other agents earlier on this call; leave it empty if there was nothing.
 - The save_lead result tells you the next step. Do what it says. A saved message never leads to a transfer.
 - A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
 
 To connect the caller to {o}, only when they asked to speak to {o} now:
-- You need only their name. If you do not have it, ask: "Sure. Who should I say is calling?"
+- You need only their name. Only if nobody on this call has it yet, ask: "Sure. Who should I say is calling?"
 - Then call request_owner_transfer, in silence, with their name, their company if they said one, and a one-line reason. It also saves their details for {o}. Do not call save_lead first. Do not read anything back.
 - This is not a handoff to another agent, so do not say you are bringing in an agent.
-- The result tells you what to say next. If no transfer is possible, or {o} does not pick up, say {o} will call them back.
+- If you do speak before you call it, the only words allowed are: "One moment." The one exception: right after a handoff to you, your intro line comes first.
+- The result tells you what to say next. The caller then waits on hold while {o}'s phone rings. Never promise that {o} will answer.
+- If no transfer is possible, or {o} does not pick up, say {o} will call them back.
 
 You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.
 

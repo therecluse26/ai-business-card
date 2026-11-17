@@ -109,7 +109,10 @@ async def save_lead_record(
         row_id, saved = earlier
         same_person = saved.name.casefold() == name.casefold()
         nothing_new = not callback_number and email in ("", saved.email) and company.casefold() in ("", saved.company.casefold())
-        if same_person and nothing_new:
+        # A record made before a transfer says only that the caller asked for the owner. A message
+        # that the caller leaves after it is new. On 2026-11-16 such a message was dropped here.
+        new_message = kind == "message" and row_id == ctx.transfer_note_id and not says_the_same(need, saved.need)
+        if same_person and nothing_new and not new_message:
             return (
                 f"Already saved on this call as record {row_id}. Do not save it again. Tell the caller the owner has their details and will follow up.",
                 {"id": str(row_id), "name": saved.name, "email": saved.email, "company": saved.company, "need": saved.need},
@@ -127,6 +130,9 @@ async def save_lead_record(
     )
     row_id = ctx.leads.save(lead)
     ctx.caller_name = lead.name
+    ctx.transfer_note_id = row_id if kind == "transfer" else 0
+    ctx.refused_transfer = None  # this record tells the owner who called
+    ctx.held_message = None
     reach = "by email" if email else ("on the callback number they gave" if callback_number else "on the number they are calling from")
     if wants_file and not email:
         reach += "; no email address was on file"
@@ -253,9 +259,10 @@ async def text_owner_before_transfer(ctx: CallContext, reason: str) -> None:
 async def note_caller_before_transfer(
     ctx: CallContext, *, lead_saved: bool, caller_name: str, company: str, reason: str, visited: list[str] | None = None
 ) -> dict[str, str]:
-    """Before a live transfer, make sure the owner has a record of who called, so a call that is
-    not answered still leaves a lead. Returns the lead saved now, or {} when one exists already
-    or no name is known."""
+    """Before the owner's phone rings, make sure the owner has a record of who called, so a call
+    that is not answered still leaves a lead. Returns the lead saved now, or {} when one exists
+    already or no name is known. Call it only when the transfer goes ahead: see `remember_refused_transfer`."""
+    ctx.refused_transfer = None
     name = caller_name.strip() or ctx.caller_name
     if lead_saved or not name:
         return {}
@@ -265,10 +272,30 @@ async def note_caller_before_transfer(
     return lead
 
 
+def remember_refused_transfer(ctx: CallContext, *, caller_name: str, company: str, reason: str) -> None:
+    """A refused transfer sends no email at once. The agent offers to take a message next, and that
+    message is the owner's email. An email sent here went out before the caller said any message."""
+    ctx.refused_transfer = {"name": caller_name.strip(), "company": company.strip(), "reason": reason.strip()}
+    ctx.caller_name = ctx.caller_name or caller_name.strip()  # the next agent on this call does not ask again
+
+
+async def note_refused_transfer_at_call_end(ctx: CallContext, *, lead_saved: bool, visited: list[str] | None = None) -> dict[str, str]:
+    """At the end of a call: a caller who asked for the owner, was refused, and left no message
+    still leaves a record. Returns the lead saved now, or {}."""
+    note, ctx.refused_transfer = ctx.refused_transfer, None
+    if note is None:
+        return {}
+    return await note_caller_before_transfer(
+        ctx, lead_saved=lead_saved, caller_name=note["name"], company=note["company"], reason=note["reason"], visited=visited
+    )
+
+
 # Words a caller uses to ask for a live call. "Leave a message", "email him", and "have him call
-# me" hold none of them.
+# me" hold none of them. "Can you call Brad?" asks the agent to ring someone now; "can you call me
+# back" and "can you call my office" do not.
 LIVE_REQUEST = re.compile(
-    r"\b(speak|spoke|talk|transfer|connect|patch)\w*|\bput me through\b|\bon the (phone|line)\b|\b(real|live) person\b|\bhuman\b",
+    r"\b(speak|spoke|talk|transfer|connect|patch)\w*|\bput me through\b|\bon the (phone|line)\b|\b(real|live) person\b|\bhuman\b"
+    r"|\b(can|could|will|would) you (\w+ )?(call|ring|phone|dial) (?!me\b|us\b|my\b|back\b)\w+",
     flags=re.IGNORECASE,
 )
 CALLER_TURNS_CHECKED = 4
@@ -298,19 +325,80 @@ def transfer_question(ctx: CallContext, lines: list[str]) -> str | None:
     )
 
 
-def transfer_closed_message(ctx: CallContext, now: datetime | None = None) -> str | None:
+# A short yes to the agent's "is that right?". A long turn holds new details, so it is not a yes.
+CONFIRMS = re.compile(
+    r"\b(yes|yeah|yep|yup|yea|correct|right|exactly|perfect|sure|okay|ok|sounds good|go ahead|please do|you got it|that's it|that is it|uh huh)\b",
+    flags=re.IGNORECASE,
+)
+REJECTS = re.compile(r"\b(no|not|nope|wrong|wait|actually|instead|change)\b", flags=re.IGNORECASE)
+CONFIRM_MAX_WORDS = 10
+# The agent's question before that yes. A yes to "what's your name?" confirms nothing.
+ASKS_IF_RIGHT = re.compile(
+    r"\b(right|correct|accurate|confirm|sounds? (good|okay|ok)|looks? good|should i (save|send|pass))\b[^.?!]*\?", flags=re.IGNORECASE
+)
+
+
+def confirmed_the_message(lines: list[str]) -> bool:
+    """True when the agent asked if the message is right, and the caller's words after it are a short yes."""
+    rest = list(lines)
+    after: list[str] = []
+    while rest and rest[-1].startswith("caller:"):
+        after.insert(0, rest.pop().removeprefix("caller:"))
+    asked: list[str] = []
+    while rest and rest[-1].startswith("agent:"):
+        asked.insert(0, rest.pop().removeprefix("agent:"))
+    said = " ".join(after)
+    yes = bool(said) and len(said.split()) <= CONFIRM_MAX_WORDS and bool(CONFIRMS.search(said)) and not REJECTS.search(said)
+    return yes and bool(ASKS_IF_RIGHT.search(" ".join(asked)))
+
+
+def message_confirm_question(ctx: CallContext, lines: list[str]) -> str | None:
+    """None when the message can be saved. Otherwise the text for the model: nothing saved yet, say it back first.
+
+    A save emails the owner at once, so the model's memory of its instructions is not enough. On
+    2026-11-16 an agent saved a message that the caller had not heard back. The check holds a save
+    back once only: the caller's answer decides, so the next save_lead call passes.
+    """
+    if ctx.message_confirm_asked or confirmed_the_message(lines):
+        return None
+    ctx.message_confirm_asked = True
+    return (
+        "Not saved yet, and nothing was sent: the caller has not confirmed the message. Do not say that anything is saved. "
+        "Say the message back in one sentence, and say how the owner will reach them. Then ask: \"Is that right?\" "
+        "Do not ask for their name again. After they say yes, call save_lead again with the same details. If they change something, use the new details."
+    )
+
+
+NOT_CONFIRMED_NOTE = "The call ended before the caller confirmed this message."
+
+
+async def save_held_message_at_call_end(ctx: CallContext, *, visited: list[str] | None = None) -> dict[str, str]:
+    """At the end of a call: a message that waited for the caller's yes is saved as it is. An
+    unconfirmed message is better for the owner than a lost one. Returns the lead saved now, or {}."""
+    held, ctx.held_message = ctx.held_message, None
+    if not held:
+        return {}
+    notes = " ".join(part for part in (held.get("call_notes", "").strip(), NOT_CONFIRMED_NOTE) if part)
+    _result, lead = await save_lead_record(ctx, **{**held, "call_notes": notes}, visited=visited)
+    return lead
+
+
+def transfer_closed_message(ctx: CallContext, now: datetime | None = None, caller_name: str = "") -> str | None:
     """None when a live transfer is allowed now. Otherwise the text for the model: no transfer, take a message."""
+    name = caller_name.strip() or ctx.caller_name
+    # The agent has the name already. Without this line it asked "what's your name?" again for the message.
+    have_name = f" You have the caller's name ({name}). Do not ask for it again: ask only for the message." if name else ""
     if ctx.transfer_unavailable:
         return (
             f"No transfer was made. A live transfer is not available right now ({ctx.transfer_unavailable}). "
-            "Do not give the caller the technical reason. Say the owner cannot take the call right now, and that the owner will follow up."
+            "Do not give the caller the technical reason. Say the owner cannot take the call right now, and that the owner will follow up." + have_name
         )
     hours = ctx.transfer_hours
     if hours is None or hours.is_open(now):
         return None
     return (
         f"No transfer was made. The owner takes live transfers {hours.describe()}, and it is outside those hours now. "
-        "Tell the caller that in one sentence. Then offer to take their details and a message, so the owner can call them back."
+        "Tell the caller that in one sentence. Then offer to take a message, so the owner can call them back." + have_name
     )
 
 
@@ -379,13 +467,14 @@ async def request_owner_transfer(reason: str, runtime: ToolRuntime[CallContext, 
     state = runtime.state
     if question := transfer_question(ctx, transcript_lines(state.get("messages", []))):
         return Command(update={"messages": [ToolMessage(content=question, tool_call_id=runtime.tool_call_id)]})
+    if closed := transfer_closed_message(ctx, caller_name=caller_name):
+        remember_refused_transfer(ctx, caller_name=caller_name, company=company, reason=reason)
+        return Command(update={"messages": [ToolMessage(content=closed, tool_call_id=runtime.tool_call_id)]})
     visited = ["classifier", *state.get("handoffs", [])]
     if lead := await note_caller_before_transfer(
         ctx, lead_saved=bool(state.get("lead")), caller_name=caller_name, company=company, reason=reason, visited=visited
     ):
         update["lead"] = lead
-    if closed := transfer_closed_message(ctx):
-        return Command(update={**update, "messages": [ToolMessage(content=closed, tool_call_id=runtime.tool_call_id)]})
     await text_owner_before_transfer(ctx, reason)
     await ctx.telephony.transfer(ctx.call_control_id, to=ctx.owner_phone)
     return Command(

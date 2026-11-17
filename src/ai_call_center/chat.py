@@ -20,6 +20,7 @@ from ai_call_center.guardrails import TransferHours
 from ai_call_center.config import get_settings
 from ai_call_center.graph.build import build_graph, default_model, default_specs
 from ai_call_center.graph.state import CallContext
+from ai_call_center.graph.tools import note_refused_transfer_at_call_end
 from ai_call_center.leads import LeadStore
 from ai_call_center.notify import RecordingNotifier, notifier_from_settings
 from ai_call_center.telephony import RecordingTelephony
@@ -135,6 +136,7 @@ async def run(caller_number: str = "+10000000000") -> None:
             break
         if not text:
             text = "[silence]"
+    await note_refused_transfer_at_call_end(ctx, lead_saved=store.lead_for_call(call_id) is not None, visited=["classifier", *handoffs])
     if result_messages:
         summary, caller_name = await summarize_call(result_messages, init_chat_model(settings.summary_model))
         store.finish_call(call_id, agents=["classifier", *handoffs], summary=summary, caller_name=caller_name)

@@ -26,9 +26,12 @@ from pipecat.frames.frames import (
     ErrorFrame,
     Frame,
     FunctionCallResultProperties,
+    InputAudioRawFrame,
     LLMMessagesAppendFrame,
     LLMRunFrame,
     ManuallySwitchServiceFrame,
+    TranscriptionFrame,
+    UserStartedSpeakingFrame,
 )
 from pipecat.observers.loggers.metrics_log_observer import MetricsLogObserver
 from pipecat.pipeline.llm_switcher import LLMSwitcher
@@ -42,7 +45,7 @@ from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
 from pipecat.workers.runner import WorkerRunner
 
-from ai_call_center.agents.specs import LEG_PLATFORMS, LEGS, VOICE_LEVELS_DBFS, AgentSpec
+from ai_call_center.agents.specs import LEG_PLATFORMS, LEGS, VOICE_LEVELS_DBFS, AgentSpec, greeting_words
 from ai_call_center.callers import UNKNOWN_NUMBERS, greeting_note, history_text, lookup_text, recall, summarize_call, transcript_lines
 from ai_call_center.config import Settings
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
@@ -53,8 +56,13 @@ from ai_call_center.graph.tools import (
     SAY_GOODBYE,
     asked_for_the_owner,
     describe_call,
+    confirmed_the_message,
+    message_confirm_question,
     note_caller_before_transfer,
+    note_refused_transfer_at_call_end,
+    remember_refused_transfer,
     release_caller_history,
+    save_held_message_at_call_end,
     said_goodbye,
     save_lead_record,
     text_owner_before_transfer,
@@ -67,7 +75,7 @@ from ai_call_center.leads import LeadStore
 from ai_call_center.notify import notifier_from_settings
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
-from ai_call_center.telephony.transfers import Fallback, Snapshot, TransferManager
+from ai_call_center.telephony.transfers import Fallback, Snapshot, TransferManager, screening_prompt
 from ai_call_center.voice.health import ProviderHealth
 from ai_call_center.voice.leveler import VoiceLeveler
 from ai_call_center.voice.stats import CallStats
@@ -89,6 +97,13 @@ log = logging.getLogger(__name__)
 TELNYX_SAMPLE_RATE = 8000
 TRANSFER_FALLBACK_SECS = 4.0  # transfer anyway if the agent never says its goodbye line
 SWITCH_TIMEOUT_SECS = 2.0
+CALLER_WORDS_SECS = 6.0  # how long words the caller just said count as "not in the transcript yet"
+# How long a handoff waits for those words to reach the shared context. Measured 2026-11-16 over
+# 10 handoffs from Nova: Pipecat committed the words within 0.1 s twice, after 1.0 s twice, and
+# not within 1.5 s six times. After the wait, the handoff adds the words itself.
+CALLER_WORDS_WAIT_SECS = 0.5
+SPOKE_WAIT_SECS = 0.5  # how long a handoff waits for a sign that the caller spoke to the agent, before it is refused
+OPENING_QUIET_SECS = 3.0  # the longest time the caller's audio is replaced by silence while the greeting has not started
 TRANSCRIPT_WAIT_SECS = 0.8  # how long a transfer request waits for the transcript of the caller's last turn
 ANSWER_DEADLINE_SECS = 8.0  # an agent asked to speak (greeting, handoff) that stays silent this long has failed
 RECOVERIES_PER_SERVICE = 2
@@ -106,22 +121,49 @@ def voice_instructions(spec: AgentSpec, leg: str, *notes: str) -> str:
     return "\n\n".join([f"{spec.instructions}\n\nIn this call you run on {LEGS.get(leg, leg)}.", *(n for n in notes if n)])
 
 
-def handoff_instruction(target: str, platform: str) -> str:
-    """What the new agent reads last when it takes over the call."""
+def known_name_note(caller_name: str) -> str:
+    """Tells an agent that takes the call who the caller is. On 2026-11-16 the contact agent asked
+    "who should I say is calling?" and "what's your name?" after the caller had confirmed their name."""
+    name = caller_name.strip()
+    if not name:
+        return ""
     return (
-        f"The call is now with the {target} agent. You are the {target} agent, with a new voice. Speak now. "
-        f'Your first sentence must be exactly: "Hi, I\'m the {target} agent, running on {platform}." '
-        "Then answer what the caller last asked. Do not greet again."
+        f" The caller's name is {name}. They gave or confirmed it earlier on this call. "
+        "Never ask for their name, never ask who is calling, and never ask them to confirm it."
     )
 
 
-def connect_message(returning: bool) -> str:
-    if returning:
-        return (
-            "The call has just connected. Your instructions end with a returning caller note. Greet the caller now as that note says: "
-            "first say you are the AI assistant on this line, then ask if you are speaking with that first name. Say nothing else."
-        )
-    return "The call has just connected. Greet the caller now."
+def handoff_instruction(target: str, platform: str, caller_name: str = "") -> str:
+    """What the new agent reads last when it takes over the call.
+
+    Nova and Gemini read this as a caller's turn, so it says that it is not one. Without that,
+    Nova took "the call is now with the consultant agent" as a request: it said "Let me bring in
+    the right agent for that" again and called a handoff tool. Measured 2026-11-16.
+    """
+    return (
+        "This is a message from the phone system, not from the caller. "
+        f"The handoff is complete: you are the {target} agent, with a new voice, and the call is yours. "
+        "Do not say that you will bring in an agent, and do not call a transfer_to tool in this answer. Speak to the caller now. "
+        f'Your first sentence must be exactly: "Hi, I\'m the {target} agent, running on {platform}." '
+        "Say it before anything else, also before you call a tool. "
+        "Then answer what the caller last asked. Do not greet again." + known_name_note(caller_name)
+    )
+
+
+def handoff_refused(agent: str, platform: str) -> str:
+    """What an agent reads when it tries to hand the call on before the caller has said anything to it."""
+    return (
+        f"No handoff was made. You are the {agent} agent. You took over this call a moment ago, and the caller has not spoken since. "
+        "The caller was sent to you on purpose. Do not mention this, and do not announce another agent. "
+        f'If you have not said it yet, say: "Hi, I\'m the {agent} agent, running on {platform}." '
+        "Then answer the caller's last words yourself. You may hand off after the caller speaks again."
+    )
+
+
+def connect_message(words: str) -> str:
+    """The first message of a call, with the exact greeting. Left free, a voice model said only
+    "I'm the AI assistant on this line", and once spoke its own thoughts first. Measured 2026-11-16."""
+    return f'The call has just connected. Say exactly these words to the caller, and nothing before or after them: "{words}"'
 
 
 def failover_instruction(agent: str, platform: str) -> str:
@@ -181,6 +223,8 @@ class VoiceCallState:
     transfer_requested: bool = False
     end_reason: str = ""  # why the session ended: "caller", "agent", "transfer", "limit", "failover"; "" while it runs
     ending: bool = False  # end_call was accepted; the hang-up waits for the goodbye line
+    transfer_announce: str = ""  # what the owner hears before they accept the call: who is calling, and why
+    took_over_at: float = 0.0  # when the active agent got the call by a handoff (monotonic); 0.0 for the first agent
 
 
 class TransferGate(FrameProcessor):
@@ -230,6 +274,90 @@ class TransferGate(FrameProcessor):
             return
         self._fired = True
         await self._on_transfer()
+
+
+def _letters(text: str) -> str:
+    return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+
+class OpeningQuiet(FrameProcessor):
+    """Replaces the caller's audio with silence until the greeting starts to play.
+
+    A phone line can click when the media stream opens. A voice provider takes the click as a
+    caller's turn and answers it, so the greeting plays twice. Measured 2026-11-16: a noise of
+    170 ms, 60 ms after the stream opened, and a second greeting right after the first.
+    Before the greeting starts, the caller has nothing to answer. After it starts, the caller's
+    audio passes, so the caller can interrupt. `limit_secs` opens the audio if no greeting comes.
+    """
+
+    def __init__(self, limit_secs: float = OPENING_QUIET_SECS) -> None:
+        super().__init__()
+        self._limit = limit_secs
+        self._first_audio_at: float | None = None
+        self.open = False
+
+    def screen(self, frame: Frame) -> None:
+        """Open on the first sound from the agent. Until then, turn the caller's audio into silence."""
+        if self.open:
+            return
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self.open = True
+            log.info("caller audio opened: the greeting started")
+        elif isinstance(frame, InputAudioRawFrame):
+            now = time.monotonic()
+            self._first_audio_at = self._first_audio_at or now
+            if now - self._first_audio_at >= self._limit:
+                self.open = True
+                log.warning("caller audio opened after %.1f s with no greeting", self._limit)
+            else:
+                frame.audio = bytes(len(frame.audio))
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        self.screen(frame)
+        await self.push_frame(frame, direction)
+
+
+class CallerWords(FrameProcessor):
+    """Keeps the words the caller said in the last seconds, as the voice service reports them.
+
+    The shared context gets a caller's turn only when Pipecat's aggregator commits it. That can be
+    a second after the service heard the words, and after a tool call that the words caused. A
+    check on "the caller's own words", or a handoff, must not miss those words.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._heard: list[tuple[float, str]] = []
+        self.last_spoke_at = 0.0  # when a service last reported the caller's words or the start of a caller's turn (monotonic)
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, TranscriptionFrame) and direction == FrameDirection.UPSTREAM and frame.text.strip():
+            now = time.monotonic()
+            self._heard = [(at, text) for at, text in self._heard if now - at <= CALLER_WORDS_SECS] + [(now, frame.text)]
+            self.last_spoke_at = now
+        elif isinstance(frame, UserStartedSpeakingFrame):
+            self.last_spoke_at = time.monotonic()
+        await self.push_frame(frame, direction)
+
+    def spoke_since(self, when: float) -> bool:
+        """True when the caller said something after `when` (monotonic)."""
+        return self.last_spoke_at > when
+
+    def missing_from(self, lines: list[str]) -> str:
+        """The caller's newest words, when the transcript `lines` do not hold them yet. Else ""."""
+        now = time.monotonic()
+        recent = " ".join(" ".join(text.split()) for at, text in self._heard if now - at <= CALLER_WORDS_SECS)
+        if not _letters(recent):
+            return ""
+        last = next((line for line in reversed(lines) if line.startswith("caller: ")), "")
+        return "" if _letters(recent) in _letters(last) else recent
+
+    def with_newest(self, lines: list[str]) -> list[str]:
+        """The transcript, plus the caller's newest words when it does not hold them yet."""
+        missing = self.missing_from(lines)
+        return [*lines, f"caller: {missing}"] if missing else lines
 
 
 class ServiceWatchdog(FrameProcessor):
@@ -362,6 +490,7 @@ class CallSession:
         # failed before the caller answered it.
         greeting = greeting_note(memory) if memory and (not resume or (failover_resume and not resume.identity_confirmed)) else ""
         history = history_text(memory) if memory and memory.first_name else ""
+        hello = greeting_words(self.settings.owner_name, memory.first_name if memory and greeting else "")
         # Number lookup started at call.initiated; take the result if it is ready.
         info = await self.lookups.get(caller_number) if self.lookups else None
         lookup_block = lookup_text(info) if info is not None else ""
@@ -399,6 +528,8 @@ class CallSession:
             number_info=info,
             caller_lookup=lookup_block,
             caller_name=resume.caller_name if resume else "",
+            transfer_note_id=resume.transfer_note_id if resume else 0,
+            refused_transfer=resume.refused_transfer if resume else None,
             transfer_unavailable=transfers.unavailable,
             caller_line_type=info.line_type if info else "",
             texter=self.telephony if self.settings.sms_enabled else None,
@@ -427,16 +558,17 @@ class CallSession:
             log.info("call %s: the %s agent takes over on %s (%s; caller has spoken: %s)", self.call_control_id, entry_agent, entry.leg, resume.reason, caller_spoke)
         if failover_resume and not caller_spoke:
             # The provider failed before the caller said anything: greet as on a new call.
-            first_messages = [{"role": "developer", "content": connect_message(bool(greeting))}]
+            first_messages = [{"role": "developer", "content": connect_message(hello)}]
         elif failover_resume:
-            instruction = handoff_instruction(entry_agent, entry_platform) if resume.reason == HANDOFF_REROUTED else failover_instruction(entry_agent, entry_platform)
+            instruction = handoff_instruction(entry_agent, entry_platform, resume.caller_name) if resume.reason == HANDOFF_REROUTED else failover_instruction(entry_agent, entry_platform)
             first_messages = [*resume.messages, {"role": "developer", "content": instruction}]
         elif resume:
             first_messages = [*after_transfer_attempt(resume.messages), {"role": "developer", "content": resume_message(resume.reason, self.settings.owner_name, state.lead_saved)}]
         else:
-            first_messages = [{"role": "developer", "content": connect_message(bool(greeting))}]
+            first_messages = [{"role": "developer", "content": connect_message(hello)}]
         context = LLMContext(messages=first_messages, tools=tools_for_agent(entry, schemas))
-        ctx.transcript = lambda: transcript_lines(context.messages)
+        caller_words = CallerWords()
+        ctx.transcript = lambda: caller_words.with_newest(transcript_lines(context.messages))
         user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
         # The first service in the list is active at start.
         switcher = LLMSwitcher(llms=[legs[entry_agent].service, *(vl.service for name, vl in legs.items() if name != entry_agent)])
@@ -447,6 +579,8 @@ class CallSession:
                     "messages": list(context.messages),
                     "handoffs": list(state.handoffs),
                     "lead_saved": state.lead_saved,
+                    "transfer_note_id": ctx.transfer_note_id,
+                    "refused_transfer": ctx.refused_transfer,
                     "identity_confirmed": ctx.identity_confirmed,
                     "caller_name": ctx.caller_name,
                     "failovers": resume.failovers if resume else 0,
@@ -461,7 +595,7 @@ class CallSession:
             # does not pick up.
             log.info("call %s: transferring to the owner", self.call_control_id)
             state.end_reason = "transfer"
-            transfers.start(self.call_control_id, to=self.settings.owner_phone, snapshot=snapshot())
+            transfers.start(self.call_control_id, to=self.settings.owner_phone, snapshot=snapshot(), announce=state.transfer_announce)
 
         # --- a voice provider that stops answering ---
         background: set[asyncio.Task] = set()
@@ -546,7 +680,7 @@ class CallSession:
         dead_agents: set[str] = set()
         gate = TransferGate(do_transfer)
         watchdog = ServiceWatchdog(legs, switcher, context, on_dead=on_dead)
-        processors = [transport.input(), user_aggregator, watchdog, switcher]
+        processors = [transport.input(), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher]
         if self.settings.voice_level_dbfs:
             # Every voice at one loudness, so a handoff does not sound like a volume change.
             voice_by_service = {id(vl.service): self.specs[name].voice or "" for name, vl in legs.items()}
@@ -576,6 +710,16 @@ class CallSession:
         # --- tool handlers: the voice model requests, this code acts ---
         async def on_save_lead(params: FunctionCallParams) -> None:
             args = {k: str(params.arguments.get(k) or "") for k in ("name", "need", "email", "company", "callback_number", "call_notes")}
+            # The caller's yes can reach the context a moment after the tool call, as with a transfer.
+            waited = 0.0
+            while not ctx.message_confirm_asked and not confirmed_the_message(ctx.transcript()) and waited < TRANSCRIPT_WAIT_SECS:
+                await asyncio.sleep(0.1)
+                waited += 0.1
+            if question := message_confirm_question(ctx, ctx.transcript()):
+                ctx.held_message = args  # saved at the end of the call if the caller hangs up before a yes
+                log.info("call %s: save held back; the caller has not confirmed the message", self.call_control_id)
+                await params.result_callback(question)
+                return
             result, lead = await save_lead_record(ctx, **args, visited=[ENTRY_AGENT, *state.handoffs])
             state.lead_saved = state.lead_saved or bool(lead)
             await params.result_callback(result)
@@ -614,21 +758,18 @@ class CallSession:
                 log.info("call %s: transfer held back; the caller did not ask for a live call", self.call_control_id)
                 await params.result_callback(question)
                 return
-            # The owner gets a record of who called, even if the transfer is refused or not answered.
-            if await note_caller_before_transfer(
-                ctx,
-                lead_saved=state.lead_saved,
-                caller_name=str(params.arguments.get("caller_name") or ""),
-                company=str(params.arguments.get("company") or ""),
-                reason=reason,
-                visited=[ENTRY_AGENT, *state.handoffs],
-            ):
-                state.lead_saved = True
-            if closed := transfer_closed_message(ctx):
+            who = {"caller_name": str(params.arguments.get("caller_name") or ""), "company": str(params.arguments.get("company") or ""), "reason": reason}
+            if closed := transfer_closed_message(ctx, caller_name=who["caller_name"]):
+                # No email now: the agent offers to take a message, and that message is the email.
+                remember_refused_transfer(ctx, **who)
                 log.info("call %s: transfer refused (%s)", self.call_control_id, ctx.transfer_unavailable or "outside the transfer hours")
                 await params.result_callback(closed)
                 return
+            # The owner's phone rings next. The owner gets a record of who called, even if nobody answers.
+            if await note_caller_before_transfer(ctx, lead_saved=state.lead_saved, **who, visited=[ENTRY_AGENT, *state.handoffs]):
+                state.lead_saved = True
             state.transfer_requested = True
+            state.transfer_announce = screening_prompt(str(params.arguments.get("caller_name") or "") or ctx.caller_name, reason)
             # The owner reads who is calling while the agent says its goodbye line.
             llm_task = asyncio.create_task(text_owner_before_transfer(ctx, str(params.arguments.get("reason", ""))))
             background.add(llm_task)
@@ -636,10 +777,12 @@ class CallSession:
             log.info("call %s: owner transfer requested (%s)", self.call_control_id, params.arguments.get("reason", ""))
             gate.arm()
             owner = self.settings.owner_name
-            await params.result_callback(
-                f'Say only this one line now: "Connecting you to {owner} now. Take care." Say nothing before it and nothing after it. '
-                f"The call moves to {owner}'s phone the moment you stop speaking."
-            )
+            if self.settings.transfer_screening:
+                # The caller hears a ring tone, and comes back to this agent when the owner does not accept.
+                line, then = f"I am calling {owner} now. Please hold.", "The caller hears a ring tone the moment you stop speaking."
+            else:
+                line, then = f"Connecting you to {owner} now. Take care.", f"The call moves to {owner}'s phone the moment you stop speaking."
+            await params.result_callback(f'Say only this one line now: "{line}" Say nothing before it and nothing after it. {then}')
 
         async def do_hangup() -> None:
             log.info("call %s: the agent ended the call after the caller said goodbye", self.call_control_id)
@@ -676,7 +819,9 @@ class CallSession:
         def make_handoff(target: str):
             async def on_handoff(params: FunctionCallParams) -> None:
                 await self._handoff(
-                    target, params, legs=legs, switcher=switcher, worker=worker, context=context, state=state, schemas=schemas, reroute=reroute, expect_speech=expect_speech, stats=stats
+                    target, params, legs=legs, switcher=switcher, worker=worker, context=context, state=state, schemas=schemas, reroute=reroute, expect_speech=expect_speech, stats=stats,
+                    caller_words=caller_words,
+                    known_name=lambda: ctx.caller_name,
                 )
 
             return on_handoff
@@ -747,7 +892,17 @@ class CallSession:
                 # The call goes on in a new session, which writes the summary when the call ends.
                 log.info("call %s: session ended after %.0f s to change the voice provider", self.call_control_id, time.monotonic() - started)
             else:
-                # The call is over. Write the short summary that the next call from this number will see.
+                # The call is over. A caller who was refused a transfer and left no message still leaves a record.
+                try:
+                    if await save_held_message_at_call_end(ctx, visited=[ENTRY_AGENT, *state.handoffs]):
+                        state.lead_saved = True
+                        log.info("call %s: the call ended before the caller confirmed the message; saved as it is", self.call_control_id)
+                    if await note_refused_transfer_at_call_end(ctx, lead_saved=state.lead_saved, visited=[ENTRY_AGENT, *state.handoffs]):
+                        state.lead_saved = True
+                        log.info("call %s: the caller left no message after a refused transfer; the owner got a note", self.call_control_id)
+                except Exception:
+                    log.exception("call %s: could not save the note for a refused transfer", self.call_control_id)
+                # Write the short summary that the next call from this number will see.
                 try:
                     summary, caller_name = await summarize_call(context.messages, init_chat_model(self.settings.summary_model))
                     store.finish_call(self.call_control_id, agents=[ENTRY_AGENT, *state.handoffs], summary=summary, caller_name=caller_name)
@@ -781,8 +936,28 @@ class CallSession:
         reroute=None,
         expect_speech=None,
         stats: CallStats | None = None,
+        caller_words: CallerWords | None = None,
+        known_name=None,  # () -> the caller's name when they gave or confirmed it on this call, else ""
     ) -> None:
         """Switch the active voice service to the target agent and have it answer."""
+        if target == state.active_agent:
+            # A model can call a tool it only saw in the conversation history. Measured 2026-11-16 on Nova.
+            log.info("call %s: handoff %s -> %s refused; the agent has the call already", self.call_control_id, target, target)
+            await params.result_callback(f"No handoff was made: you are the {target} agent already. Do not mention this. Answer the caller yourself.")
+            return
+        if state.took_over_at and caller_words is not None:
+            # Nova reports the caller's words and calls the tool in the same millisecond: let the words arrive.
+            deadline = time.monotonic() + SPOKE_WAIT_SECS
+            while not caller_words.spoke_since(state.took_over_at) and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+        if state.took_over_at and caller_words is not None and not caller_words.spoke_since(state.took_over_at):
+            # The agent got this call by a handoff and the caller has said nothing to it. A handoff now
+            # is the agent passing the caller on unanswered. Measured 2026-11-16: consultant -> contact
+            # -> consultant -> contact in 10 s, with "Let me bring in the right agent" three times.
+            holder = legs[state.active_agent]
+            log.info("call %s: handoff %s -> %s refused; the caller has not spoken since the last handoff", self.call_control_id, holder.agent, target)
+            await params.result_callback(handoff_refused(holder.agent, LEG_PLATFORMS.get(holder.leg, holder.leg)))
+            return
         previous = legs[state.active_agent]
         nxt = legs[target]
         spec = self.specs[target]
@@ -800,17 +975,29 @@ class CallSession:
             # and Pipecat treats as fatal.
             if reroute is not None and reroute(target):
                 return  # the target's provider is not answering; a new session on another provider takes the handoff
+            # The next agent answers the caller's last words, so they must be in the context it gets.
+            # A service can call the handoff tool before Pipecat has committed those words.
+            if caller_words is not None and caller_words.missing_from(transcript_lines(context.messages)):
+                t_wait = time.monotonic()
+                await _wait_for(lambda: not caller_words.missing_from(transcript_lines(context.messages)), CALLER_WORDS_WAIT_SECS, what="the caller's last words")
+                log.info("call %s: waited %.0f ms for the caller's last words to reach the context", self.call_control_id, (time.monotonic() - t_wait) * 1000)
+                if missing := caller_words.missing_from(transcript_lines(context.messages)):
+                    # Pipecat has not committed the caller's turn. Without these words the next agent
+                    # said "Ready to keep going. What would you like to do next?" and asked for a name it had.
+                    context.add_message({"role": "user", "content": missing})
+                    log.info("call %s: added the caller's last words to the context for the %s agent", self.call_control_id, target)
             context.set_tools(tools_for_agent(spec, schemas))
             # The last message of a replayed context decides what the new session does with it.
             # After a bare tool result, a session sometimes only says it is ready to continue.
             # A plain instruction as the last message makes it speak.
-            context.add_message({"role": "developer", "content": handoff_instruction(target, platform)})
+            context.add_message({"role": "developer", "content": handoff_instruction(target, platform, known_name() if known_name else "")})
             async with nxt.lock:  # a background reset of this service may still be running
                 await ensure_connected(nxt.service)
                 await adopt_context(nxt.service, context)
                 await worker.queue_frames([ManuallySwitchServiceFrame(service=nxt.service)])
                 await _wait_for(lambda: switcher.strategy.active_service is nxt.service, SWITCH_TIMEOUT_SECS)
                 await _answer(nxt, context, worker)
+            state.took_over_at = time.monotonic()
             if expect_speech is not None:
                 expect_speech(nxt)
             if stats is not None:
@@ -826,11 +1013,11 @@ class CallSession:
         )
 
 
-async def _wait_for(condition, timeout: float) -> None:
+async def _wait_for(condition, timeout: float, *, what: str = "service switch") -> None:
     deadline = time.monotonic() + timeout
     while not condition():
         if time.monotonic() > deadline:
-            log.warning("service switch did not complete within %.1f s", timeout)
+            log.warning("%s did not complete within %.1f s", what, timeout)
             return
         await asyncio.sleep(0.01)
 

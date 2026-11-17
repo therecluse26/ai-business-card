@@ -118,10 +118,14 @@ def greeting_note(memory: CallerMemory) -> str:
             "Returning caller note:",
             f"- This phone number has called before. The most recent caller gave the first name {name}.",
             "- A phone number can be shared. You do not know yet who is on the line, and you know nothing else about earlier calls yet.",
-            f'- This replaces the normal greeting. Say you are the AI assistant on this line. Then ask only: "Am I speaking with {name}?" Stop and wait for the answer.',
+            f'- This replaces the normal greeting. Say your opening line. Then ask only: "Am I speaking with {name}?" Stop and wait for the answer. Do not say what you can help with yet.',
             '- Until the caller says yes, say nothing about an earlier call: no topic, no company, no date, and no "welcome back".',
-            "- If the caller says yes, call confirm_returning_caller at once, without saying anything first. Its result gives you the notes from their earlier calls.",
-            '- If the caller says no, or the answer is not clear, say "No problem" and ask what brings them to call. '
+            # A voice model often speaks before a tool call. Measured 2026-11-16: "Hi, I'm the profile agent
+            # running on the speech platform" from the greeting agent. So it gets harmless words to say.
+            f'- If the caller says yes: say exactly "Welcome back, {name}." and call confirm_returning_caller in the same turn. '
+            'Say no other words with it: no introduction, no agent name, no "let me check", no "let me bring in". This is not a handoff. '
+            "The tool's result gives you the notes from their earlier calls.",
+            '- If the caller says no, or the answer is not clear, say "No problem." Then say what you can help with, and ask what brings them to call. '
             "Never call confirm_returning_caller then. Treat them as a new caller for the whole call.",
             "- If the caller asks who called before, or what an earlier call was about, say you cannot share anything about other calls.",
         ]
@@ -144,9 +148,12 @@ def history_text(memory: CallerMemory) -> str:
     if memory.contact_on_file:
         lines.append('- Their contact details are on file. To reuse them, call save_lead with email "on file". Ask only for what is new.')
     lines.append(
-        "Now welcome them back in one sentence. Name the topic of their last call in a few words, and ask if they are calling about that or about something new. "
-        "Do not read these notes out. Never say an email address or a phone number aloud. "
-        "You are still the same agent, and this was not a handoff: do not introduce yourself, and do not say that you looked anything up."
+        "This was not a handoff. You are still the same agent, and the caller knows who you are. "
+        'You said "Welcome back" already. Now say one sentence only, in this form: '
+        '"Last time you called about <the topic of their last call, in a few words>. Is this about that, or something new?" '
+        'Your reply starts with the words "Last time". Say nothing before them: no "welcome back", no "hi", no agent name, no platform. '
+        "Do not read these notes out. Never say an email address or a phone number aloud. Do not say that you looked anything up. "
+        "Who the caller is is now settled for the whole call. No agent asks for their name again, or asks them to confirm it."
     )
     return "\n".join(lines)
 
@@ -167,7 +174,7 @@ def lookup_text(info: NumberInfo) -> str:
     lines.append(
         "How to use it: do not open the call with it. If the caller asks what you know about them, or asks what this system can do, "
         "you may say the area and the line type as a live demonstration. "
-        "When you need the caller's name, you may offer the registered name as a guess and ask if it is right. Accept a no without comment. "
+        "When you need the caller's name and nobody on this call has it yet, you may offer the registered name as a guess and ask if it is right. Accept a no without comment. "
         "The registered name is the account holder; never treat it as confirmed."
     )
     return "\n".join(lines)

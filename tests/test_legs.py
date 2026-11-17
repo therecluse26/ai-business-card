@@ -12,7 +12,9 @@ from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
 
 def settings(**over) -> Settings:
-    return Settings(_env_file=None, **{"openai_api_key": "sk-test", "google_api_key": "g-test", **over})
+    # Every provider key is set here, so a real key in the developer's environment changes no test.
+    base = {"openai_api_key": "sk-test", "google_api_key": "g-test", "nova_aws_access_key_id": "", "nova_aws_secret_access_key": ""}
+    return Settings(_env_file=None, **{**base, **over})
 
 
 def test_each_agent_gets_a_voice_from_its_own_provider(specs):
@@ -61,6 +63,38 @@ def test_handoff_instruction_carries_the_exact_intro_line():
     text = handoff_instruction("tour", "OpenAI")
     assert '"Hi, I\'m the tour agent, running on OpenAI."' in text
     assert "Do not greet again" in text
+    assert "not from the caller" in text and "do not call a transfer_to tool in this answer" in text
+    assert "name" not in text  # no name is known
+
+    # A caller who gave or confirmed their name is not asked for it by the next agent.
+    known = handoff_instruction("contact", "OpenAI", "Steve Stevens")
+    assert "The caller's name is Steve Stevens." in known and "Never ask for their name, never ask who is calling" in known
+
+
+async def test_an_openai_agent_is_not_sent_results_of_tool_calls_other_agents_made(specs):
+    """Measured 2026-11-16: back on the contact agent, OpenAI got the result of a Nova handoff call,
+    answered "Tool call ID ... not found in conversation", and the session restarted mid-call."""
+    from pipecat.processors.aggregators.llm_context import LLMContext
+
+    from ai_call_center.voice.legs import adopt_context
+
+    service = build_leg(specs["contact"], instructions="x", settings=settings())
+    sent = []
+
+    async def record(tool_call_id, *_args, **_kwargs):
+        sent.append(tool_call_id)
+
+    service._send_tool_result = record
+    context = LLMContext([{"role": "user", "content": "Hello."}])
+    service._context = context  # the agent was used before, and its session was reset when it was left
+    # While another agent had the call, that agent handed the call back.
+    context.add_message({"role": "assistant", "tool_calls": [{"id": "chatcmpl-tool-1", "type": "function", "function": {"name": "transfer_to_contact", "arguments": "{}"}}]})
+    context.add_message({"role": "tool", "content": '"Handed off to the contact agent."', "tool_call_id": "chatcmpl-tool-1"})
+
+    await adopt_context(service, context)
+    await service._process_completed_function_calls(send_new_results=True)  # what the next context frame does
+
+    assert sent == [] and "chatcmpl-tool-1" in service._completed_tool_calls
 
 
 def test_an_agent_moves_to_the_other_provider_when_its_own_is_marked_down(specs):
@@ -150,6 +184,33 @@ async def test_a_nova_agent_is_not_given_a_handoff_result(specs):
     await service._handle_function_call_result(normal)
 
     assert sent == ["fc_2"] and {"fc_1", "fc_2"} <= service._completed_tool_calls
+
+
+async def test_a_reset_openai_session_forgets_the_audio_item_of_the_old_session(specs):
+    """Measured 2026-11-16: the caller talked over the first words of an agent that had the call
+    before. Pipecat cut an audio item of the old session, OpenAI answered
+    "item_truncate_invalid_item_id", and the session restarted."""
+    service = build_leg(specs["tour"], instructions="x", settings=settings())
+    service._current_audio_response = object()  # the agent's last sentence before the handoff
+
+    async def no_network() -> None:
+        return None
+
+    service.reset_conversation = no_network
+    await reset_session(service)
+
+    assert service._current_audio_response is None
+
+
+def test_a_nova_tool_result_is_a_json_object():
+    import json
+
+    from ai_call_center.voice.legs import nova_tool_result
+
+    assert json.loads(nova_tool_result('"Say goodbye now."')) == {"result": "Say goodbye now."}  # what Pipecat hands over for a sentence
+    assert json.loads(nova_tool_result("COMPLETED")) == {"result": "COMPLETED"}
+    assert json.loads(nova_tool_result('{"calls": 3}')) == {"calls": 3}
+    assert json.loads(nova_tool_result({"calls": 3})) == {"calls": 3}
 
 
 async def test_nova_connects_when_the_agent_is_needed_and_disconnects_when_it_is_left(specs):

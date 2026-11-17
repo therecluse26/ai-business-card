@@ -37,7 +37,7 @@ async def handle_event(
     state = decode_state(payload.get("client_state"))
     log.info("telnyx event %s call=%s state=%s", event_type, ccid, payload.get("state"))
     if transfers is not None:
-        await transfers.on_event(event_type, ccid, state, str(payload.get("result") or ""))  # the owner's leg of a live transfer: answered, or not
+        await transfers.on_event(event_type, ccid, state, str(payload.get("result") or ""), str(payload.get("digits") or ""))  # the owner's leg of a live transfer: answered, or not
 
     if event_type == "call.initiated" and payload.get("direction") == "incoming":
         caller = payload.get("from") or ""

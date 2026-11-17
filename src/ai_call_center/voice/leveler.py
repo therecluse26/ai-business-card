@@ -19,7 +19,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 SPEECH_GATE = 10 ** (-45 / 20)  # quieter audio is a pause, not speech; it does not move the measured level
 TIME_CONSTANT_SECS = 4.0  # how fast the measured level follows the voice
 MIN_SPEECH_SECS = 0.6  # an unmeasured voice plays as it is until this much speech is measured
-MIN_GAIN, MAX_GAIN = 10 ** (-14 / 20), 10 ** (8 / 20)
+MIN_GAIN, MAX_GAIN = 10 ** (-14 / 20), 10 ** (12 / 20)  # 12 dB up: OpenAI's sage is 11 dB under the target
 
 
 def dbfs_to_amplitude(dbfs: float) -> float:

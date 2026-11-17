@@ -15,7 +15,9 @@ services, pinned by the Pipecat version in `uv.lock`.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import json
 import logging
 
 from google.genai.types import EndSensitivity, StartSensitivity
@@ -135,18 +137,47 @@ def build_gemini_live(spec: AgentSpec, *, instructions: str, settings: Settings,
     )
 
 
+NOVA_SETTLE_SECS = 0.3  # between the history and the request to speak; see HandoffNovaSonic
+
+
+def nova_tool_result(result) -> str:
+    """A tool result in the only form Bedrock accepts: a JSON object, as text.
+
+    Our tools return a sentence. Pipecat sends it as a JSON string, and Bedrock answers
+    "Unsupported JSON type in Tool Result. Please provide the Tool Result as a JSON object".
+    The stream then restarts and the agent says nothing. Measured 2026-11-16.
+    """
+    try:
+        value = json.loads(result) if isinstance(result, str) else result
+    except ValueError:
+        value = result
+    return json.dumps(value if isinstance(value, dict) else {"result": value}, ensure_ascii=False)
+
+
 class HandoffNovaSonic(AWSNovaSonicLLMService):
-    """Amazon Nova Sonic, with three changes.
+    """Amazon Nova Sonic, with five changes.
 
     1. It does not connect at setup. `ensure_connected` opens the stream when the agent is needed.
     2. A tool result marked `run_llm=False` is not sent to Nova, for the same reason as on Gemini:
        Nova answers every tool result, and after a handoff the next agent answers, not this one.
     3. Token usage keeps speech and text apart, so the cost estimate can price them apart.
+    4. It waits `NOVA_SETTLE_SECS` between the conversation history and the request to speak.
+       Measured 2026-11-16: with four history messages and no wait, Bedrock answers
+       "Invalid input request". A wait of 0.15 s was enough in five of five tries.
+    5. A tool result goes to Nova as a JSON object. See `nova_tool_result`.
     """
 
     async def setup(self, setup: FrameProcessorSetup) -> None:
         await super(AWSNovaSonicLLMService, self).setup(setup)  # the base setup, without Nova's connect
         self._wants_connection = True
+
+    async def _send_audio_input_start_event(self) -> None:
+        # Pipecat sends the history, then this event, then the request to speak.
+        await super()._send_audio_input_start_event()
+        await asyncio.sleep(NOVA_SETTLE_SECS)
+
+    async def _send_tool_result(self, tool_call_id, result) -> None:
+        await super()._send_tool_result(tool_call_id, nova_tool_result(result))
 
     async def _handle_function_call_result(self, frame: FunctionCallResultFrame) -> None:
         if frame.properties is not None and frame.properties.run_llm is False:
@@ -281,9 +312,16 @@ async def adopt_context(service: LLMService, context: LLMContext) -> None:
     Gemini: hand it the shared context now. A context frame can reach the service right after the
     switch; if that frame were its first context, Pipecat would reconnect the session (about 0.5 s)
     and send it tool results that belong to other agents' sessions.
+
+    OpenAI, on a return to an agent that was used before: mark every tool result in the context as
+    known. Pipecat sends a result it has not marked to the session, on the next context frame.
+    The results written while another agent had the call belong to other sessions. OpenAI rejects
+    such a result ("Tool call ID ... not found in conversation"), and the session then restarts.
     """
     if isinstance(service, GeminiLiveLLMService):
         service._context = context  # noqa: SLF001
+        await service._process_completed_function_calls(send_new_results=False)  # noqa: SLF001
+    elif isinstance(service, OpenAIRealtimeLLMService) and service._context is not None:  # noqa: SLF001
         await service._process_completed_function_calls(send_new_results=False)  # noqa: SLF001
 
 
@@ -294,6 +332,11 @@ async def reset_session(service: LLMService) -> None:
     """
     if isinstance(service, OpenAIRealtimeLLMService):
         await service.reset_conversation()
+        # Pipecat forgets the last audio item only when this service hears that the agent stopped
+        # speaking. After a handoff another service hears that. When the caller then talks over
+        # this agent's first words, Pipecat cuts the old item, which the new session does not
+        # have: "item_truncate_invalid_item_id", and the session restarts. Measured 2026-11-16.
+        service._current_audio_response = None  # noqa: SLF001
     elif isinstance(service, GeminiLiveLLMService):
         await service._disconnect()  # noqa: SLF001
         service._session_resumption_handle = None  # noqa: SLF001 - a resumed session would bring the old conversation back

@@ -81,6 +81,7 @@ def test_greeting_note_holds_the_first_name_and_nothing_else(leads):
     leads.finish_call("call-1", agents=["classifier"], summary="Wants an after-hours agent.")
     note = greeting_note(recall(leads, NUMBER))
     assert 'ask only: "Am I speaking with Steve?"' in note
+    assert "Say your opening line." in note and "Do not say what you can help with yet." in note
     # Nothing a stranger on the same phone could learn about the earlier call.
     for secret in ("Park", "Acme", "after-hours", "steve@acme.test", NUMBER):
         assert secret not in note

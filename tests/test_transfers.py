@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from ai_call_center.config import Settings
 from ai_call_center.telephony.telnyx_client import encode_state
-from ai_call_center.telephony.transfers import APOLOGY, Fallback, Snapshot, TransferManager
+from ai_call_center.telephony.transfers import APOLOGY, Fallback, Snapshot, TransferManager, screening_prompt
 from ai_call_center.telephony.webhooks import handle_event
 from ai_call_center.voice.call_session import TRANSFER_DID_NOT_CONNECT, after_transfer_attempt, resume_message
 
@@ -39,6 +39,23 @@ class FakeTelephony:
 
     async def hangup(self, call_control_id):
         self._do("hangup", call_control_id)
+
+    async def dial(self, *, to, timeout_secs, state, detect_voicemail=False):
+        self._do("dial", to, timeout_secs, state)
+        self.detects_voicemail = detect_voicemail
+        return OWNER_LEG
+
+    async def play_audio(self, call_control_id, *, url):
+        self._do("play_audio", call_control_id, url)
+
+    async def stop_audio(self, call_control_id):
+        self._do("stop_audio", call_control_id)
+
+    async def ask_digit(self, call_control_id, text, *, digits, timeout_secs, tries, state):
+        self._do("ask_digit", call_control_id, text, digits, timeout_secs, tries)
+
+    async def bridge(self, call_control_id, other):
+        self._do("bridge", call_control_id, other)
 
     async def answer_with_stream(self, call_control_id, *, stream_url):
         self._do("answer_with_stream", call_control_id)
@@ -89,6 +106,158 @@ async def test_owner_picks_up_and_a_later_hangup_resumes_nothing():
     await handle_event(owner_event("call.hangup"), settings(), telephony, transfers=transfers)
     assert [entry[0] for entry in telephony.log] == ["stop_streaming", "transfer"]
     assert transfers.take_resume(CALL) is None
+
+
+# --- call screening: the caller hears a ring tone, and the owner accepts with a key ---
+
+RING = "https://example.ts.net/audio/ringback.wav"
+ASKED = "Voice card call from Ada. She wants to hire you. Press 1 to accept. Press 2 to decline."
+
+
+def screening(telephony: FakeTelephony) -> TransferManager:
+    return TransferManager(telephony, stream_url=STREAM, ring_secs=20, screen=True, hold_audio_url=RING, accept_secs=6)
+
+
+async def ring_with_screening(telephony: FakeTelephony) -> TransferManager:
+    transfers = screening(telephony)
+    await transfers.start(CALL, to=OWNER, snapshot=snapshot(), announce=screening_prompt("Ada", "She wants to hire you."))
+    return transfers
+
+
+async def owner(transfers, telephony, event_type: str, **payload) -> None:
+    await handle_event(owner_event(event_type, **payload), settings(), telephony, transfers=transfers)
+
+
+async def test_screening_calls_the_owner_as_a_separate_call_and_the_caller_hears_a_ring_tone():
+    telephony = FakeTelephony()
+    await ring_with_screening(telephony)
+    assert telephony.log == [
+        ("stop_streaming", CALL),
+        ("play_audio", CALL, RING),
+        ("dial", OWNER, 20, {"transfer_of": CALL}),  # not Telnyx's transfer: the caller never hears the owner's phone
+    ]
+
+
+async def test_the_owner_presses_1_and_the_two_calls_are_connected():
+    telephony = FakeTelephony()
+    transfers = await ring_with_screening(telephony)
+    await owner(transfers, telephony, "call.answered")
+    assert telephony.log[-1] == ("ask_digit", OWNER_LEG, ASKED, "12", 6, 2)  # an answer alone connects nobody
+    await owner(transfers, telephony, "call.answered")  # a repeated webhook asks nothing twice
+    await owner(transfers, telephony, "call.gather.ended", digits="1")
+    assert telephony.log[-2:] == [("stop_audio", CALL), ("bridge", CALL, OWNER_LEG)]
+    await owner(transfers, telephony, "call.hangup")
+
+    assert telephony.log[-1] == ("hangup", CALL)  # the owner left: the call is over, and no agent comes back
+    assert transfers.take_resume(CALL) is None
+    assert [entry[0] for entry in telephony.log].count("ask_digit") == 1
+
+
+async def test_a_voicemail_presses_no_key_and_the_agent_comes_back():
+    telephony = FakeTelephony()
+    transfers = await ring_with_screening(telephony)
+    await owner(transfers, telephony, "call.answered")  # the voicemail answers like a person does
+    await owner(transfers, telephony, "call.gather.ended", digits="", status="timeout")
+    assert telephony.log[-1] == ("hangup", OWNER_LEG)
+    assert "bridge" not in [entry[0] for entry in telephony.log]  # the caller never hears the voicemail
+    await owner(transfers, telephony, "call.hangup")
+
+    assert telephony.log[-2:] == [("stop_audio", CALL), ("start_streaming", CALL, STREAM)]
+    resumed = transfers.take_resume(CALL)
+    assert resumed is not None and resumed.reason == "no_answer" and resumed.caller_name == "Ada"
+
+
+async def test_a_detected_voicemail_brings_the_agent_back_before_the_question_runs_out():
+    telephony = FakeTelephony()
+    transfers = TransferManager(telephony, stream_url=STREAM, ring_secs=20, screen=True, hold_audio_url=RING, detect_voicemail=True)
+    await transfers.start(CALL, to=OWNER, snapshot=snapshot())
+    assert telephony.detects_voicemail is True
+    await owner(transfers, telephony, "call.answered")
+    await owner(transfers, telephony, "call.machine.detection.ended", result="machine")
+    assert telephony.log[-1] == ("hangup", OWNER_LEG)
+    await owner(transfers, telephony, "call.gather.ended", digits="", status="cancelled_amd")
+    await owner(transfers, telephony, "call.hangup")
+
+    assert [entry[0] for entry in telephony.log].count("hangup") == 1 and "bridge" not in [entry[0] for entry in telephony.log]
+    assert transfers.take_resume(CALL).reason == "no_answer"
+
+
+async def test_a_machine_report_after_the_owner_pressed_1_changes_nothing():
+    telephony = FakeTelephony()
+    transfers = TransferManager(telephony, stream_url=STREAM, ring_secs=20, screen=True, hold_audio_url=RING, detect_voicemail=True)
+    await transfers.start(CALL, to=OWNER, snapshot=snapshot())
+    await owner(transfers, telephony, "call.answered")
+    await owner(transfers, telephony, "call.gather.ended", digits="1")
+    await owner(transfers, telephony, "call.machine.detection.ended", result="machine")
+
+    assert telephony.log[-1] == ("bridge", CALL, OWNER_LEG)  # the two people are still connected
+
+
+async def test_the_owner_presses_2_and_the_agent_comes_back():
+    telephony = FakeTelephony()
+    transfers = await ring_with_screening(telephony)
+    await owner(transfers, telephony, "call.answered")
+    await owner(transfers, telephony, "call.gather.ended", digits="2")
+    await owner(transfers, telephony, "call.gather.ended", digits="1")  # a late key changes nothing
+    await owner(transfers, telephony, "call.hangup")
+
+    assert [entry[0] for entry in telephony.log][-3:] == ["hangup", "stop_audio", "start_streaming"]
+    assert transfers.take_resume(CALL).reason == "no_answer"
+
+
+async def test_the_owner_phone_rings_out_with_screening_and_the_agent_comes_back():
+    telephony = FakeTelephony()
+    transfers = await ring_with_screening(telephony)
+    await owner(transfers, telephony, "call.hangup", hangup_cause="timeout")
+
+    assert telephony.log[-2:] == [("stop_audio", CALL), ("start_streaming", CALL, STREAM)]
+    assert transfers.take_resume(CALL).reason == "no_answer"
+
+
+async def test_the_caller_hangs_up_during_the_ring_tone_and_the_owner_phone_stops_ringing():
+    telephony = FakeTelephony()
+    transfers = await ring_with_screening(telephony)
+    await handle_event({"event_type": "call.hangup", "payload": {"call_control_id": CALL}}, settings(), telephony, transfers=transfers)
+
+    assert telephony.log[-1] == ("hangup", OWNER_LEG)
+    await owner(transfers, telephony, "call.hangup")
+    assert "start_streaming" not in [entry[0] for entry in telephony.log] and transfers.take_resume(CALL) is None
+
+
+async def test_the_call_to_the_owner_cannot_start_and_the_agent_comes_back():
+    telephony = FakeTelephony(fail={"dial"})
+    transfers = await ring_with_screening(telephony)
+
+    assert telephony.log[-2:] == [("stop_audio", CALL), ("start_streaming", CALL, STREAM)]
+    assert transfers.take_resume(CALL).reason == "failed"
+
+
+async def test_the_owner_accepts_and_the_connection_fails_and_the_agent_comes_back():
+    telephony = FakeTelephony(fail={"bridge"})
+    transfers = await ring_with_screening(telephony)
+    await owner(transfers, telephony, "call.answered")
+    await owner(transfers, telephony, "call.gather.ended", digits="1")
+    assert telephony.log[-1] == ("hangup", OWNER_LEG)
+    await owner(transfers, telephony, "call.hangup")
+
+    assert transfers.take_resume(CALL).reason == "failed"
+
+
+def test_the_owner_hears_who_is_calling_and_why():
+    assert screening_prompt("Bill Williams", "Bill wants to hire Brad.") == "Voice card call from Bill Williams. Bill wants to hire Brad. Press 1 to accept. Press 2 to decline."
+    assert screening_prompt("", "") == "Voice card call from a caller. Press 1 to accept. Press 2 to decline."
+    assert len(screening_prompt("x", "word " * 200)) < 320  # a long reason is cut: the owner must reach the keys
+
+
+def test_the_ring_tone_is_a_six_second_phone_quality_wav():
+    import io
+    import wave
+
+    from ai_call_center.telephony.hold_audio import ringback_wav
+
+    with wave.open(io.BytesIO(ringback_wav())) as wav:
+        assert (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (8000, 1, 2)
+        assert wav.getnframes() == 48000
 
 
 # --- the owner's voicemail answers ---

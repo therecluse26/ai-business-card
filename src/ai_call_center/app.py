@@ -9,12 +9,13 @@ import logging
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
-from ai_call_center.config import get_settings
+from ai_call_center.config import Settings, get_settings
 from ai_call_center.guardrails import CallGuard
 from ai_call_center.leads import LeadStore
 from ai_call_center.telephony import media, webhooks
+from ai_call_center.telephony.hold_audio import ringback_wav
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
 from ai_call_center.telephony.transfers import TransferManager
@@ -23,9 +24,39 @@ from ai_call_center.voice.health import ProviderHealth
 log = logging.getLogger(__name__)
 
 
+def agent_legs_line(settings: Settings) -> str:
+    """One line that says which provider and voice each agent uses on this server, for the start-up log."""
+    from ai_call_center.graph.build import default_specs
+    from ai_call_center.voice.legs import resolve_spec
+
+    parts = []
+    for name, spec in default_specs().items():
+        runs = resolve_spec(spec, settings)
+        moved = "" if runs.leg == spec.leg else f" (set to {spec.leg}, which has no key)"
+        parts.append(f"{name}={runs.leg}/{runs.voice}{moved}")
+    return ", ".join(parts)
+
+
+def log_to_file(path: str) -> None:
+    """Send the server's log lines and Pipecat's log lines to one file as well as to the terminal."""
+    from pathlib import Path
+
+    from loguru import logger
+
+    file = Path(path)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    if file.exists():
+        file.replace(file.with_name(file.name + ".previous"))
+    handler = logging.FileHandler(file, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    logging.getLogger().addHandler(handler)
+    logger.add(str(file), level="DEBUG", encoding="utf-8")  # Pipecat logs with loguru
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    log.info("voice providers at start: %s", agent_legs_line(settings))
     app.state.telephony = TelnyxTelephony(settings)
     app.state.lookups = CallerLookup(app.state.telephony, LeadStore(settings.leads_db), mode=settings.caller_lookup)
     app.state.guard = CallGuard(
@@ -37,7 +68,15 @@ async def lifespan(app: FastAPI):
         exempt_numbers=frozenset({settings.owner_phone}),
     )
     app.state.health = ProviderHealth()  # which voice providers are answering; shared by all calls
-    app.state.transfers = TransferManager(app.state.telephony, stream_url=settings.media_stream_url, ring_secs=settings.transfer_ring_secs, detect_voicemail=settings.transfer_voicemail_detection)
+    app.state.transfers = TransferManager(
+        app.state.telephony,
+        stream_url=settings.media_stream_url,
+        ring_secs=settings.transfer_ring_secs,
+        detect_voicemail=settings.transfer_voicemail_detection,
+        screen=settings.transfer_screening and bool(settings.telnyx_app_id),  # the call to the owner needs the app id
+        hold_audio_url=settings.hold_audio_url,
+        accept_secs=settings.transfer_accept_secs,
+    )
     if settings.telnyx_app_id:
         try:
             if not await app.state.telephony.outbound_profile_id(settings.telnyx_app_id):
@@ -62,6 +101,12 @@ app.include_router(webhooks.router)
 app.include_router(media.router)
 
 
+@app.get("/audio/ringback.wav")
+async def ringback() -> Response:
+    """The ring tone a caller hears while the owner's phone rings. Telnyx fetches it."""
+    return Response(content=ringback_wav(), media_type="audio/wav", headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True}
@@ -69,6 +114,8 @@ async def health() -> dict:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    if get_settings().server_log:
+        log_to_file(get_settings().server_log)
     uvicorn.run("ai_call_center.app:app", host="127.0.0.1", port=get_settings().port, log_level="info")
 
 

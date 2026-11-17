@@ -93,6 +93,50 @@ class TelnyxTelephony:
             extra["from_"] = self.settings.telnyx_phone_number
         await self.client.calls.actions.transfer(call_control_id, to=to, command_id=self._cid(), **extra)
 
+    # --- call screening: the owner is called as a separate leg, and accepts with a key ---
+
+    async def dial(self, *, to: str, timeout_secs: int, state: dict, detect_voicemail: bool = False) -> str:
+        """Call `to` from the line's number as a new leg of its own. Returns the new leg's call control id.
+        `state` is the leg's `client_state`, so its webhooks can be told apart. With `detect_voicemail`,
+        Telnyx listens to whatever answers and reports a machine in `call.machine.detection.ended`."""
+        extra = {"answering_machine_detection": "detect"} if detect_voicemail else {}
+        response = await self.client.calls.dial(
+            connection_id=self.settings.telnyx_app_id,
+            to=to,
+            from_=self.settings.telnyx_phone_number,
+            timeout_secs=timeout_secs,
+            client_state=encode_state(state),
+            command_id=self._cid(),
+            **extra,
+        )
+        return str(response.data.call_control_id) if response.data else ""
+
+    async def play_audio(self, call_control_id: str, *, url: str) -> None:
+        """Play a WAV or MP3 file on the call, again and again, until `stop_audio`."""
+        await self.client.calls.actions.start_playback(call_control_id, audio_url=url, loop="infinity", command_id=self._cid())
+
+    async def stop_audio(self, call_control_id: str) -> None:
+        await self.client.calls.actions.stop_playback(call_control_id, stop="all", command_id=self._cid())
+
+    async def ask_digit(self, call_control_id: str, text: str, *, digits: str, timeout_secs: int, tries: int, state: dict) -> None:
+        """Say `text` and wait for one key. Telnyx reports the key in the webhook `call.gather.ended`."""
+        await self.client.calls.actions.gather_using_speak(
+            call_control_id,
+            payload=text,
+            voice="Telnyx.KokoroTTS.af",
+            valid_digits=digits,
+            minimum_digits=1,
+            maximum_digits=1,
+            timeout_millis=timeout_secs * 1000,
+            maximum_tries=tries,
+            client_state=encode_state(state),
+            command_id=self._cid(),
+        )
+
+    async def bridge(self, call_control_id: str, other: str) -> None:
+        """Connect two calls, so the two people hear each other."""
+        await self.client.calls.actions.bridge(call_control_id, call_control_id_to_bridge_with=other, command_id=self._cid())
+
     async def send_text(self, to: str, body: str) -> None:
         """One SMS from the line's number. US carriers deliver it only once the number has a
         messaging profile and a registered 10DLC campaign."""

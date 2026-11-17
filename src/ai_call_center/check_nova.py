@@ -51,11 +51,20 @@ async def ask_once(settings: Settings) -> tuple[float, str]:
     )
     prompt, audio_content = str(uuid.uuid4()), str(uuid.uuid4())
     stream = await service.open_stream(service.create_client())
+    microphone: asyncio.Task | None = None
     try:
         await service.send_event(service.build_session_start_json(), stream)
         await service.send_prompt_start([], prompt, stream)
         await service.send_text("You are a test voice. Answer in one short sentence.", "SYSTEM", prompt, stream, False)
         await service.send_audio_input_start(prompt, audio_content, stream)
+
+        async def send_silence() -> None:
+            # Nova answers only while microphone audio arrives, as on a call: 20 ms of silence at a time.
+            while True:
+                await service.send_audio(b"\x00" * 640, prompt, audio_content, stream)
+                await asyncio.sleep(0.02)
+
+        microphone = asyncio.create_task(send_silence())
         t0 = time.monotonic()
         await service.send_text("Say: the Nova leg works.", "USER", prompt, stream, True)
         said: list[str] = []
@@ -79,6 +88,8 @@ async def ask_once(settings: Settings) -> tuple[float, str]:
             raise RuntimeError(f"no audio came back in {WAIT_SECS:.0f} s")
         return first_audio, " ".join(dict.fromkeys(text.strip() for text in said if text.strip()))
     finally:
+        if microphone is not None:
+            microphone.cancel()
         try:
             await stream.close()
         except Exception:  # noqa: BLE001 - the check is over either way
