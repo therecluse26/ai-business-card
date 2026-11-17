@@ -14,7 +14,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
-from ai_call_center.agents.specs import DEFAULT_LEGS
+from ai_call_center.agents.specs import DEFAULT_LEGS, greeting_words
 from ai_call_center.callers import greeting_note, history_text, recall, summarize_call
 from ai_call_center.guardrails import TransferHours
 from ai_call_center.config import get_settings
@@ -98,7 +98,8 @@ async def run(caller_number: str = "+10000000000") -> None:
     seen = 0
     result_messages: list = []
     handoffs: list[str] = []
-    text = CALL_CONNECTED
+    hello = greeting_words(settings.owner_name, memory.first_name if memory and ctx.caller_greeting else "", settings.brand_name)
+    text = f'{CALL_CONNECTED[:-1]} Say exactly these words: "{hello}"]'
     active = "classifier"
     while True:
         try:

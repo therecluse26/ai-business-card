@@ -64,7 +64,15 @@ def test_handoff_instruction_carries_the_exact_intro_line():
     assert '"Hi, I\'m the tour agent, running on OpenAI."' in text
     assert "Do not greet again" in text
     assert "not from the caller" in text and "do not call a transfer_to tool in this answer" in text
-    assert "name" not in text  # no name is known
+    assert "name" not in text and "The call so far" not in text  # no name is known, and nothing was said yet
+
+    # The next agent reads the last turns again in the message it acts on.
+    said = ["caller: I make auto parts. I want AI to handle warranty calls and parts lookups.", "agent: An agent could check order numbers.", "caller: yeah"]
+    brief = handoff_instruction("contact", "OpenAI", "", said)
+    assert "caller: I make auto parts. I want AI to handle warranty calls and parts lookups.\nagent: An agent could check order numbers.\ncaller: yeah" in brief
+    assert "never say that you cannot see the earlier conversation" in brief
+    many = handoff_instruction("contact", "OpenAI", "", [f"caller: line {n}" for n in range(40)] + ["caller: " + "x" * 900])
+    assert "caller: line 24\n" not in many and "caller: line 25\n" in many and "x" * 321 not in many  # the last 16 turns, each cut
 
     # A caller who gave or confirmed their name is not asked for it by the next agent.
     known = handoff_instruction("contact", "OpenAI", "Steve Stevens")

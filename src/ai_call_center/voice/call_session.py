@@ -76,6 +76,9 @@ from ai_call_center.notify import notifier_from_settings
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
 from ai_call_center.telephony.transfers import Fallback, Snapshot, TransferManager, screening_prompt
+from ai_call_center.voice.caller_audio import CallerAudioFile, caller_audio_path
+from ai_call_center.voice.cutoff import CallerSoundWatch
+from ai_call_center.voice.spoken_tool import SpokenToolWatch
 from ai_call_center.voice.health import ProviderHealth
 from ai_call_center.voice.leveler import VoiceLeveler
 from ai_call_center.voice.stats import CallStats
@@ -84,11 +87,13 @@ from ai_call_center.voice.legs import (
     build_leg,
     ensure_connected,
     first_answer_needs_run_frame,
+    forget_note,
     ready_legs,
     replay_and_respond,
     reset_session,
     resolve_spec,
     self_heals,
+    tell_now,
 )
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
@@ -102,6 +107,7 @@ CALLER_WORDS_SECS = 6.0  # how long words the caller just said count as "not in 
 # 10 handoffs from Nova: Pipecat committed the words within 0.1 s twice, after 1.0 s twice, and
 # not within 1.5 s six times. After the wait, the handoff adds the words itself.
 CALLER_WORDS_WAIT_SECS = 0.5
+SPOKEN_TOOL_WAIT_SECS = 0.4  # after the agent said a tool's name: how long the server waits for the real tool call
 SPOKE_WAIT_SECS = 0.5  # how long a handoff waits for a sign that the caller spoke to the agent, before it is refused
 OPENING_QUIET_SECS = 3.0  # the longest time the caller's audio is replaced by silence while the greeting has not started
 TRANSCRIPT_WAIT_SECS = 0.8  # how long a transfer request waits for the transcript of the caller's last turn
@@ -133,7 +139,29 @@ def known_name_note(caller_name: str) -> str:
     )
 
 
-def handoff_instruction(target: str, platform: str, caller_name: str = "") -> str:
+CALL_SO_FAR_LINES = 16  # how many of the last turns the next agent reads again in the handoff message
+CALL_SO_FAR_LINE_CHARS = 320
+
+
+def call_so_far(lines: list[str] | None) -> str:
+    """The last turns of the call, word for word, for the agent that takes over.
+
+    The agent has the whole call in its context already. An OpenAI Realtime session gets it as one
+    JSON text that Pipecat calls "a previously saved conversation". On 2026-11-17 the contact agent
+    got a caller's project that way, asked what the project was, and then said "I don't have
+    access to any of that information". So the handoff message, which the agent acts on, says it again.
+    """
+    recent = [line if len(line) <= CALL_SO_FAR_LINE_CHARS else line[:CALL_SO_FAR_LINE_CHARS].rstrip() + "..." for line in (lines or [])[-CALL_SO_FAR_LINES:]]
+    if not recent:
+        return ""
+    return (
+        "\n\nThe call so far, word for word, newest last. The caller said this on this call, to you or to another agent:\n"
+        + "\n".join(recent)
+        + "\n\nYou know all of this. Use it in your answer. Never ask the caller to say it again, and never say that you cannot see the earlier conversation."
+    )
+
+
+def handoff_instruction(target: str, platform: str, caller_name: str = "", lines: list[str] | None = None) -> str:
     """What the new agent reads last when it takes over the call.
 
     Nova and Gemini read this as a caller's turn, so it says that it is not one. Without that,
@@ -145,8 +173,8 @@ def handoff_instruction(target: str, platform: str, caller_name: str = "") -> st
         f"The handoff is complete: you are the {target} agent, with a new voice, and the call is yours. "
         "Do not say that you will bring in an agent, and do not call a transfer_to tool in this answer. Speak to the caller now. "
         f'Your first sentence must be exactly: "Hi, I\'m the {target} agent, running on {platform}." '
-        "Say it before anything else, also before you call a tool. "
-        "Then answer what the caller last asked. Do not greet again." + known_name_note(caller_name)
+        "Say it one time only, before anything else, also before you call a tool. "
+        "Then answer what the caller last asked. Do not greet again." + known_name_note(caller_name) + call_so_far(lines)
     )
 
 
@@ -164,6 +192,24 @@ def connect_message(words: str) -> str:
     """The first message of a call, with the exact greeting. Left free, a voice model said only
     "I'm the AI assistant on this line", and once spoke its own thoughts first. Measured 2026-11-16."""
     return f'The call has just connected. Say exactly these words to the caller, and nothing before or after them: "{words}"'
+
+
+CONNECT_MARK = "The call has just connected. Say exactly these words"
+GREETING_DONE = "The call connected, and the greeting agent said the greeting."
+
+
+def retire_connect_message(messages: list) -> bool:
+    """After the greeting, the order to say it must not reach the next agent. True when changed.
+
+    A handoff replays the shared context into a new session. In a short call the order "Say
+    exactly these words" stood next to the handoff's own "Your first sentence must be exactly",
+    and the next agent said its intro line two times (3 of 6 simulated calls, 2026-11-17).
+    """
+    first = messages[0] if messages else None
+    if isinstance(first, dict) and first.get("role") == "developer" and str(first.get("content", "")).startswith(CONNECT_MARK):
+        first["content"] = GREETING_DONE
+        return True
+    return False
 
 
 def failover_instruction(agent: str, platform: str) -> str:
@@ -438,6 +484,15 @@ class ServiceWatchdog(FrameProcessor):
             self._recovering.discard(vl.agent)
 
 
+class NoToolCall:
+    """Stands in for a tool call when the server makes a handoff that the agent only said aloud."""
+
+    async def result_callback(self, result, *, properties=None) -> None:
+        log.info("handoff by the server: %s", result)
+        if properties is not None and properties.on_context_updated is not None:
+            await properties.on_context_updated()
+
+
 @dataclass
 class VoiceLeg:
     """One agent's voice service and what the session knows about it."""
@@ -490,7 +545,7 @@ class CallSession:
         # failed before the caller answered it.
         greeting = greeting_note(memory) if memory and (not resume or (failover_resume and not resume.identity_confirmed)) else ""
         history = history_text(memory) if memory and memory.first_name else ""
-        hello = greeting_words(self.settings.owner_name, memory.first_name if memory and greeting else "")
+        hello = greeting_words(self.settings.owner_name, memory.first_name if memory and greeting else "", self.settings.brand_name)
         # Number lookup started at call.initiated; take the result if it is ready.
         info = await self.lookups.get(caller_number) if self.lookups else None
         lookup_block = lookup_text(info) if info is not None else ""
@@ -680,7 +735,55 @@ class CallSession:
         dead_agents: set[str] = set()
         gate = TransferGate(do_transfer)
         watchdog = ServiceWatchdog(legs, switcher, context, on_dead=on_dead)
-        processors = [transport.input(), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher]
+
+        sound_notes: list = []  # the note about the newest caller sound, while an agent's session holds it
+
+        async def drop_sound_note() -> None:
+            """The agent answered the turn that the note was about, or a newer note replaces it."""
+            while sound_notes:
+                try:
+                    await forget_note(sound_notes.pop())
+                except Exception:
+                    log.exception("call %s: could not take a caller-sound note out of the session", self.call_control_id)
+
+        async def on_sound(note: str, cut: bool) -> None:
+            """A caller's turn starts: tell the agent what to say if the turn has no words (a cough, a noise)."""
+            await drop_sound_note()
+            if state.ending or state.transfer_requested:
+                return
+            vl = legs[state.active_agent]
+            try:
+                sent = await tell_now(vl.service, note)
+            except Exception:
+                log.exception("call %s: could not send the %s agent a note about a caller sound", self.call_control_id, vl.agent)
+                return
+            if sent:
+                sound_notes.append(sent)
+            if cut:
+                log.info("call %s: a caller sound cut the %s agent off; agent told: %s", self.call_control_id, vl.agent, bool(sent))
+
+        async def on_spoken_tool(target: str) -> None:
+            """The agent said a handoff tool's name aloud. If no tool call follows, the server makes the handoff."""
+            holder = state.active_agent
+
+            async def hand_off() -> None:
+                await asyncio.sleep(SPOKEN_TOOL_WAIT_SECS)
+                if state.active_agent != holder or state.ending or state.transfer_requested:
+                    return  # the real tool call came, or the call is on its way out
+                log.info("call %s: the %s agent said the tool name transfer_to_%s and did not call it; the server makes the handoff", self.call_control_id, holder, target)
+                try:
+                    await self._handoff(
+                        target, NoToolCall(), legs=legs, switcher=switcher, worker=worker, context=context, state=state, schemas=schemas, reroute=reroute, expect_speech=expect_speech, stats=stats,
+                        caller_words=caller_words,
+                        known_name=lambda: ctx.caller_name,
+                    )
+                except Exception:
+                    log.exception("call %s: the handoff by the server to the %s agent failed", self.call_control_id, target)
+
+            spawn(hand_off())
+
+        caller_audio = CallerAudioFile(caller_audio_path(self.settings.caller_audio_dir, self.call_control_id)) if self.settings.save_caller_audio else None
+        processors = [transport.input(), *([caller_audio] if caller_audio else []), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher, CallerSoundWatch(on_sound, drop_sound_note), SpokenToolWatch(self.specs, on_spoken_tool)]
         if self.settings.voice_level_dbfs:
             # Every voice at one loudness, so a handoff does not sound like a volume change.
             voice_by_service = {id(vl.service): self.specs[name].voice or "" for name, vl in legs.items()}
@@ -882,6 +985,8 @@ class CallSession:
         finally:
             for timer in timers:
                 timer.cancel()
+            if caller_audio:
+                caller_audio.close()
             if not state.end_reason:
                 # Nothing ended this session: not the caller, a transfer, or the time limit. The
                 # pipeline stopped by itself, and the caller would sit in silence.
@@ -902,6 +1007,8 @@ class CallSession:
                         log.info("call %s: the caller left no message after a refused transfer; the owner got a note", self.call_control_id)
                 except Exception:
                     log.exception("call %s: could not save the note for a refused transfer", self.call_control_id)
+                # What was said, as each agent heard it. Without it, a call that went wrong cannot be read afterwards.
+                log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(context.messages)) or "(nothing)")
                 # Write the short summary that the next call from this number will see.
                 try:
                     summary, caller_name = await summarize_call(context.messages, init_chat_model(self.settings.summary_model))
@@ -987,10 +1094,11 @@ class CallSession:
                     context.add_message({"role": "user", "content": missing})
                     log.info("call %s: added the caller's last words to the context for the %s agent", self.call_control_id, target)
             context.set_tools(tools_for_agent(spec, schemas))
+            retire_connect_message(context.messages)
             # The last message of a replayed context decides what the new session does with it.
             # After a bare tool result, a session sometimes only says it is ready to continue.
             # A plain instruction as the last message makes it speak.
-            context.add_message({"role": "developer", "content": handoff_instruction(target, platform, known_name() if known_name else "")})
+            context.add_message({"role": "developer", "content": handoff_instruction(target, platform, known_name() if known_name else "", transcript_lines(context.messages))})
             async with nxt.lock:  # a background reset of this service may still be running
                 await ensure_connected(nxt.service)
                 await adopt_context(nxt.service, context)

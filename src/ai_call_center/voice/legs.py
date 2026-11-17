@@ -39,6 +39,7 @@ from pipecat.services.openai.realtime.events import (
     SessionProperties,
     TurnDetection,
 )
+from pipecat.services.openai.realtime import events as openai_events
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
 from ai_call_center.agents.specs import AgentSpec, default_voice
@@ -78,7 +79,7 @@ def build_openai_realtime(spec: AgentSpec, *, instructions: str, settings: Setti
             session_properties=SessionProperties(
                 audio=AudioConfiguration(
                     input=AudioInput(
-                        transcription=InputAudioTranscription(),
+                        transcription=InputAudioTranscription(language="en"),  # without it, a short "yeah" came back as Japanese
                         turn_detection=turn_detection(settings),
                         noise_reduction=noise_reduction(settings),
                     ),
@@ -287,6 +288,45 @@ def self_heals(service: LLMService) -> bool:
     resumption). Nova does: on a stream error it opens a new stream and replays the context.
     OpenAI does not: its receive loop ends on any error event."""
     return isinstance(service, GeminiLiveLLMService | AWSNovaSonicLLMService)
+
+
+@dataclasses.dataclass
+class SessionNote:
+    """A note that `tell_now` put into a service's session, so that `forget_note` can take it out."""
+
+    service: LLMService
+    websocket: object  # the connection that holds the note; a reset or a reconnect makes a new one
+    item_id: str
+
+
+async def tell_now(service: LLMService, text: str) -> SessionNote | None:
+    """Put a note into the service's own session at once, with no answer asked for. None when not sent.
+
+    The note does not go into the shared context: it is about one moment, and the next agent must
+    not read it. OpenAI only. Gemini and Nova report an interruption after they acted on it.
+    """
+    if not isinstance(service, OpenAIRealtimeLLMService):
+        return None
+    if service._websocket is None or not service._api_session_ready or service._llm_needs_conversation_setup:  # noqa: SLF001
+        return None
+    item = openai_events.ConversationItem(type="message", role="system", content=[openai_events.ItemContent(type="input_text", text=text)])
+    await service.send_client_event(openai_events.ConversationItemCreateEvent(item=item))
+    return SessionNote(service, service._websocket, item.id)  # noqa: SLF001
+
+
+async def forget_note(note: SessionNote) -> bool:
+    """Take a note out of its session. True when the session still held it.
+
+    A note about one caller sound must not steer a later answer: on 2026-11-17 an agent read an
+    old "say this again" note and said the whole greeting again before a handoff. A session that
+    was reset has a new connection and no note: a delete there is an error, and Pipecat restarts
+    the session on any error.
+    """
+    service = note.service
+    if not isinstance(service, OpenAIRealtimeLLMService) or service._websocket is not note.websocket:  # noqa: SLF001
+        return False
+    await service.send_client_event(openai_events.ConversationItemDeleteEvent(item_id=note.item_id))
+    return True
 
 
 def first_answer_needs_run_frame(service: LLMService) -> bool:

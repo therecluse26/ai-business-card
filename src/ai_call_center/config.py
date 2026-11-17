@@ -45,9 +45,14 @@ class Settings(BaseSettings):
     llm_model: str = "anthropic:claude-opus-5-5"
     summary_model: str = "anthropic:claude-haiku-5-5"  # writes the two-sentence call summary at hangup
     owner_name: str = "the owner"
+    brand_name: str = ""  # optional; the greeting then says "<brand>, <owner>'s AI business card"
     owner_phone: str = "+15555550100"
     profile_path: Path = Path("profile.md")
     leads_db: Path = Path("data/leads.sqlite3")
+    # Save the caller's side of each call as a WAV file, for tests of noise and coughs. Off by default:
+    # it puts callers' voices on this disk.
+    save_caller_audio: bool = False
+    caller_audio_dir: Path = Path("data/caller_audio")
     # Everything the server prints also goes to this file, so a call can be studied after it ended.
     # At start the file of the run before is kept as <name>.previous. Empty = no file.
     server_log: str = "data/server.log"
@@ -109,7 +114,10 @@ class Settings(BaseSettings):
     # "server": fixed silence timer (fastest). "semantic": the model judges if the caller is done.
     openai_turn_detection: Literal["server", "semantic"] = "server"
     openai_vad_silence_ms: int = 400  # "server" only: silence before the turn ends
-    openai_vad_threshold: float = 0.6  # "server" only: 0.0-1.0; higher ignores more background noise
+    # "server" only: 0.0-1.0; higher ignores more background noise. At 0.6 a 0.2 s noise burst counted as a
+    # caller turn, and the agent answered it (the real call of 2026-11-17 00:42). At 0.8 it does not, a
+    # caller at -33 dBFS is still heard, and the answer is no slower (simulated calls).
+    openai_vad_threshold: float = 0.8
     openai_noise_reduction: Literal["near_field", "far_field", "off"] = "near_field"  # a handset at the ear
     openai_vad_eagerness: Literal["low", "medium", "high", "auto"] = "high"  # "semantic" only
 

@@ -489,6 +489,13 @@ def test_the_greeting_says_whose_line_this_is_and_what_a_caller_can_do(specs):
 
     assert opening_line("Ada Lovelace") == "Hi, you've reached Ada Lovelace's AI business card. I'm an AI assistant that Ada built."
     assert "take a message for Ada" in menu_line("Ada Lovelace")
+    # A brand name comes first, and the owner's name stays in the greeting.
+    assert opening_line("Ada Lovelace", "Analytical Engines") == "Hi, you've reached Analytical Engines, Ada Lovelace's AI business card. I'm an AI assistant that Ada built."
+    from ai_call_center.agents.specs import build_specs, Profile
+    branded = build_specs(Profile(summary="x", full="x"), owner_name="Ada Lovelace", brand_name="Analytical Engines")
+    assert all("Analytical Engines is the name that Ada Lovelace works under" in s.instructions for s in branded.values())
+    assert opening_line("Ada Lovelace", "Analytical Engines") in branded["classifier"].instructions
+    assert "Analytical Engines" not in specs["classifier"].instructions
     from ai_call_center.agents.specs import greeting_words
     from ai_call_center.voice.call_session import connect_message
 

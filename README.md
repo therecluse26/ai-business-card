@@ -79,12 +79,34 @@ handoff back to it is clean.
 - **A session gets only the tool results of its own tool calls.** When the call returns to an OpenAI agent, the results that other agents wrote are marked as known, and the audio item of its old session is forgotten. OpenAI rejects both, and the session then restarts.
 - **A tool result goes to Amazon Nova as a JSON object.** Bedrock rejects a plain sentence.
 - **The next agent reads the caller's last words.** Pipecat can commit a caller's turn more than 1.5 s after a Nova agent calls a handoff tool. The handoff waits 0.5 s, then adds the words to the shared context itself.
+- **The next agent reads the call so far.** All agents share one conversation, and a handoff replays it. An OpenAI Realtime session gets it from Pipecat as one JSON text, called "a previously saved conversation", and a small model uses that badly: the contact agent asked for a project that the caller had described to the consultant agent. So the handoff message repeats the last 16 turns word for word (`call_so_far`).
 - **The next agent reads the caller's name.** When the caller gave or confirmed a name, the handoff message says it, and says never to ask for it again.
+
+### Noise on the line
+
+OpenAI's voice detection decides when a caller's turn starts, and a start cuts the agent off. No detection mode tells a cough from a word: server detection at `OPENAI_VAD_THRESHOLD=0.8`, semantic detection (`OPENAI_TURN_DETECTION=semantic`) and a local Silero model all took recorded coughs for speech. Semantic detection also answered slower on real calls (a median of 1.4 s against 0.7 s). The default is server detection at 0.8.
+
+So the server handles the recovery (`voice/cutoff.py`):
+
+- When a caller's sound starts, the server puts a note into the active agent's session. The note says what to do if the turn has no clear words.
+- A sound that cut the agent off: the agent says the cut sentence again and goes on.
+- A sound in silence: the agent asks its last question again.
+- A turn with clear words: the agent forgets the note and answers the words.
+- A note lives for one answer. The server deletes it when the agent next starts to speak.
+
+Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova Sonic do not report the start of a caller's turn. The results come from simulated calls with recorded coughs, not from a tuned production system.
+
+`SAVE_CALLER_AUDIO=true` writes the caller's side of each call to `data/caller_audio/` as a WAV file, so you can hear what the detector heard. It holds callers' voices: it is off by default and the folder is git-ignored.
+
+### A tool name said aloud
+
+A speech-to-speech model sometimes speaks a tool call as text. On a real call a Nova Sonic agent said "call transfer to underscore underscore contact", made no tool call, and went silent. The server reads each agent's text (`voice/spoken_tool.py`). If an agent says the name of a handoff tool and no tool call follows in 0.4 s, the server makes the handoff itself.
 
 ### The greeting
 
 The first words of a call are exact (`greeting_words` in `agents/specs.py`); the first message of the call gives them to the greeting agent word for word.
 
+- With `BRAND_NAME` set, every greeting starts "Hi, you've reached <brand>, <owner>'s AI business card."
 - New caller: "Hi, you've reached <owner>'s AI business card. I'm an AI assistant that <first name> built. I can tell you about <first name>, explain how this phone system works, talk through how AI could help your business, or take a message for <first name>. What brings you to call today?"
 - A number that gave a first name before: the first two sentences, then "Am I speaking with <name>?".
 

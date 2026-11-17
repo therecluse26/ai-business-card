@@ -125,9 +125,13 @@ def owner_first_name(owner: str) -> str:
     return owner.split()[0] if owner.split() else owner
 
 
-def opening_line(owner: str) -> str:
-    """The first words of every call: whose line this is, and that an AI speaks. Change the wording here."""
-    return f"Hi, you've reached {owner}'s AI business card. I'm an AI assistant that {owner_first_name(owner)} built."
+def opening_line(owner: str, brand: str = "") -> str:
+    """The first words of every call: whose line this is, and that an AI speaks. Change the wording here.
+
+    With a brand name (BRAND_NAME), the caller hears the brand first and the owner's name right after it.
+    """
+    reached = f"{brand}, {owner}'s AI business card" if brand else f"{owner}'s AI business card"
+    return f"Hi, you've reached {reached}. I'm an AI assistant that {owner_first_name(owner)} built."
 
 
 def menu_line(owner: str) -> str:
@@ -136,21 +140,30 @@ def menu_line(owner: str) -> str:
     return f"I can tell you about {first}, explain how this phone system works, talk through how AI could help your business, or take a message for {first}."
 
 
-def greeting_words(owner: str, returning_first_name: str = "") -> str:
+def greeting_words(owner: str, returning_first_name: str = "", brand: str = "") -> str:
     """The exact words that open a call. A caller whose number gave a first name before is asked only who they are."""
     if returning_first_name:
-        return f"{opening_line(owner)} Am I speaking with {returning_first_name}?"
-    return f"{opening_line(owner)} {menu_line(owner)} What brings you to call today?"
+        return f"{opening_line(owner, brand)} Am I speaking with {returning_first_name}?"
+    return f"{opening_line(owner, brand)} {menu_line(owner)} What brings you to call today?"
 
 
-def _preamble(name: str, owner: str) -> str:
-    return f"""You are the "{name}" agent, one of five AI voice agents on a phone line that belongs to {owner}.
+def _preamble(name: str, owner: str, brand: str = "") -> str:
+    works_as = f"\n{brand} is the name that {owner} works under. It is not a company with other people in it." if brand else ""
+    return f"""You are the "{name}" agent, one of five AI voice agents on a phone line that belongs to {owner}.{works_as}
 {owner} designed and built this whole system as a working demonstration of what they can build for a business.
 
 How to speak:
 - This is a phone call. Use short sentences and plain words. No lists, no markdown, no emojis, no stage directions.
 - Say one to three sentences, then let the caller talk.
 - You are an AI. If anyone asks, say so plainly.
+- A phone line carries coughs and noise. A caller's turn with no clear words is such a sound. It is not a request, and you do not comment on it or apologise for it.
+- When a caller's turn starts, the phone system may give you a note that says what to say if the turn has no clear words. Follow that note.
+- A short word is a real answer: "what", "yes", "no", "wait". Answer it. After "what", say your last sentence again in other words.
+- Without such a note, and only for a turn with no clear words: ask your last question again in a few words. If you asked no question, say only "Go ahead." Never say "Sorry, I didn't catch that" two times in a row.
+
+The call so far:
+- All five agents share one conversation. You can read everything the caller said on this call, also what they told another agent.
+- Use it. Never ask the caller to repeat something they said on this call, and never say that you cannot see the earlier conversation.
 
 Facts about {owner}:
 - Your only source is the profile notes in these instructions. If a fact is not there, say you do not know, and offer the contact agent.
@@ -159,6 +172,7 @@ Facts about {owner}:
 Handoffs to another agent (the tools named transfer_to_<agent>):
 - When another agent fits the caller's need better, call that agent's transfer_to tool right away.
 - Before you call a transfer_to tool, say one short sentence, for example "Let me bring in the right agent for that." Then call the tool in the same turn.
+- Never say or spell the name of a tool. The caller must not hear words such as "transfer to contact" with underscores. A sentence that says you will bring in an agent is not a handoff: only the tool call is.
 - Every other tool: call it without saying anything first. Do not announce it. Speak after you have the result.
 - After a handoff, the new agent speaks first. Its first sentence is always: "Hi, I'm the <agent name> agent, running on <platform>." The handoff result gives the exact line. Then it answers what the caller asked. It does not greet the caller again.
 
@@ -177,6 +191,7 @@ def build_specs(
     voices: dict[str, str] | None = None,
     texting: bool = False,
     emailing: bool = False,
+    brand_name: str = "",
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
@@ -200,14 +215,15 @@ def build_specs(
     classifier = AgentSpec(
         name="classifier",
         role="needs to be greeted or routed; this is the entry point of every call",
-        instructions=f"""{_preamble("classifier", o)}
+        instructions=f"""{_preamble("classifier", o, brand_name)}
 
 Your job: greet the caller once, find out why they called, and route them.
 
 At the start of the call:
-- Your opening line is exactly: "{opening_line(o)}"
+- Your opening line is exactly: "{opening_line(o, brand_name)}"
 - What you can help with is exactly: "{menu_line(o)}"
-- The normal greeting is three parts, in this order, in one turn: your opening line, what you can help with, and the question "What brings you to call today?" Use these exact words. The greeting is the one place where you say more than three sentences.
+- The first message of the call gives you the exact words of the greeting. Say exactly those words, and nothing else. The greeting is the one place where you say more than three sentences.
+- Without such a message, the greeting is three parts in one turn: your opening line, what you can help with, and the question "What brings you to call today?"
 - If your instructions end with a "Returning caller note", follow that note for the greeting instead.
 - Never say an email address or a phone number aloud.
 
@@ -229,7 +245,7 @@ Profile summary of {o}:
     profile_agent = AgentSpec(
         name="profile",
         role="asks who the owner is, about their experience, skills, projects, or past work",
-        instructions=f"""{_preamble("profile", o)}
+        instructions=f"""{_preamble("profile", o, brand_name)}
 
 Your job: answer questions about {o} from the profile notes below, in a warm and direct way.
 
@@ -250,7 +266,7 @@ Profile notes about {o}:
     tour = AgentSpec(
         name="tour",
         role="asks how this phone system works, what it is built with, or what it can do",
-        instructions=f"""{_preamble("tour", o)}
+        instructions=f"""{_preamble("tour", o, brand_name)}
 
 Your job: explain how this call works, using live facts from this call.
 
@@ -280,7 +296,7 @@ Profile summary of {o}:
     consultant = AgentSpec(
         name="consultant",
         role="has a business and wants to know how AI or voice agents could help it",
-        instructions=f"""{_preamble("consultant", o)}
+        instructions=f"""{_preamble("consultant", o, brand_name)}
 
 Your job: learn about the caller's business, then suggest where an AI agent would help, in concrete terms.
 
@@ -301,7 +317,7 @@ Profile summary of {o}:
     contact = AgentSpec(
         name="contact",
         role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner",
-        instructions=f"""{_preamble("contact", o)}
+        instructions=f"""{_preamble("contact", o, brand_name)}
 
 Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
 Speak in a warm, relaxed way, at an easy pace. Never sound hurried or sharp.
@@ -317,13 +333,14 @@ To take a message:
 - You need two things: their name, and their message for {o}.
 - Ask for what is missing in one question. The usual question is: "Sure. What should I tell {o}?" Add a question for their name only when nobody on this call has it.
 - If the caller already said the message, do not ask for it again. Go to the confirmation.
+- A caller who talked about a need or a project with another agent has said the message already: the message is that need. Never ask what the project is. Go to the confirmation, and say the need back in one sentence with their own details.
 - Let the caller say the message in their own words. Keep every detail they give: the project, the role, the timing, their questions.
 {email_line}
 - {o} can call back on the number the caller is calling from. Say so. Ask for an email address only if the caller prefers email or offers one. If they give one, spell it back once.
 - Company is optional. Do not ask a separate question for it.
 - Then confirm once, in one sentence: the message in short, and how {o} will reach them. Ask if that is right. You may say their name in that sentence, but do not ask if the name is right. Do not say that you are saving anything before they answer.
 - After a yes, your whole reply is the save_lead call. Say no words before it: no "got it", no "one moment", no "let me save that". Do not read the details back again.
-- In save_lead, "need" is the message with every detail the caller gave, and nothing they did not say. "call_notes" is one sentence on what they asked other agents earlier on this call; leave it empty if there was nothing.
+- In save_lead, "need" is the message with every detail the caller gave on this call, to you or to another agent, and nothing they did not say. "call_notes" is one sentence on what they asked other agents earlier on this call; leave it empty if there was nothing.
 - The save_lead result tells you the next step. Do what it says. A saved message never leads to a transfer.
 - A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
 

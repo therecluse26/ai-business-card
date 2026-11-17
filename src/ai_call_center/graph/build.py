@@ -83,6 +83,7 @@ def default_specs() -> dict[str, AgentSpec]:
     return build_specs(
         load_profile(settings.profile_path),
         owner_name=settings.owner_name,
+        brand_name=settings.brand_name,
         texting=settings.sms_enabled and bool(settings.portfolio_url),
         emailing=bool(settings.owner_email and settings.smtp_host),
         legs=parse_agent_legs(settings.agent_legs),

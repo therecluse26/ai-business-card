@@ -5,4 +5,5 @@ __pycache__/
 data/*.sqlite3
 data/*.log
 data/*.log.previous
+data/caller_audio/
 .pytest_cache/
