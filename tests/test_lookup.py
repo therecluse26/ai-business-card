@@ -56,10 +56,11 @@ async def test_off_and_hidden_numbers_are_never_looked_up(leads):
     assert client.calls == []
 
 
-def test_lookup_text_marks_the_name_as_a_guess():
+def test_lookup_text_never_holds_the_name_on_the_phone_account():
+    # The name on the account can be another person, and only the caller's own words say who they are.
     text = lookup_text(INFO)
-    assert "Registered name: Steve Park" in text
+    assert "Steve" not in text and "Park" not in text
     assert "mobile on Verizon Wireless" in text
     assert "Akron, OH" in text
-    assert "never treat it as confirmed" in text
     assert lookup_text(NumberInfo()) == ""
+    assert lookup_text(NumberInfo(caller_name="STEVE PARK")) == ""  # a name alone gives the agents nothing

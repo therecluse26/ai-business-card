@@ -1,12 +1,15 @@
-"""Returning-caller memory: the call log, what a prompt may see, and the end-of-call summary."""
+"""Returning-caller memory: the call log, the name check, what a prompt may see, "forget me", and the end-of-call summary."""
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from ai_call_center.callers import greeting_note, history_text, recall, summarize_call, transcript_lines
+from ai_call_center.agents.specs import Welcome, companies_phrase, greeting_words
+from ai_call_center.callers import CallSummary, history_text, recall, summarize_call, transcript_lines
+from ai_call_center.graph.tools import forget, identify, send_warm_lead_at_call_end
 from ai_call_center.leads import Lead, now_iso
-from tests.conftest import scripted, tool_call
+from ai_call_center.names import same_person
+from tests.conftest import OWNER, scripted, tool_call
 
-NUMBER = "+15555550123"
+NUMBER = "+15555550123"  # the number of the `ctx` fixture
 
 
 def _lead(leads, **over):
@@ -14,93 +17,226 @@ def _lead(leads, **over):
     leads.save(Lead(**{**lead.__dict__, **over}))
 
 
+def _call(leads, call_id, name, summary, topic="", started=""):
+    leads.start_call(call_id, NUMBER)
+    leads.finish_call(call_id, agents=["classifier"], summary=summary, caller_name=name, topic=topic)
+    if started:
+        leads._conn.execute("UPDATE calls SET started_at = ? WHERE call_control_id = ?", (started, call_id))
+
+
+def _welcome():
+    return Welcome(owner=OWNER, companies="on models from three companies", tip="what this call has cost so far", rag=True)
+
+
+# --- the name check ---
+
+
+def test_names_match_by_spelling_short_form_and_sound():
+    for spoken, stored in [
+        ("steve", "Steve Park"),
+        ("Stephen", "Steven"),  # sound
+        ("Jon", "John"),  # sound and short form
+        ("Bob", "Robert"),  # short form
+        ("Katherine", "Catherine"),  # a short-form group
+        ("José", "Jose"),  # accents
+        ("Sean", "Shawn"),
+    ]:
+        assert same_person(spoken, stored), (spoken, stored)
+
+
+def test_different_names_and_empty_names_do_not_match():
+    for spoken, stored in [("Bill", "Steve"), ("Phil", "Bill"), ("Dave", "Steve"), ("Sam", ""), ("", "Sam"), ("Al", "Ali")]:
+        assert not same_person(spoken, stored), (spoken, stored)
+
+
+# --- recall: one person's records ---
+
+
 def test_first_time_and_hidden_numbers_have_no_memory(leads):
-    assert recall(leads, NUMBER) is None
+    assert recall(leads, NUMBER, "Steve") is None
     leads.start_call("c1", "anonymous")
-    leads.finish_call("c1", agents=["classifier"], summary="Asked about pricing.")
-    assert recall(leads, "anonymous") is None
+    leads.finish_call("c1", agents=["classifier"], summary="Asked about pricing.", caller_name="Steve")
+    assert recall(leads, "anonymous", "Steve") is None
+    assert recall(leads, NUMBER, "") is None
 
 
 def test_recall_combines_lead_and_finished_calls(leads):
     _lead(leads)
-    leads.start_call("call-1", NUMBER)
-    leads.finish_call("call-1", agents=["classifier", "contact"], summary="Left details; wants a call back.", caller_name="Steve")
+    _call(leads, "call-1", "Steve", "Left details; wants a call back.", topic="an after-hours phone agent")
     leads.start_call("call-2", NUMBER)  # the call in progress is not history yet
 
-    memory = recall(leads, NUMBER, exclude_call="call-2")
+    memory = recall(leads, NUMBER, "Stephen", exclude_call="call-2")
 
-    assert memory.first_name == "Steve"
-    assert memory.company == "Acme Roofing"
-    assert memory.previous_calls == 1
+    assert memory.name == "Steve Park"  # the lead holds the name as the caller confirmed it
+    assert memory.company == "Acme Roofing" and memory.contact_on_file
+    assert memory.previous_calls == 1 and memory.topic == "an after-hours phone agent"
     assert [c.summary for c in memory.recent] == ["Left details; wants a call back."]
 
 
-def test_name_comes_from_the_call_log_when_no_lead_exists(leads):
-    leads.start_call("c1", NUMBER)
-    leads.finish_call("c1", agents=["classifier"], summary="Asked how the system works.", caller_name="Dana")
-    assert recall(leads, NUMBER).name == "Dana"
-
-
-def test_the_newest_name_wins_and_the_history_holds_only_that_person(leads):
+def test_each_name_on_a_shared_number_gets_only_its_own_records(leads):
     # Steve left a lead with an email address. Later, Bill called from the same number and left no lead.
-    _lead(leads, created_at="2026-11-16T03:10:45+00:00")
-    leads.start_call("call-1", NUMBER)
-    leads.finish_call("call-1", agents=["classifier", "contact"], summary="Steve asked about a shared project.", caller_name="Steve")
-    leads._conn.execute("UPDATE calls SET started_at = '2026-11-16T03:08:30+00:00' WHERE call_control_id = 'call-1'")
-    leads.start_call("call-2", NUMBER)
-    leads.finish_call("call-2", agents=["classifier", "profile"], summary="Bill asked about the owner.", caller_name="Bill")
-    leads._conn.execute("UPDATE calls SET started_at = '2026-11-16T14:32:29+00:00' WHERE call_control_id = 'call-2'")
+    _lead(leads)
+    _call(leads, "call-1", "Steve", "Steve asked about a shared project.", started="2026-11-16T03:08:30+00:00")
+    _call(leads, "call-2", "Bill", "Bill asked about the owner.", topic="the owner's background", started="2026-11-16T14:32:29+00:00")
 
-    memory = recall(leads, NUMBER)
-
-    assert memory.first_name == "Bill"  # the next greeting asks for Bill, not for Steve
-    assert 'Am I speaking with Bill?' in greeting_note(memory)
-    assert [c.summary for c in memory.recent] == ["Bill asked about the owner."] and memory.previous_calls == 1
-    assert (memory.company, memory.need, memory.contact_on_file) == ("", "", False)
-    text = history_text(memory)
+    bill = recall(leads, NUMBER, "Bill")
+    assert [c.summary for c in bill.recent] == ["Bill asked about the owner."]
+    assert (bill.company, bill.need, bill.contact_on_file) == ("", "", False)
+    text = history_text(bill)
     assert "Steve" not in text and "Acme" not in text and "on file" not in text
 
-    # Steve calls again: his name is the newest, and his own history comes back.
-    leads.start_call("call-3", NUMBER)
-    leads.finish_call("call-3", agents=["classifier"], summary="Steve asked for an update.", caller_name="Steve Park")
-    leads._conn.execute("UPDATE calls SET started_at = '2026-11-16T15:00:00+00:00' WHERE call_control_id = 'call-3'")
-    memory = recall(leads, NUMBER)
-    assert memory.name == "Steve Park" and memory.company == "Acme Roofing" and memory.contact_on_file
-    assert [c.call_control_id for c in memory.recent] == ["call-3", "call-1"]
+    steve = recall(leads, NUMBER, "Steve")
+    assert steve.company == "Acme Roofing" and [c.call_control_id for c in steve.recent] == ["call-1"]
+    assert recall(leads, NUMBER, "Maria") is None
 
 
 def test_a_lead_from_the_call_in_progress_is_not_history(leads):
     leads.start_call("call-2", NUMBER)
     _lead(leads, name="Bill Williams", call_control_id="call-2")
-    assert recall(leads, NUMBER, exclude_call="call-2") is None
+    assert recall(leads, NUMBER, "Bill", exclude_call="call-2") is None
 
 
-def test_greeting_note_holds_the_first_name_and_nothing_else(leads):
+def test_history_never_holds_the_email_or_the_number(leads):
     _lead(leads)
-    leads.start_call("call-1", NUMBER)
-    leads.finish_call("call-1", agents=["classifier"], summary="Wants an after-hours agent.")
-    note = greeting_note(recall(leads, NUMBER))
-    assert 'ask only: "Am I speaking with Steve?"' in note
-    assert "Say your opening line." in note and "Do not say what you can help with yet." in note
-    # Nothing a stranger on the same phone could learn about the earlier call.
-    for secret in ("Park", "Acme", "after-hours", "steve@acme.test", NUMBER):
-        assert secret not in note
-
-
-def test_history_is_separate_and_never_holds_the_email_or_the_number(leads):
-    _lead(leads)
-    leads.start_call("call-1", NUMBER)
-    leads.finish_call("call-1", agents=["classifier"], summary="Wants an after-hours agent.")
-    text = history_text(recall(leads, NUMBER))
+    _call(leads, "call-1", "", "Wants an after-hours agent.")  # no name in the log; the lead ties the call to Steve
+    text = history_text(recall(leads, NUMBER, "Steve"))
     assert "Steve Park from Acme Roofing" in text and "Wants an after-hours agent." in text
     assert "steve@acme.test" not in text and NUMBER not in text
     assert 'call save_lead with email "on file"' in text
 
 
-def test_no_name_means_no_greeting_note(leads):
-    leads.start_call("c1", NUMBER)
-    leads.finish_call("c1", agents=["classifier"], summary="Asked about prices.")
-    assert greeting_note(recall(leads, NUMBER)) == ""  # nothing to confirm, so the caller is greeted as new
+# --- the greeting and identify_caller ---
+
+
+def test_every_caller_hears_the_same_first_words():
+    words = greeting_words(OWNER, "Digital Reformer")
+    assert words == (
+        f"Hi, you've reached Digital Reformer. I'm one of five AI agents {OWNER} built, and this call is a live sample of the work "
+        f"{OWNER.split()[0]} does for clients. I remember callers, so first: who am I speaking with?"
+    )
+
+
+def test_the_company_count_comes_from_the_legs():
+    assert companies_phrase({"a": "openai_realtime", "b": "gemini_live", "c": "nova_sonic", "d": "openai_realtime"}) == "on models from three companies"
+    assert companies_phrase({"a": "openai_realtime"}) == "on OpenAI models"
+
+
+def test_a_new_caller_hears_the_offer_and_a_tip(ctx):
+    ctx.welcome = _welcome()
+    result = identify(ctx, "Sam Lee")
+    first = OWNER.split()[0]
+    assert f"Nice to meet you, Sam. {first} is a software engineer and architect, available for contract work or a full-time role." in result
+    assert "Try asking me what this call has cost so far." in result and "RAG search" in result
+    assert ctx.caller_name == "Sam Lee" and not ctx.identity_confirmed and ctx.identified
+
+
+def test_a_matching_name_gets_a_welcome_back_with_the_topic(ctx, leads):
+    _lead(leads)
+    _call(leads, "call-1", "Steve", "Asked about an after-hours agent.", topic="an after-hours phone agent")
+    ctx.welcome = _welcome()
+    result = identify(ctx, "Stephen")
+    assert '"Welcome back, Stephen. Last time you asked about an after-hours phone agent. Want to pick up there, or start something new?"' in result
+    assert "Acme Roofing" in result  # the notes come with the match
+    assert ctx.identity_confirmed and ctx.returning_name == "Steve Park" and ctx.caller_name == "Steve Park"
+
+
+def test_another_name_on_the_same_number_hears_nothing_about_the_earlier_caller(ctx, leads):
+    _lead(leads)
+    _call(leads, "call-1", "Steve", "Asked about an after-hours agent.", topic="an after-hours phone agent")
+    ctx.welcome = _welcome()
+    result = identify(ctx, "Maria")
+    for secret in ("Steve", "Acme", "after-hours", "Welcome back", "steve@acme.test"):
+        assert secret not in result
+    assert "Nice to meet you, Maria." in result and not ctx.identity_confirmed and ctx.caller_history == ""
+
+
+def test_no_name_and_a_hidden_number_are_new_callers(ctx, leads):
+    _lead(leads)
+    _call(leads, "call-1", "Steve", "Asked about an after-hours agent.")
+    ctx.welcome = _welcome()
+    assert "Welcome back" not in identify(ctx, "")
+    assert ctx.caller_name == "" and not ctx.identity_confirmed
+    ctx.identified, ctx.caller_number = False, "anonymous"
+    assert "Welcome back" not in identify(ctx, "Steve")
+
+
+def test_identify_runs_once_per_call(ctx):
+    ctx.welcome = _welcome()
+    identify(ctx, "Sam")
+    again = identify(ctx, "Steve")
+    assert "already identified as Sam" in again and ctx.caller_name == "Sam"
+
+
+async def test_the_history_reaches_a_model_only_through_identify_caller(make_graph, ctx, config, leads):
+    _lead(leads)
+    _call(leads, "call-1", "Steve", "Asked about an after-hours agent.")
+    model = scripted(tool_call("identify_caller", name="Maria"), "Nice to meet you, Maria.", tool_call("transfer_to_profile"), "Hi, I'm the profile agent.")
+    graph = make_graph(model)
+    await graph.ainvoke({"messages": [HumanMessage("This is Maria.")]}, config=config, context=ctx)
+    await graph.ainvoke({"messages": [HumanMessage("Tell me about the owner.")]}, config=config, context=ctx)
+    seen = " ".join(str(m.content) for call in model.calls for m in call)
+    assert "Acme Roofing" not in seen and "Steve" not in seen
+    assert "Returning caller" not in model.system_prompt_of_call(0)
+
+
+async def test_identify_caller_runs_in_the_graph(make_graph, ctx, config, leads):
+    _lead(leads)
+    model = scripted(tool_call("identify_caller", name="Steve"), "Welcome back, Steve.")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("It's Steve.")]}, config=config, context=ctx)
+    tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
+    assert "Acme Roofing" in tool_msg.content and ctx.identity_confirmed
+
+
+# --- forget me ---
+
+
+def test_forget_deletes_that_persons_records_and_keeps_the_call_rows(ctx, leads):
+    _lead(leads)
+    _call(leads, "call-1", "Steve", "Asked about an after-hours agent.", topic="an after-hours phone agent")
+    _call(leads, "call-2", "Bill", "Bill asked about the owner.")
+    leads.start_call(ctx.call_control_id, NUMBER)
+    identify(ctx, "Steve")
+
+    result, _ = forget(ctx)
+
+    assert "This line won't remember you." in result
+    assert recall(leads, NUMBER, "Steve") is None
+    assert recall(leads, NUMBER, "Bill") is not None  # another person on the number keeps their records
+    assert leads.call_count_for(NUMBER, exclude=ctx.call_control_id) == 2  # the call limits still count Steve's call
+    assert ctx.forgotten and not ctx.identity_confirmed and ctx.caller_history == ""
+
+
+async def test_a_forgotten_caller_gets_no_warm_lead_email(ctx, notifier):
+    ctx.forgotten = True
+    summary = CallSummary(summary="Wants a booking platform.", topic="a booking platform", interest="project")
+    assert not await send_warm_lead_at_call_end(ctx, summary, lead_saved=False)
+    assert notifier.sent == []
+
+
+# --- the warm lead ---
+
+
+async def test_a_project_with_no_message_reaches_the_owner_as_a_warm_lead(ctx, notifier):
+    from ai_call_center.notify import plain_text
+
+    ctx.caller_name = "Sam Lee"
+    summary = CallSummary(summary="Sam wants a booking platform for a clinic.", topic="a booking platform", interest="project")
+    assert await send_warm_lead_at_call_end(ctx, summary, lead_saved=False, visited=["classifier", "consultant"])
+    email = notifier.sent[0]
+    assert email["Subject"] == "Voice card: Warm lead: Sam Lee talked about a project, no message left"
+    assert "Sam wants a booking platform for a clinic." in plain_text(email) and "Lead record" not in plain_text(email)
+
+
+async def test_no_warm_lead_without_interest_with_a_message_or_from_a_hidden_number(ctx, notifier):
+    project = CallSummary(summary="Wants a booking platform.", interest="project")
+    assert not await send_warm_lead_at_call_end(ctx, CallSummary(summary="Asked how it works.", interest="none"), lead_saved=False)
+    assert not await send_warm_lead_at_call_end(ctx, project, lead_saved=True)
+    ctx.caller_number = "anonymous"
+    assert not await send_warm_lead_at_call_end(ctx, project, lead_saved=False)
+    assert notifier.sent == []
+
+
+# --- the summary ---
 
 
 def test_transcript_lines_skip_tools_and_developer_messages():
@@ -117,45 +253,87 @@ def test_transcript_lines_skip_tools_and_developer_messages():
 
 
 async def test_summarize_call_parses_the_model_json():
-    model = scripted('{"summary": "Steve asked about an after-hours agent and left his details.", "caller_name": "Steve"}')
-    summary, name = await summarize_call([{"role": "user", "content": "Hi, this is Steve."}], model)
-    assert summary.startswith("Steve asked") and name == "Steve"
+    model = scripted(
+        '{"summary": "Steve asked about an after-hours agent and left his details.", "caller_name": "Steve",'
+        ' "topic": "an after-hours phone agent for a roofing company in Ohio today", "interest": "Project"}'
+    )
+    summary = await summarize_call([{"role": "user", "content": "Hi, this is Steve."}], model)
+    assert summary.summary.startswith("Steve asked") and summary.caller_name == "Steve"
+    assert summary.topic == "an after-hours phone agent for a roofing company"  # code keeps it to 8 words
+    assert summary.interest == "project"
+
+
+async def test_summarize_call_without_a_topic_or_with_a_bad_interest():
+    model = scripted('{"summary": "Asked how the system works.", "caller_name": "", "interest": "maybe"}')
+    summary = await summarize_call([{"role": "user", "content": "How does this work?"}], model)
+    assert summary.topic == "" and summary.interest == "none"
 
 
 async def test_summarize_call_skips_a_call_with_no_caller_speech():
     model = scripted("should not be used")
-    assert await summarize_call([{"role": "assistant", "content": "Hello?"}], model) == ("", "")
+    assert await summarize_call([{"role": "assistant", "content": "Hello?"}], model) == CallSummary()
     assert model.calls == []
 
 
-async def test_only_the_greeting_agent_sees_the_note_and_the_history_stays_out_of_every_prompt(make_graph, ctx, config):
-    ctx.caller_greeting = "Returning caller note:\n- The earlier caller gave the first name Steve."
-    ctx.caller_history = "Notes from their earlier calls:\n- Known as Steve Park from Acme Roofing."
-    model = scripted("Hi, this is the AI assistant. Am I speaking with Steve?", tool_call("transfer_to_profile"), "Hi, I'm the profile agent.")
-    graph = make_graph(model)
-    await graph.ainvoke({"messages": [HumanMessage("[The call connects.]")]}, config=config, context=ctx)
-    await graph.ainvoke({"messages": [HumanMessage("No. Tell me about the owner.")]}, config=config, context=ctx)
+# --- the 2026-11-17 call: details given, no message saved ---
 
-    assert "first name Steve" in model.system_prompt_of_call(0)  # the classifier
-    assert "first name Steve" not in model.system_prompt_of_call(2)  # the profile agent
-    seen = " ".join(str(m.content) for call in model.calls for m in call)
-    assert "Acme Roofing" not in seen  # the caller said no, so the history never reached a model
-    assert not ctx.identity_confirmed
-
-
-async def test_history_is_released_only_by_the_confirm_tool(make_graph, ctx, config):
-    ctx.caller_greeting = "Returning caller note:\n- The earlier caller gave the first name Steve."
-    ctx.caller_history = "Notes from their earlier calls:\n- Known as Steve Park from Acme Roofing."
-    model = scripted(tool_call("confirm_returning_caller"), "Welcome back, Steve. Is this about the roofing line again?")
-    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Yes, this is Steve.")]}, config=config, context=ctx)
-
-    assert ctx.identity_confirmed
-    tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
-    assert "Acme Roofing" in tool_msg.content
+STEVE_SUMMARY = CallSummary(
+    summary="Steve from Steve Corp wants to hire Brad for a consulting role on refinery safety software.",
+    caller_name="Steve Stevens",
+    topic="a consulting role on safety software",
+    interest="role",
+    owner_note="Steve runs a consulting agency that builds safety software for oil refineries and paper mills. "
+    "He wants Brad to join the team on the site-safety analysis app. Start in two weeks, ongoing, at 100 dollars an hour.",
+    timeline="in two weeks",
+    size="ongoing, no end date",
+)
 
 
-async def test_confirm_tool_gives_nothing_for_a_new_caller(make_graph, ctx, config):
-    model = scripted(tool_call("confirm_returning_caller"), "What brings you to call today?")
-    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Hi.")]}, config=config, context=ctx)
-    tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
-    assert "No earlier calls are on record" in tool_msg.content and not ctx.identity_confirmed
+async def test_summarize_call_reads_the_note_for_the_owner():
+    model = scripted(
+        '{"summary": "x", "caller_name": "Steve", "topic": "a role", "interest": "role",'
+        ' "owner_note": "Builds safety software. Start in two weeks at 100 dollars an hour.", "timeline": "in two weeks", "size": "ongoing"}'
+    )
+    summary = await summarize_call([{"role": "user", "content": "Hi."}], model)
+    assert summary.owner_note.startswith("Builds safety software.") and (summary.timeline, summary.size) == ("in two weeks", "ongoing")
+
+
+async def test_a_refused_transfer_note_holds_what_the_caller_said(ctx, notifier):
+    from ai_call_center.graph.tools import note_refused_transfer_at_call_end, remember_refused_transfer
+    from ai_call_center.notify import plain_text
+
+    remember_refused_transfer(ctx, caller_name="Steve Stevens", company="Steve Corp.", reason="The caller wants to connect with Brad now.")
+    lead = await note_refused_transfer_at_call_end(ctx, lead_saved=False, summary=STEVE_SUMMARY)
+    assert lead
+    text = plain_text(notifier.sent[-1])
+    assert "oil refineries and paper mills" in text and "100 dollars an hour" in text
+    assert "Wants to start: in two weeks" in text and "Size of the work: ongoing, no end date" in text
+    assert "connect with Brad now" not in text
+
+
+async def test_a_warm_lead_follows_a_transfer_note_and_keeps_the_email_on_file(ctx, notifier, leads):
+    from ai_call_center.graph.tools import message_saved, note_caller_before_transfer
+    from ai_call_center.notify import plain_text
+
+    # The owner's phone rang before the caller left a message: the note says only who called.
+    await note_caller_before_transfer(ctx, lead_saved=False, caller_name="Steve Stevens", company="Steve Corp.", reason="Wants to talk.")
+    leads._conn.execute("UPDATE leads SET email = 'steve@test.example'")
+    assert not message_saved(ctx)
+    assert await send_warm_lead_at_call_end(ctx, STEVE_SUMMARY, lead_saved=message_saved(ctx))
+    text = plain_text(notifier.sent[-1])
+    assert "oil refineries" in text and "steve@test.example" in text and "Wants to start: in two weeks" in text
+
+
+def test_a_yes_to_the_read_back_with_no_save_is_caught_once(ctx):
+    from ai_call_center.graph.tools import missed_save
+
+    lines = [
+        "agent: You're looking to hire Brad for a consulting role starting in two weeks, at 100 dollars per hour. Is that right, Steve?",
+        "caller: Yeah.",
+    ]
+    assert missed_save(ctx, lines) == 0  # the agent has not answered yet
+    answered = [*lines, "agent: Perfect, thanks. I'll take that as confirming the summary."]
+    assert missed_save(ctx, answered) == 2
+    assert missed_save(ctx, [*lines[:1], "caller: No, the rate is wrong.", answered[-1]]) == 0
+    ctx.leads.save(Lead(name="Steve", email="", company="", need="A role.", caller_number=NUMBER, call_control_id=ctx.call_control_id, created_at=now_iso()))
+    assert missed_save(ctx, answered) == 0  # saved

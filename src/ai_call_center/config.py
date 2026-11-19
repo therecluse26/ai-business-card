@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     llm_model: str = "anthropic:claude-opus-5-5"
     summary_model: str = "anthropic:claude-haiku-5-5"  # writes the two-sentence call summary at hangup
     owner_name: str = "the owner"
+    owner_name_pronunciation: str = ""  # optional; how the agents say the owner's name, in plain words
     brand_name: str = ""  # optional; the greeting then says "<brand>, <owner>'s AI business card"
     owner_phone: str = "+15555550100"
     profile_path: Path = Path("profile.md")
@@ -64,6 +65,10 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: SecretStr = SecretStr("")
     smtp_from: str = ""
+
+    # LangSmith tracing (see tracing.py). The langsmith client reads LANGSMITH_PROJECT from the environment.
+    langsmith_tracing: bool = False
+    langsmith_api_key: SecretStr = SecretStr("")
 
     # Telnyx (M2+). Run `bash scripts/telnyx-setup.sh` to fill these in.
     telnyx_api_key: SecretStr = SecretStr("")
@@ -98,6 +103,13 @@ class Settings(BaseSettings):
     # Text messages (off until the number has a Telnyx messaging profile and a 10DLC campaign).
     sms_enabled: bool = False
     portfolio_url: str = ""  # the link an agent can text to a caller
+    website_url: str = ""  # the owner's public website; every agent says it on request, and the goodbye names it
+
+    # The owner's published writing (an RSS feed). The profile agent knows the titles and searches the text.
+    writing_feed_url: str = ""
+    writing_cache_path: Path = Path("data/writing.json")  # the copy used when the feed cannot be read
+    writing_embedding_model: str = "BAAI/bge-small-en-v1.5"  # local, via fastembed; "" = keyword search only
+    writing_model_dir: Path = Path("data/models")  # the embedding model is downloaded here once
 
     # Number lookup on each new caller (Telnyx bills each lookup; results are cached per number).
     caller_lookup: Literal["off", "carrier", "carrier+name"] = "carrier+name"

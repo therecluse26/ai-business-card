@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
+# No test sends a LangSmith trace. This runs before ai_call_center imports config, whose load_dotenv()
+# never overrides a variable that is already set, so the owner's .env cannot turn tracing on here.
+os.environ["LANGSMITH_TRACING"] = "false"
+
 from collections.abc import Iterator, Sequence
 from typing import Any
 
@@ -20,6 +26,17 @@ from ai_call_center.telephony import RecordingTelephony
 
 OWNER = "Test Owner"
 OWNER_PHONE = "+15555550199"
+
+
+@pytest.fixture(autouse=True)
+def _no_tracing(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from ai_call_center import tracing
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    tracing._reset()
+    yield
+    tracing._reset()
 
 
 class ScriptedModel(GenericFakeChatModel):

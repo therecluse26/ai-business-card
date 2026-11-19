@@ -18,17 +18,35 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
 
-from ai_call_center.agents.specs import AgentSpec, LEGS, build_specs, load_profile, parse_agent_legs
+from ai_call_center.agents.specs import (
+    LEGS,
+    AgentSpec,
+    build_specs,
+    load_profile,
+    parse_agent_legs,
+    web_address,
+)
 from ai_call_center.config import get_settings
 from ai_call_center.graph.handoffs import handoff_tool_name, make_handoff_tool
 from ai_call_center.graph.state import CallContext, CallState
-from ai_call_center.graph.tools import confirm_returning_caller, end_call, get_call_stats, request_owner_transfer, save_lead, text_portfolio_link
+from ai_call_center.graph.tools import (
+    end_call,
+    forget_caller,
+    get_call_stats,
+    identify_caller,
+    request_owner_transfer,
+    save_lead,
+    search_writing,
+    text_portfolio_link,
+)
+from ai_call_center.tracing import tracing_enabled
+from ai_call_center.writing import about_line, default_library
 
 ENTRY_AGENT = "classifier"
 
 
 def all_tools(specs: dict[str, AgentSpec]) -> dict[str, BaseTool]:
-    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, text_portfolio_link, confirm_returning_caller, end_call]
+    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, search_writing, text_portfolio_link, identify_caller, forget_caller, end_call]
     tools += [make_handoff_tool(spec) for spec in specs.values()]
     return {t.name: t for t in tools}
 
@@ -62,9 +80,6 @@ def build_graph(
         prompt = f"{spec.instructions}\n\n{mode_line(spec, ctx)}"
         if ctx is not None and ctx.caller_lookup:
             prompt = f"{prompt}\n\n{ctx.caller_lookup}"
-        # Only the greeting agent learns that the number has called before, and only a first name.
-        if ctx is not None and ctx.caller_greeting and name == ENTRY_AGENT:
-            prompt = f"{prompt}\n\n{ctx.caller_greeting}"
         return await handler(request.override(system_message=SystemMessage(content=prompt), tools=tools_for(spec, tools)))
 
     return create_agent(
@@ -84,9 +99,13 @@ def default_specs() -> dict[str, AgentSpec]:
         load_profile(settings.profile_path),
         owner_name=settings.owner_name,
         brand_name=settings.brand_name,
+        name_hint=settings.owner_name_pronunciation,
+        writing_about=about_line(default_library(), settings.owner_name),
+        website=web_address(settings.website_url, settings.brand_name),
         texting=settings.sms_enabled and bool(settings.portfolio_url),
         emailing=bool(settings.owner_email and settings.smtp_host),
         legs=parse_agent_legs(settings.agent_legs),
+        tracing=tracing_enabled(settings),
     )
 
 

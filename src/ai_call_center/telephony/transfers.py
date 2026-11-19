@@ -78,6 +78,9 @@ class Snapshot:
     refused_transfer: dict[str, str] | None = None  # see `CallContext.refused_transfer`
     identity_confirmed: bool = False
     caller_name: str = ""
+    identified: bool = False  # identify_caller has run; see `CallContext.identified`
+    returning_name: str = ""  # see `CallContext.returning_name`
+    forgotten: bool = False  # see `CallContext.forgotten`
     reason: str = ""  # set on resume: "no_answer" or "failed" (a transfer), or "provider_failed"
     entry_agent: str = "contact"  # the agent that speaks first when the session starts again
     failovers: int = 0  # how many times this call has moved to another voice provider

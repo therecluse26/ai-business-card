@@ -484,29 +484,79 @@ async def test_a_refused_transfer_tells_the_agent_that_it_has_the_name(make_grap
     assert ctx.caller_name == "Ada Lovelace"  # the next agent on this call reads it in the handoff message
 
 
-def test_the_greeting_says_whose_line_this_is_and_what_a_caller_can_do(specs):
-    from ai_call_center.agents.specs import menu_line, opening_line
-
-    assert opening_line("Ada Lovelace") == "Hi, you've reached Ada Lovelace's AI business card. I'm an AI assistant that Ada built."
-    assert "take a message for Ada" in menu_line("Ada Lovelace")
-    # A brand name comes first, and the owner's name stays in the greeting.
-    assert opening_line("Ada Lovelace", "Analytical Engines") == "Hi, you've reached Analytical Engines, Ada Lovelace's AI business card. I'm an AI assistant that Ada built."
-    from ai_call_center.agents.specs import build_specs, Profile
-    branded = build_specs(Profile(summary="x", full="x"), owner_name="Ada Lovelace", brand_name="Analytical Engines")
-    assert all("Analytical Engines is the name that Ada Lovelace works under" in s.instructions for s in branded.values())
-    assert opening_line("Ada Lovelace", "Analytical Engines") in branded["classifier"].instructions
-    assert "Analytical Engines" not in specs["classifier"].instructions
-    from ai_call_center.agents.specs import greeting_words
+def test_the_greeting_says_whose_line_this_is_and_asks_who_is_calling(specs):
+    from ai_call_center.agents.specs import NAME_QUESTION, Profile, build_specs, greeting_words, opening_line
     from ai_call_center.voice.call_session import connect_message
 
-    new, back = greeting_words("Ada Lovelace"), greeting_words("Ada Lovelace", "Steve")
-    assert new.startswith(opening_line("Ada Lovelace")) and menu_line("Ada Lovelace") in new and new.endswith("What brings you to call today?")
-    # A caller who may be a returning caller hears who this is, and one question. Nothing about an earlier call.
-    assert back == f'{opening_line("Ada Lovelace")} Am I speaking with Steve?'
-    assert f'"{back}"' in connect_message(back) and "nothing before or after them" in connect_message(back)
+    assert opening_line("Ada Lovelace") == (
+        "Hi, you've reached Ada Lovelace's AI business card. I'm one of five AI agents Ada built, and this call is a live sample of the work Ada does for clients."
+    )
+    # A brand name comes first, and the owner's full name stays in the greeting.
+    assert opening_line("Ada Lovelace", "Analytical Engines").startswith("Hi, you've reached Analytical Engines. I'm one of five AI agents Ada Lovelace built,")
+    branded = build_specs(Profile(summary="x", full="x"), owner_name="Ada Lovelace", brand_name="Analytical Engines")
+    assert all("Analytical Engines is the name that Ada Lovelace works under" in s.instructions for s in branded.values())
+    assert greeting_words("Ada Lovelace", "Analytical Engines") in branded["classifier"].instructions
+    assert "Analytical Engines" not in specs["classifier"].instructions
+    # A hint on how to say the owner's name reaches every agent, and only when it is set.
+    hinted = build_specs(Profile(summary="x", full="x"), owner_name="Ada Lovelace", name_hint='Lovelace is said "LUV-layss".')
+    assert all("How to say Ada Lovelace's name, every time you say it: Lovelace is said \"LUV-layss\"." in s.instructions for s in hinted.values())
+    assert "How to say" not in specs["classifier"].instructions
+    # Every caller hears the same words: they say nothing about an earlier call.
+    hello = greeting_words("Ada Lovelace")
+    assert hello == f"{opening_line('Ada Lovelace')} {NAME_QUESTION}"
+    assert f'"{hello}"' in connect_message(hello) and "nothing before or after them" in connect_message(hello)
     text = specs["classifier"].instructions
-    assert "Your opening line is exactly:" in text and "What you can help with is exactly:" in text and "What brings you to call today?" in text
+    assert "call identify_caller with the name they said" in text and "Am I speaking with" not in text
     assert "contact" not in [name for name, spec in specs.items() if "Your opening line" in spec.instructions]  # only the greeting agent
+
+
+def test_the_welcome_offers_contract_or_full_time_work_beyond_ai():
+    from ai_call_center.agents.specs import Welcome
+
+    welcome = Welcome(owner="Ada Lovelace", companies="on models from three companies", tip="to forget you")
+    words = welcome.new_caller("Sam")
+    assert "available for contract work or a full-time role" in words
+    assert "new platforms and APIs, cloud systems, modernizing old code, and AI agents" in words
+    assert "a graph of AI agents on models from three companies, with caller memory." in words  # no RAG search without a feed
+    assert words.endswith("Try asking me to forget you. So, do you have a project or a role in mind, or would you like to look around first?")
+    assert welcome.new_caller().startswith("No problem. Ada is")
+    assert welcome.returning_caller("Sam Lee") == "Welcome back, Sam. Good to hear from you again. What can I do for you today?"
+
+
+def test_every_agent_can_forget_the_caller_and_the_consultant_qualifies_a_lead(specs):
+    assert all("forget_caller" in spec.tools for spec in specs.values())
+    consultant = specs["consultant"].instructions
+    assert "When would you want this to start?" in consultant and "Is this a few weeks of work, or a longer engagement?" in consultant
+    assert "Code, not a model, compares the name" in specs["tour"].instructions
+
+
+async def test_the_qualifying_answers_reach_the_lead_and_the_top_of_the_email(make_graph, ctx, config, leads, notifier):
+    from ai_call_center.notify import plain_text
+
+    model = scripted(tool_call("save_lead", name="Sam Lee", need="A booking platform for a clinic.", timeline="next month", size="a few months"), "Saved.")
+    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config=config, context=ctx)
+    lead = leads.all()[-1]
+    assert (lead.timeline, lead.size) == ("next month", "a few months")
+    text = plain_text(notifier.sent[-1])
+    assert text.index("Wants to start: next month") < text.index("Size of the work: a few months") < text.index("When:")
+
+
+def test_a_greeting_tip_starts_a_real_feature_and_essay_tips_need_the_rag_search():
+    import random
+
+    from ai_call_center.agents.specs import CALL_TIPS, greeting_tip
+
+    no_writing = {greeting_tip("Ada Lovelace", rng=random.Random(seed)) for seed in range(50)}
+    assert no_writing == set(CALL_TIPS)
+    with_writing = {greeting_tip("Ada Lovelace", writing=True, rng=random.Random(seed)) for seed in range(50)}
+    assert "what Ada thinks about microservices" in with_writing and set(CALL_TIPS) < with_writing
+
+
+def test_the_consultant_offers_software_engineering_not_only_ai(specs):
+    consultant = specs["consultant"].instructions
+    assert "not only an AI builder" in consultant
+    assert "When plain software solves it better, say so." in consultant
+    assert "a software project" in specs["classifier"].instructions
 
 
 def test_a_message_is_saved_only_after_the_caller_says_yes_to_it(ctx):
@@ -547,3 +597,8 @@ async def test_a_message_that_waited_for_a_yes_is_saved_when_the_call_ends(ctx, 
     ctx.held_message = {"name": "Ada Lovelace", "need": "Please send me a quote.", "call_notes": ""}
     await save_lead_record(ctx, name="Ada Lovelace", need="Please send me a quote.", email="ada@example.test")
     assert ctx.held_message is None and await save_held_message_at_call_end(ctx) == {}
+
+
+def test_an_agent_asked_for_by_its_own_name_stays_on_the_call(specs):
+    assert "If the caller asks for the contact agent, that is you" in specs["contact"].instructions
+    assert "If the caller asks for the tour agent, that is you" in specs["tour"].instructions

@@ -38,33 +38,60 @@ from pipecat.pipeline.llm_switcher import LLMSwitcher
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.worker import PipelineParams, PipelineWorker
 from pipecat.processors.aggregators.llm_context import LLMContext
-from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
+from pipecat.processors.aggregators.llm_response_universal import (
+    LLMContextAggregatorPair,
+)
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.serializers.telnyx import TelnyxFrameSerializer
 from pipecat.services.llm_service import FunctionCallParams, LLMService
-from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams, FastAPIWebsocketTransport
+from pipecat.transports.websocket.fastapi import (
+    FastAPIWebsocketParams,
+    FastAPIWebsocketTransport,
+)
 from pipecat.workers.runner import WorkerRunner
 
-from ai_call_center.agents.specs import LEG_PLATFORMS, LEGS, VOICE_LEVELS_DBFS, AgentSpec, greeting_words
-from ai_call_center.callers import UNKNOWN_NUMBERS, greeting_note, history_text, lookup_text, recall, summarize_call, transcript_lines
+from ai_call_center import tracing
+from ai_call_center.agents.specs import (
+    LEG_PLATFORMS,
+    LEGS,
+    VOICE_LEVELS_DBFS,
+    AgentSpec,
+    Welcome,
+    companies_phrase,
+    greeting_tip,
+    greeting_words,
+    web_address,
+)
+from ai_call_center.callers import (
+    UNKNOWN_NUMBERS,
+    CallSummary,
+    lookup_text,
+    summarize_call,
+    transcript_lines,
+)
 from ai_call_center.config import Settings
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.graph.state import CallContext
 from ai_call_center.graph.tools import (
     CALL_NOT_ENDED,
-    SAY_GOODBYE,
+    SAVE_NOW,
     asked_for_the_owner,
-    describe_call,
     confirmed_the_message,
+    describe_call,
+    forget,
+    identify,
     message_confirm_question,
+    message_saved,
+    missed_save,
     note_caller_before_transfer,
     note_refused_transfer_at_call_end,
     remember_refused_transfer,
-    release_caller_history,
-    save_held_message_at_call_end,
     said_goodbye,
+    save_held_message_at_call_end,
     save_lead_record,
+    say_goodbye,
+    send_warm_lead_at_call_end,
     text_owner_before_transfer,
     text_portfolio_link_to_caller,
     transfer_closed_message,
@@ -75,13 +102,15 @@ from ai_call_center.leads import LeadStore
 from ai_call_center.notify import notifier_from_settings
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
-from ai_call_center.telephony.transfers import Fallback, Snapshot, TransferManager, screening_prompt
+from ai_call_center.telephony.transfers import (
+    Fallback,
+    Snapshot,
+    TransferManager,
+    screening_prompt,
+)
 from ai_call_center.voice.caller_audio import CallerAudioFile, caller_audio_path
 from ai_call_center.voice.cutoff import CallerSoundWatch
-from ai_call_center.voice.spoken_tool import SpokenToolWatch
 from ai_call_center.voice.health import ProviderHealth
-from ai_call_center.voice.leveler import VoiceLeveler
-from ai_call_center.voice.stats import CallStats
 from ai_call_center.voice.legs import (
     adopt_context,
     build_leg,
@@ -95,7 +124,11 @@ from ai_call_center.voice.legs import (
     self_heals,
     tell_now,
 )
+from ai_call_center.voice.leveler import VoiceLeveler
+from ai_call_center.voice.spoken_tool import SpokenToolWatch
+from ai_call_center.voice.stats import CallStats
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
+from ai_call_center.writing import default_library, search_result
 
 log = logging.getLogger(__name__)
 
@@ -139,6 +172,7 @@ def known_name_note(caller_name: str) -> str:
     )
 
 
+MISSED_SAVE_WAIT_SECS = 2.5  # after the agent stops speaking, how long a save_lead call may take to arrive
 CALL_SO_FAR_LINES = 16  # how many of the last turns the next agent reads again in the handoff message
 CALL_SO_FAR_LINE_CHARS = 320
 
@@ -271,6 +305,20 @@ class VoiceCallState:
     ending: bool = False  # end_call was accepted; the hang-up waits for the goodbye line
     transfer_announce: str = ""  # what the owner hears before they accept the call: who is calling, and why
     took_over_at: float = 0.0  # when the active agent got the call by a handoff (monotonic); 0.0 for the first agent
+
+
+class AgentStoppedWatch(FrameProcessor):
+    """Calls `on_stopped` each time the agent stops speaking. Sits after the transport output."""
+
+    def __init__(self, on_stopped) -> None:
+        super().__init__()
+        self._on_stopped = on_stopped
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, BotStoppedSpeakingFrame):
+            await self._on_stopped()
+        await self.push_frame(frame, direction)
 
 
 class TransferGate(FrameProcessor):
@@ -520,6 +568,35 @@ class CallSession:
     def call_control_id(self) -> str:
         return self.call_data["call_id"]
 
+    async def _finish_call(self, store: LeadStore, ctx: CallContext, messages: list, *, visited: list[str], transferred: bool) -> None:
+        """The summary model reads the whole call. Its summary is what the next call from this number sees.
+        Its note for the owner goes into the end-of-call email: a refused transfer with no message, or a
+        warm lead. Either way the owner gets what the caller said, even when no agent saved it."""
+        try:
+            summary = await summarize_call(messages, init_chat_model(self.settings.summary_model), config=tracing.run_config(self.call_control_id, "call-summary"))
+        except Exception:
+            log.exception("call %s: the call summary failed", self.call_control_id)
+            summary = CallSummary()
+        noted = False
+        try:
+            if await note_refused_transfer_at_call_end(ctx, lead_saved=message_saved(ctx), visited=visited, summary=summary):
+                noted = True
+                log.info("call %s: the caller left no message after a refused transfer; the owner got a note with the call details", self.call_control_id)
+        except Exception:
+            log.exception("call %s: could not save the note for a refused transfer", self.call_control_id)
+        try:
+            store.finish_call(self.call_control_id, agents=visited, summary=summary.summary, caller_name=ctx.caller_name or summary.caller_name, topic=summary.topic)
+            log.info("call %s: summary saved (%d chars, interest: %s)", self.call_control_id, len(summary.summary), summary.interest)
+        except Exception:
+            log.exception("call %s: could not save the call summary", self.call_control_id)
+        if transferred:
+            return  # the owner is on the line with the caller, or the call comes back to an agent
+        try:
+            if await send_warm_lead_at_call_end(ctx, summary, lead_saved=noted or message_saved(ctx), visited=visited):
+                log.info("call %s: no message was saved; the owner got a warm lead email (%s)", self.call_control_id, summary.interest)
+        except Exception:
+            log.exception("call %s: could not send the warm lead email", self.call_control_id)
+
     async def run(self) -> None:
         started = time.monotonic()
         resume = self.resume
@@ -538,21 +615,14 @@ class CallSession:
         store.start_call(self.call_control_id, HIDDEN_NUMBER if caller_number in UNKNOWN_NUMBERS else caller_number)
         if resume:
             store.reopen_call(self.call_control_id)
-        # Returning-caller memory: look the number up before any agent speaks. The greeting agent
-        # gets a first name to confirm. The history stays here until the caller says yes.
-        memory = recall(store, caller_number, exclude_call=self.call_control_id)
-        # The first-name question belongs to a new call. It is asked again only when the provider
-        # failed before the caller answered it.
-        greeting = greeting_note(memory) if memory and (not resume or (failover_resume and not resume.identity_confirmed)) else ""
-        history = history_text(memory) if memory and memory.first_name else ""
-        hello = greeting_words(self.settings.owner_name, memory.first_name if memory and greeting else "", self.settings.brand_name)
+        # Every caller hears the same greeting, which asks who they are. No agent knows if the number
+        # called before: identify_caller checks the name in code and gives the notes only on a match.
+        hello = greeting_words(self.settings.owner_name, self.settings.brand_name)
         # Number lookup started at call.initiated; take the result if it is ready.
         info = await self.lookups.get(caller_number) if self.lookups else None
         lookup_block = lookup_text(info) if info is not None else ""
         if lookup_block:
             log.info("call %s: number lookup: line=%s carrier=%s area=%s name known: %s", self.call_control_id, info.line_type, info.carrier, info.state, bool(info.caller_name))
-        if memory:
-            log.info("call %s: returning caller (%d earlier calls, name known: %s)", self.call_control_id, memory.previous_calls, bool(memory.name))
         # Each spec as it will run here: a leg with no API key, or one marked down, runs on another
         # provider, voice included.
         self.specs = {name: resolve_spec(spec, self.settings, health.down()) for name, spec in self.specs.items()}
@@ -561,7 +631,7 @@ class CallSession:
         for name, spec in self.specs.items():
             service = build_leg(
                 spec,
-                instructions=voice_instructions(spec, spec.leg, lookup_block, greeting if name == ENTRY_AGENT else ""),
+                instructions=voice_instructions(spec, spec.leg, lookup_block),
                 settings=self.settings,
                 tools=tools_for_agent(spec, schemas),
             )
@@ -575,10 +645,16 @@ class CallSession:
             notifier=notifier_from_settings(self.settings),
             legs={name: vl.leg for name, vl in legs.items()},
             mode="voice",
-            caller_greeting=greeting,
-            caller_history=history,
             identity_confirmed=bool(resume and resume.identity_confirmed),
-            returning_name=memory.name if memory else "",
+            returning_name=resume.returning_name if resume else "",
+            identified=bool(resume and resume.identified),
+            forgotten=bool(resume and resume.forgotten),
+            welcome=Welcome(
+                owner=self.settings.owner_name,
+                companies=companies_phrase({name: vl.leg for name, vl in legs.items()}),
+                tip=greeting_tip(self.settings.owner_name, writing=bool(default_library().posts)),
+                rag=bool(default_library().posts),
+            ),
             earlier_calls=store.call_count_for(caller_number, exclude=self.call_control_id) if caller_number not in UNKNOWN_NUMBERS else 0,
             number_info=info,
             caller_lookup=lookup_block,
@@ -589,6 +665,8 @@ class CallSession:
             caller_line_type=info.line_type if info else "",
             texter=self.telephony if self.settings.sms_enabled else None,
             portfolio_url=self.settings.portfolio_url,
+            owner_name=self.settings.owner_name,
+            website_spoken=site.spoken if (site := web_address(self.settings.website_url, self.settings.brand_name)) else "",
             transfer_hours=TransferHours.parse(self.settings.transfer_hours, self.settings.transfer_days),
             started_at=stats.started_at,
         )
@@ -624,7 +702,10 @@ class CallSession:
         context = LLMContext(messages=first_messages, tools=tools_for_agent(entry, schemas))
         caller_words = CallerWords()
         ctx.transcript = lambda: caller_words.with_newest(transcript_lines(context.messages))
-        user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
+        aggregators = LLMContextAggregatorPair(context)
+        user_aggregator, assistant_aggregator = aggregators
+        # LangSmith: this call's spans and the caller's words go to the call's thread. Off unless tracing is on.
+        traced = tracing.follow_call(aggregators, self.call_control_id)
         # The first service in the list is active at start.
         switcher = LLMSwitcher(llms=[legs[entry_agent].service, *(vl.service for name, vl in legs.items() if name != entry_agent)])
 
@@ -638,6 +719,9 @@ class CallSession:
                     "refused_transfer": ctx.refused_transfer,
                     "identity_confirmed": ctx.identity_confirmed,
                     "caller_name": ctx.caller_name,
+                    "identified": ctx.identified,
+                    "returning_name": ctx.returning_name,
+                    "forgotten": ctx.forgotten,
                     "failovers": resume.failovers if resume else 0,
                     "stats": stats,
                     **changes,
@@ -782,6 +866,32 @@ class CallSession:
 
             spawn(hand_off())
 
+        async def tell_agent(text: str) -> None:
+            # Into the switcher, not the head of the pipeline: the active voice service must see
+            # the message first and put it in its session. The assistant aggregator then adds it
+            # to the shared context and asks for an answer once the agent has stopped speaking.
+            await switcher.queue_frame(LLMMessagesAppendFrame(messages=[{"role": "developer", "content": text}], run_llm=True))
+
+        save_nudged: set[int] = set()
+
+        async def on_agent_stopped() -> None:
+            """The caller said yes to the message read-back, and the agent spoke without saving it: tell it to save now."""
+            if "save_lead" not in self.specs[state.active_agent].tools or state.ending or state.transfer_requested:
+                return
+
+            async def check() -> None:
+                await asyncio.sleep(MISSED_SAVE_WAIT_SECS)  # a save_lead call right after the words needs time to land
+                if gate.speaking or state.ending or state.transfer_requested:
+                    return
+                key = missed_save(ctx, ctx.transcript())
+                if not key or key in save_nudged:
+                    return
+                save_nudged.add(key)
+                log.info("call %s: the caller confirmed the message and the %s agent did not save it; agent told to save now", self.call_control_id, state.active_agent)
+                await tell_agent(SAVE_NOW)
+
+            spawn(check())
+
         caller_audio = CallerAudioFile(caller_audio_path(self.settings.caller_audio_dir, self.call_control_id)) if self.settings.save_caller_audio else None
         processors = [transport.input(), *([caller_audio] if caller_audio else []), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher, CallerSoundWatch(on_sound, drop_sound_note), SpokenToolWatch(self.specs, on_spoken_tool)]
         if self.settings.voice_level_dbfs:
@@ -794,7 +904,7 @@ class CallSession:
                     seeds=VOICE_LEVELS_DBFS,
                 )
             )
-        pipeline = Pipeline([*processors, transport.output(), gate, assistant_aggregator])
+        pipeline = Pipeline([*processors, transport.output(), gate, AgentStoppedWatch(on_agent_stopped), assistant_aggregator])
 
         stats.bind({vl.service.name: vl.leg for vl in legs.values()}, lambda: legs[state.active_agent].leg)
         worker = PipelineWorker(
@@ -807,12 +917,16 @@ class CallSession:
             ),
             observers=[MetricsLogObserver(), stats],
             idle_timeout_secs=300,
+            enable_tracing=traced,
+            enable_turn_tracking=True,
+            conversation_id=self.call_control_id,
+            additional_span_attributes={"call.entry_agent": entry_agent, "call.caller_number": caller_number, "call.restart_reason": resume.reason if resume else ""},
         )
         runner = WorkerRunner(handle_sigint=False)
 
         # --- tool handlers: the voice model requests, this code acts ---
         async def on_save_lead(params: FunctionCallParams) -> None:
-            args = {k: str(params.arguments.get(k) or "") for k in ("name", "need", "email", "company", "callback_number", "call_notes")}
+            args = {k: str(params.arguments.get(k) or "") for k in ("name", "need", "email", "company", "callback_number", "call_notes", "timeline", "size")}
             # The caller's yes can reach the context a moment after the tool call, as with a transfer.
             waited = 0.0
             while not ctx.message_confirm_asked and not confirmed_the_message(ctx.transcript()) and waited < TRANSCRIPT_WAIT_SECS:
@@ -827,12 +941,16 @@ class CallSession:
             state.lead_saved = state.lead_saved or bool(lead)
             await params.result_callback(result)
 
-        async def on_confirm_caller(params: FunctionCallParams) -> None:
-            # The caller said yes to the first name. Only now do the notes from earlier calls
-            # enter the conversation; from here every agent can see them in the shared context.
-            if ctx.caller_history:
-                log.info("call %s: caller confirmed their identity; history released", self.call_control_id)
-            await params.result_callback(release_caller_history(ctx))
+        async def on_identify_caller(params: FunctionCallParams) -> None:
+            # Code compares the name with the names on record. Only on a match do the notes from
+            # earlier calls enter the conversation; from there every agent sees them in the shared context.
+            result = identify(ctx, str(params.arguments.get("name") or ""))
+            log.info("call %s: caller identified (name given: %s, earlier caller: %s)", self.call_control_id, bool(ctx.caller_name), ctx.identity_confirmed)
+            await params.result_callback(result)
+
+        async def on_forget_caller(params: FunctionCallParams) -> None:
+            result, _ = forget(ctx)
+            await params.result_callback(result)
 
         async def on_call_stats(params: FunctionCallParams) -> None:
             await params.result_callback(
@@ -845,6 +963,12 @@ class CallSession:
                     figures=stats.describe(),
                 )
             )
+
+        async def on_search_writing(params: FunctionCallParams) -> None:
+            query = str(params.arguments.get("query") or "")
+            log.info("call %s: search_writing %r", self.call_control_id, query)
+            # The query embedding takes a few milliseconds of CPU: keep it off the audio loop.
+            await params.result_callback(await asyncio.to_thread(search_result, default_library(), query))
 
         async def on_text_link(params: FunctionCallParams) -> None:
             await params.result_callback(await text_portfolio_link_to_caller(ctx, owner_name=self.settings.owner_name))
@@ -917,7 +1041,7 @@ class CallSession:
                 await params.result_callback("The call ends when you stop speaking.", properties=FunctionCallResultProperties(run_llm=False))
                 return
             gate.arm(do_hangup)
-            await params.result_callback(SAY_GOODBYE)
+            await params.result_callback(say_goodbye(ctx.website_spoken))
 
         def make_handoff(target: str):
             async def on_handoff(params: FunctionCallParams) -> None:
@@ -931,8 +1055,10 @@ class CallSession:
 
         for vl in legs.values():  # any service can become active, so each one knows every tool
             vl.service.register_function("save_lead", on_save_lead)
-            vl.service.register_function("confirm_returning_caller", on_confirm_caller)
+            vl.service.register_function("identify_caller", on_identify_caller)
+            vl.service.register_function("forget_caller", on_forget_caller)
             vl.service.register_function("get_call_stats", on_call_stats)
+            vl.service.register_function("search_writing", on_search_writing)
             vl.service.register_function("request_owner_transfer", on_transfer)
             vl.service.register_function("text_portfolio_link", on_text_link)
             vl.service.register_function("end_call", on_end_call)
@@ -945,15 +1071,15 @@ class CallSession:
             if limit <= 0:
                 return
 
-            async def tell_agent(text: str) -> None:
-                # Into the switcher, not the head of the pipeline: the active voice service must see
-                # the message first and put it in its session. The assistant aggregator then adds it
-                # to the shared context and asks for an answer once the agent has stopped speaking.
-                await switcher.queue_frame(LLMMessagesAppendFrame(messages=[{"role": "developer", "content": text}], run_llm=True))
-
             await asyncio.sleep(max(limit - 60, 0))
             log.info("call %s: one minute left", self.call_control_id)
-            await tell_agent("About one minute is left on this call; the line has a time limit. Tell the caller in one sentence. If they want a follow-up, offer the contact agent.")
+            # On 2026-11-17 the contact agent itself said "the contact agent can help", and the caller asked for it.
+            follow_up = (
+                "If they have not left a message yet, offer to take one now."
+                if "save_lead" in self.specs[state.active_agent].tools
+                else "If they want a follow-up, offer the contact agent."
+            )
+            await tell_agent(f"About one minute is left on this call; the line has a time limit. Tell the caller in one sentence. {follow_up}")
             await asyncio.sleep(min(45, limit))
             await tell_agent("The time limit is here. Say goodbye in one short sentence now, and say they can call again.")
             await asyncio.sleep(15)
@@ -997,25 +1123,28 @@ class CallSession:
                 # The call goes on in a new session, which writes the summary when the call ends.
                 log.info("call %s: session ended after %.0f s to change the voice provider", self.call_control_id, time.monotonic() - started)
             else:
-                # The call is over. A caller who was refused a transfer and left no message still leaves a record.
+                # The call is over. A message that waited for the caller's yes is saved as it is.
                 try:
                     if await save_held_message_at_call_end(ctx, visited=[ENTRY_AGENT, *state.handoffs]):
                         state.lead_saved = True
                         log.info("call %s: the call ended before the caller confirmed the message; saved as it is", self.call_control_id)
-                    if await note_refused_transfer_at_call_end(ctx, lead_saved=state.lead_saved, visited=[ENTRY_AGENT, *state.handoffs]):
-                        state.lead_saved = True
-                        log.info("call %s: the caller left no message after a refused transfer; the owner got a note", self.call_control_id)
                 except Exception:
-                    log.exception("call %s: could not save the note for a refused transfer", self.call_control_id)
-                # What was said, as each agent heard it. Without it, a call that went wrong cannot be read afterwards.
-                log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(context.messages)) or "(nothing)")
-                # Write the short summary that the next call from this number will see.
-                try:
-                    summary, caller_name = await summarize_call(context.messages, init_chat_model(self.settings.summary_model))
-                    store.finish_call(self.call_control_id, agents=[ENTRY_AGENT, *state.handoffs], summary=summary, caller_name=caller_name)
-                    log.info("call %s: summary saved (%d chars)", self.call_control_id, len(summary))
-                except Exception:
-                    log.exception("call %s: could not save the call summary", self.call_control_id)
+                    log.exception("call %s: could not save the held message", self.call_control_id)
+                if ctx.forgotten:
+                    # The caller asked to be forgotten: no transcript in the log, no summary, no warm-lead email.
+                    # The call row stays, empty, for the per-number call limits.
+                    store.finish_call(self.call_control_id, agents=[ENTRY_AGENT, *state.handoffs], summary="")
+                    try:  # forget_caller clears a refused transfer, so this one came after it
+                        await note_refused_transfer_at_call_end(ctx, lead_saved=state.lead_saved, visited=[ENTRY_AGENT, *state.handoffs])
+                    except Exception:
+                        log.exception("call %s: could not save the note for a refused transfer", self.call_control_id)
+                    if caller_audio:
+                        caller_audio.path.unlink(missing_ok=True)
+                    log.info("call %s: the caller asked to be forgotten; nothing about the call is kept", self.call_control_id)
+                else:
+                    # What was said, as each agent heard it. Without it, a call that went wrong cannot be read afterwards.
+                    log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(context.messages)) or "(nothing)")
+                    await self._finish_call(store, ctx, context.messages, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer")
             store.close()
         if state.end_reason == "failover":
             return

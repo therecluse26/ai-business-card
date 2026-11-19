@@ -5,16 +5,17 @@ One spec runs on a voice leg (phone) or on a text model (tests, chat.py).
 
 from __future__ import annotations
 
+import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Voice legs. The id is a setting; the label is what the tour agent says aloud.
 LEGS: dict[str, str] = {
     "openai_realtime": "OpenAI gpt-realtime-2.1-mini, a speech-to-speech model",
     "gemini_live": "Google gemini-3.8-live, a speech-to-speech model",
     "nova_sonic": "Amazon Nova 2.5 Sonic, a speech-to-speech model",
-    "pipeline_claude": "a local speech-to-text model, Claude through LangGraph, and local Kokoro text-to-speech",
 }
 
 # Short platform names, for the introduction line an agent says after a handoff.
@@ -22,7 +23,6 @@ LEG_PLATFORMS: dict[str, str] = {
     "openai_realtime": "OpenAI",
     "gemini_live": "Google Gemini",
     "nova_sonic": "Amazon Nova",
-    "pipeline_claude": "Claude",
 }
 
 DEFAULT_LEGS: dict[str, str] = {
@@ -125,34 +125,128 @@ def owner_first_name(owner: str) -> str:
     return owner.split()[0] if owner.split() else owner
 
 
+NUMBER_WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven"}
+
+# The company behind each voice leg, for "a graph of AI agents on models from three companies".
+LEG_COMPANIES: dict[str, str] = {
+    "openai_realtime": "OpenAI",
+    "gemini_live": "Google",
+    "nova_sonic": "Amazon",
+}
+
+NAME_QUESTION = "I remember callers, so first: who am I speaking with?"
+WELCOME_QUESTION = "So, do you have a project or a role in mind, or would you like to look around first?"
+
+# A new caller hears one of these, picked at random per call, as "Try asking me <tip>."
+# Each one starts a real feature, so the caller sees the system work in the first minute.
+CALL_TIPS: tuple[str, ...] = (
+    "what this call has cost so far",  # live call figures (tour agent)
+    "which AI model you're talking to right now",  # the leg of each agent
+    "to forget you",  # forget_caller
+)
+WRITING_TIPS: tuple[str, ...] = (  # the RAG search over the owner's essays (profile agent)
+    "what {first} thinks about microservices",
+    "what {first} thinks about technical debt",
+)
+
+
+def _number(n: int) -> str:
+    return NUMBER_WORDS.get(n, str(n))
+
+
 def opening_line(owner: str, brand: str = "") -> str:
-    """The first words of every call: whose line this is, and that an AI speaks. Change the wording here.
+    """The first words of every call: whose line this is, that an AI speaks, and that the call shows the owner's work.
 
-    With a brand name (BRAND_NAME), the caller hears the brand first and the owner's name right after it.
+    With a brand name (BRAND_NAME), the caller hears the brand first, and the owner's full name right after it.
     """
-    reached = f"{brand}, {owner}'s AI business card" if brand else f"{owner}'s AI business card"
-    return f"Hi, you've reached {reached}. I'm an AI assistant that {owner_first_name(owner)} built."
-
-
-def menu_line(owner: str) -> str:
-    """What a caller can do on this line. A new caller hears it right after the opening line."""
     first = owner_first_name(owner)
-    return f"I can tell you about {first}, explain how this phone system works, talk through how AI could help your business, or take a message for {first}."
+    reached, builder = (brand, owner) if brand else (f"{owner}'s AI business card", first)
+    return f"Hi, you've reached {reached}. I'm one of {_number(len(DEFAULT_LEGS))} AI agents {builder} built, and this call is a live sample of the work {first} does for clients."
 
 
-def greeting_words(owner: str, returning_first_name: str = "", brand: str = "") -> str:
-    """The exact words that open a call. A caller whose number gave a first name before is asked only who they are."""
-    if returning_first_name:
-        return f"{opening_line(owner, brand)} Am I speaking with {returning_first_name}?"
-    return f"{opening_line(owner, brand)} {menu_line(owner)} What brings you to call today?"
+def greeting_words(owner: str, brand: str = "") -> str:
+    """The exact words that open every call. A first-time caller and a returning caller hear the same words,
+    so the greeting leaks nothing about who called this number before."""
+    return f"{opening_line(owner, brand)} {NAME_QUESTION}"
 
 
-def _preamble(name: str, owner: str, brand: str = "") -> str:
+def greeting_tip(owner: str, *, writing: bool = False, rng: random.Random | None = None) -> str:
+    """One "try asking me ..." for the welcome. The essay tips are in the list only when the RAG search is on."""
+    tips = [*CALL_TIPS, *(t.format(first=owner_first_name(owner)) for t in WRITING_TIPS if writing)]
+    return (rng or random).choice(tips)
+
+
+def companies_phrase(legs: dict[str, str]) -> str:
+    """ "on models from three companies", from the legs the agents run on in this call."""
+    companies = list(dict.fromkeys(LEG_COMPANIES.get(leg, leg) for leg in legs.values()))
+    return f"on models from {_number(len(companies))} companies" if len(companies) > 1 else f"on {companies[0]} models" if companies else "on AI models"
+
+
+@dataclass(frozen=True)
+class Welcome:
+    """The words after the caller says who they are. `identify_caller` gives them to the agent word for word."""
+
+    owner: str
+    companies: str  # from companies_phrase
+    tip: str
+    rag: bool = False
+
+    def new_caller(self, name: str = "") -> str:
+        first = owner_first_name(self.owner)
+        hello = f"Nice to meet you, {name.split()[0]}." if name.strip() else "No problem."
+        rag = f" and RAG search over {first}'s writing" if self.rag else ""
+        return (
+            f"{hello} {first} is a software engineer and architect, available for contract work or a full-time role. "
+            f"{first}'s work covers new platforms and APIs, cloud systems, modernizing old code, and AI agents like the ones on this call. "
+            f"Right now you're talking to a graph of AI agents {self.companies}, with caller memory{rag}. "
+            f"Interrupt me any time. Try asking me {self.tip}. {WELCOME_QUESTION}"
+        )
+
+    def returning_caller(self, name: str, topic: str = "") -> str:
+        first_name = name.split()[0] if name.strip() else name
+        if topic.strip():
+            return f"Welcome back, {first_name}. Last time you asked about {topic.strip()}. Want to pick up there, or start something new?"
+        return f"Welcome back, {first_name}. Good to hear from you again. What can I do for you today?"
+
+
+@dataclass(frozen=True)
+class WebAddress:
+    written: str  # "digitalreformer.dev"
+    spoken: str  # "digital reformer dot dev"
+
+
+def web_address(url: str, brand: str = "") -> WebAddress | None:
+    """A web address as a voice says it. A part of the name that is the brand, without spaces, is said as the brand's words."""
+    if not url.strip():
+        return None
+    parsed = urlparse(url.strip() if "://" in url else f"https://{url.strip()}")
+    host = parsed.netloc.lower().removeprefix("www.")
+    path = parsed.path.strip("/")
+    brand_key = re.sub(r"[^a-z0-9]", "", brand.lower())
+    words = [brand.lower() if brand_key and label == brand_key else label for label in host.split(".")]
+    spoken = " dot ".join(words) + "".join(f" slash {part}" for part in path.split("/") if part)
+    return WebAddress(written=host + (f"/{path}" if path else ""), spoken=spoken)
+
+
+def _preamble(name: str, owner: str, brand: str = "", name_hint: str = "", website: WebAddress | None = None) -> str:
+    # A voice model takes no phonetic markup. A respelling in plain words is the hint it can use.
+    say_it = f"\n- How to say {owner}'s name, every time you say it: {name_hint}" if name_hint else ""
     works_as = f"\n{brand} is the name that {owner} works under. It is not a company with other people in it." if brand else ""
+    site = (
+        f"""
+
+{owner}'s website:
+- Say it as "{website.spoken}". It is written {website.written}.
+- When the caller asks for the website, a web address, or where to see more of {owner}'s work or writing, say it.
+- If the caller asks you to spell it, spell it one letter at a time, and say "dot" for the dot.
+- This is the only web address you may say aloud."""
+        if website
+        else ""
+    )
     return f"""You are the "{name}" agent, one of five AI voice agents on a phone line that belongs to {owner}.{works_as}
 {owner} designed and built this whole system as a working demonstration of what they can build for a business.
 
-How to speak:
+How to speak:{say_it}
 - This is a phone call. Use short sentences and plain words. No lists, no markdown, no emojis, no stage directions.
 - Say one to three sentences, then let the caller talk.
 - You are an AI. If anyone asks, say so plainly.
@@ -166,15 +260,21 @@ The call so far:
 - Use it. Never ask the caller to repeat something they said on this call, and never say that you cannot see the earlier conversation.
 
 Facts about {owner}:
-- Your only source is the profile notes in these instructions. If a fact is not there, say you do not know, and offer the contact agent.
-- Never invent names, numbers, dates, employers, clients, or prices.
+- Your only source is the profile notes in these instructions and the results of your tools. If a fact is not there, say you do not know, and offer the contact agent.
+- Never invent names, numbers, dates, employers, clients, or prices.{site}
 
 Handoffs to another agent (the tools named transfer_to_<agent>):
 - When another agent fits the caller's need better, call that agent's transfer_to tool right away.
+- You are the {name} agent. If the caller asks for the {name} agent, that is you: say so in a few words, and carry on. Never hand off to another agent for it.
 - Before you call a transfer_to tool, say one short sentence, for example "Let me bring in the right agent for that." Then call the tool in the same turn.
 - Never say or spell the name of a tool. The caller must not hear words such as "transfer to contact" with underscores. A sentence that says you will bring in an agent is not a handoff: only the tool call is.
-- Every other tool: call it without saying anything first. Do not announce it. Speak after you have the result.
+- Every other tool: call it without saying anything first. Do not announce it. Speak after you have the result. The one exception is a tool that your instructions below tell you to announce.
 - After a handoff, the new agent speaks first. Its first sentence is always: "Hi, I'm the <agent name> agent, running on <platform>." The handoff result gives the exact line. Then it answers what the caller asked. It does not greet the caller again.
+
+Forgetting the caller (the forget_caller tool):
+- When the caller asks you to forget them, to delete their details, or not to remember this call, ask once: "Do you want me to delete what this line knows about you?"
+- After a yes, call forget_caller. Say nothing before you call it. Its result gives you the exact words to say.
+- Never call it without that yes. After it, the call goes on as usual.
 
 Ending the call (the end_call tool):
 - When the caller says goodbye, or says they need nothing else, call end_call. It hangs up the phone.
@@ -192,6 +292,10 @@ def build_specs(
     texting: bool = False,
     emailing: bool = False,
     brand_name: str = "",
+    name_hint: str = "",
+    writing_about: str = "",
+    website: WebAddress | None = None,
+    tracing: bool = False,
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
@@ -215,37 +319,66 @@ def build_specs(
     classifier = AgentSpec(
         name="classifier",
         role="needs to be greeted or routed; this is the entry point of every call",
-        instructions=f"""{_preamble("classifier", o, brand_name)}
+        instructions=f"""{_preamble("classifier", o, brand_name, name_hint, website)}
 
 Your job: greet the caller once, find out why they called, and route them.
 
 At the start of the call:
-- Your opening line is exactly: "{opening_line(o, brand_name)}"
-- What you can help with is exactly: "{menu_line(o)}"
-- The first message of the call gives you the exact words of the greeting. Say exactly those words, and nothing else. The greeting is the one place where you say more than three sentences.
-- Without such a message, the greeting is three parts in one turn: your opening line, what you can help with, and the question "What brings you to call today?"
-- If your instructions end with a "Returning caller note", follow that note for the greeting instead.
+- Your opening line is exactly: "{greeting_words(o, brand_name)}"
+- The first message of the call gives you the exact words of the greeting. Say exactly those words, and nothing else. Without such a message, say your opening line.
+- The caller then says who they are. Say only "Thanks, <their first name>." and call identify_caller with the name they said, in the same turn.
+- The identify_caller result gives you the exact words to say next. Say exactly those words, and nothing else. They are the one place where you say more than three sentences. Then let the caller answer.
+- Call identify_caller once per call. Pass the name as you heard it. Never guess a name, and never take a name from anywhere else.
+- If the caller does not give a name, or would rather not, call identify_caller with an empty name, in silence. Do not ask for the name again.
+- If the caller asks for something instead of giving a name, call identify_caller with an empty name, in silence. Then follow its result.
+- Only identify_caller knows if this phone number has called before. Never say or suggest it yourself.
+- If the caller asks who called before, or what an earlier call was about, say you cannot share anything about other calls.
 - Never say an email address or a phone number aloud.
 
 Routing:
-- Questions about {o}: who they are, their experience, skills, or past work. Hand off to the profile agent.
-- Questions about how this phone system works, what it is built with, or what it can do. Hand off to the tour agent.
-- The caller has a business and wants to know how AI or voice agents could help it. Hand off to the consultant agent.
+- Questions about {o}: who they are, their experience, skills, past work, or their views on software engineering. Hand off to the profile agent.
+- Questions about how this phone system works, what it is built with, or what it can do. Also live facts about this call: what it has cost so far, how long it has run, how fast the agents answer. Hand off to the tour agent.
+- The caller asks which AI model they are talking to. Say it yourself in one sentence, from the line about what you run on in this call. Then offer the tour agent, which can explain the rest of the system.
+- The caller has a business, a product, or a software project, and wants to know how {o} could help with it. Hand off to the consultant agent.
+- The caller has a role to fill, or is recruiting. Questions about {o}'s experience go to the profile agent. To pass the role to {o}, hand off to the contact agent.
+- The caller wants to look around first. Hand off to the tour agent.
 - The caller wants to leave contact details, get a follow-up, or speak to {o}. Hand off to the contact agent.
 - If the intent is unclear, ask one short clarifying question. Do not ask more than two questions in total before you route.
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("confirm_returning_caller", "end_call"),
+        tools=("identify_caller", "forget_caller", "end_call"),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
         voice=voices["classifier"],
     )
 
+    # The owner's published essays, as a RAG tool. The prompt says only what the essays are about, in a fixed
+    # size; the essays themselves reach the model only as the few passages a search returns.
+    first = owner_first_name(o)
+    essays_online = f"\n- The essays are on {o}'s website. After a RAG answer, you may say so once per call." if website else ""
+    writing_tools = ("search_writing",) if writing_about else ()
+    writing_section = (
+        f"""
+
+{o}'s writing:
+{writing_about}
+- When the caller asks what {o} thinks, believes, or recommends about building software, architecture, teams, hiring, or AI agents, call search_writing. Answer only from its result, never from memory.
+- search_writing is a RAG search: it retrieves passages from {o}'s essays. A demonstration of RAG is part of this call, so the caller hears it.
+- Before you call search_writing, always say one short sentence that tells the caller you are running a RAG search. For example: "Let me run a quick RAG search over {first}'s essays. One moment." Then call search_writing in the same turn. Use other words each time.
+- Say RAG as one word, like the word "rag".
+- Pass the caller's question in plain words, with the topic in it.
+- After the result, answer in two or three sentences, as {o}'s view. You can name the essay it came from, in your own words.
+- Never read a Roman numeral or a passage word for word.{essays_online}
+- If the search finds nothing, say {o} has not written about that. Never make up {o}'s opinion."""
+        if writing_about
+        else ""
+    )
+
     profile_agent = AgentSpec(
         name="profile",
-        role="asks who the owner is, about their experience, skills, projects, or past work",
-        instructions=f"""{_preamble("profile", o, brand_name)}
+        role="asks who the owner is, about their experience, skills, projects, past work, or views on software engineering",
+        instructions=f"""{_preamble("profile", o, brand_name, name_hint, website)}
 
 Your job: answer questions about {o} from the profile notes below, in a warm and direct way.
 
@@ -256,17 +389,29 @@ Your job: answer questions about {o} from the profile notes below, in a warm and
 - If the caller describes their own business problem, hand off to the consultant agent.{text_line}
 
 Profile notes about {o}:
-{profile.full}""",
-        tools=(*text_tools, "end_call"),
+{profile.full}{writing_section}""",
+        tools=(*writing_tools, *text_tools, "forget_caller", "end_call"),
         handoffs=("tour", "consultant", "contact"),
         leg=legs["profile"],
         voice=voices["profile"],
     )
 
+    rag_fact = (
+        f"\n- The profile agent uses RAG for {o}'s views. A search cuts {o}'s published essays into short passages, ranks them by meaning with a small embedding model that runs on this server, and by keyword with BM25, then merges the two lists. The model reads only the best three passages, so a search costs the same however many essays there are."
+        if writing_about
+        else ""
+    )
+    # Said only when this server sends traces, so the agent never claims tracing that is off.
+    trace_fact = (
+        "\n- Every call is traced in LangSmith: each turn, what the caller and the agent said, each tool call and handoff, with timing. That is how a problem on a call is found afterwards."
+        if tracing
+        else ""
+    )
+
     tour = AgentSpec(
         name="tour",
         role="asks how this phone system works, what it is built with, or what it can do",
-        instructions=f"""{_preamble("tour", o, brand_name)}
+        instructions=f"""{_preamble("tour", o, brand_name, name_hint, website)}
 
 Your job: explain how this call works, using live facts from this call.
 
@@ -276,7 +421,10 @@ What you know about the system:
 - LangGraph holds the state of the call, decides which agent is active, runs the tools, and routes handoffs.
 - Each agent can run on a different voice provider. A handoff can change the voice and the provider in the middle of the call.
 - The contact agent can save a lead for {o} and transfer the live call to {o}'s phone.
-- The same agents also run as plain text, for testing.
+- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. Only on a match does an agent get that person's notes. With any doubt the caller counts as new, so nobody hears another person's details.
+- A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
+- When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
+- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}
 
 How to use your tool:
 - Call get_call_stats when the caller asks what has happened on this call, how long it has been, which providers have spoken, how fast the agents answer, how many tokens the call has used, or what the call costs. Then say the facts that answer the question, in one or two sentences.
@@ -287,7 +435,7 @@ How to use your tool:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("get_call_stats", *text_tools, "end_call"),
+        tools=("get_call_stats", *text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "consultant", "contact"),
         leg=legs["tour"],
         voice=voices["tour"],
@@ -295,20 +443,23 @@ Profile summary of {o}:
 
     consultant = AgentSpec(
         name="consultant",
-        role="has a business and wants to know how AI or voice agents could help it",
-        instructions=f"""{_preamble("consultant", o, brand_name)}
+        role="has a business, a product, or a software project, and wants to know how the owner could help: software architecture, platforms, APIs, cloud systems, modernizing old code, or AI",
+        instructions=f"""{_preamble("consultant", o, brand_name, name_hint, website)}
 
-Your job: learn about the caller's business, then suggest where an AI agent would help, in concrete terms.
+Your job: learn about the caller's business or project, then suggest how {o} could help, in concrete terms.
 
-- Ask one question at a time. Start with: what the business does, and where phone calls or repeated questions cost them time.
-- After two or three answers, suggest one or two specific uses. Say what the agent would do, who it would talk to, and what it would hand to a person.
+- {o} is an experienced software engineer and architect, not only an AI builder. The help can be a new product or platform, APIs and integrations, cloud systems, architecture, or modernizing an old system. It can also be AI: agents, voice, chat, or automation.
+- Fit the suggestion to the problem. Suggest AI when the work is many repeated conversations, questions, or documents. When plain software solves it better, say so. That honesty is part of {o}'s value.
+- Ask one question at a time. Start with: what the business does, and what problem or project they have in mind.
+- After two or three answers, suggest one or two specific approaches. Say what {o} would build, what it would do for them, and what still needs a person.
 - Be honest about limits. Some tasks still need a person. Say so.
 - Do not quote prices or timelines. {o} does that.
-- When the caller shows interest, offer to take their details so {o} can follow up. Hand off to the contact agent.{text_line}
+- When the caller shows interest in working with {o}, ask two short questions, one at a time: "When would you want this to start?" and "Is this a few weeks of work, or a longer engagement?" Skip a question the caller already answered.
+- Then offer to take their details so {o} can follow up. Hand off to the contact agent.{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=(*text_tools, "end_call"),
+        tools=(*text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "tour", "contact"),
         leg=legs["consultant"],
         voice=voices["consultant"],
@@ -317,7 +468,7 @@ Profile summary of {o}:
     contact = AgentSpec(
         name="contact",
         role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner",
-        instructions=f"""{_preamble("contact", o, brand_name)}
+        instructions=f"""{_preamble("contact", o, brand_name, name_hint, website)}
 
 Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
 Speak in a warm, relaxed way, at an easy pace. Never sound hurried or sharp.
@@ -340,6 +491,7 @@ To take a message:
 - Company is optional. Do not ask a separate question for it.
 - Then confirm once, in one sentence: the message in short, and how {o} will reach them. Ask if that is right. You may say their name in that sentence, but do not ask if the name is right. Do not say that you are saving anything before they answer.
 - After a yes, your whole reply is the save_lead call. Say no words before it: no "got it", no "one moment", no "let me save that". Do not read the details back again.
+- In save_lead, "timeline" is when the work would start and "size" is how big it is, in the caller's words. Fill them only when the caller said them on this call, to you or to another agent.
 - In save_lead, "need" is the message with every detail the caller gave on this call, to you or to another agent, and nothing they did not say. "call_notes" is one sentence on what they asked other agents earlier on this call; leave it empty if there was nothing.
 - The save_lead result tells you the next step. Do what it says. A saved message never leads to a transfer.
 - A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
@@ -363,7 +515,7 @@ Keep it short:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "request_owner_transfer", *text_tools, "end_call"),
+        tools=("save_lead", "request_owner_transfer", *text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "tour", "consultant"),
         leg=legs["contact"],
         voice=voices["contact"],

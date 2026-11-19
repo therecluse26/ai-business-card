@@ -45,7 +45,7 @@ async def test_classifier_sees_only_its_handoff_tools(make_graph, ctx, config):
     await graph.ainvoke({"messages": [HumanMessage("Hi.")]}, config=config, context=ctx)
 
     assert model.bound_tool_names, "the model was never bound to tools"
-    assert set(model.bound_tool_names[-1]) == {"confirm_returning_caller", "end_call", *(handoff_tool_name(s) for s in SPECIALISTS)}
+    assert set(model.bound_tool_names[-1]) == {"identify_caller", "forget_caller", "end_call", *(handoff_tool_name(s) for s in SPECIALISTS)}
 
 
 async def test_contact_agent_sees_its_tools_and_not_the_classifier(make_graph, ctx, config):

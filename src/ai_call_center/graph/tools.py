@@ -12,9 +12,11 @@ from langgraph.types import Command
 
 from ai_call_center.agents.specs import LEGS
 from ai_call_center.graph.state import CallContext, CallState
-from ai_call_center.callers import UNKNOWN_NUMBERS, transcript_lines
-from ai_call_center.leads import Lead, first_name_of, now_iso
+from ai_call_center.callers import UNKNOWN_NUMBERS, CallSummary, history_text, recall, transcript_lines
+from ai_call_center.leads import Lead, now_iso
+from ai_call_center.names import same_person
 from ai_call_center.notify import CallDetails
+from ai_call_center.writing import default_library, search_result
 
 log = logging.getLogger(__name__)
 
@@ -22,13 +24,93 @@ log = logging.getLogger(__name__)
 ON_FILE = {"on file", "onfile", "on-file"}
 
 
-def release_caller_history(ctx: CallContext) -> str:
-    """The caller said they are the earlier caller: hand the notes to the agent. Shared by text and voice modes."""
-    if not ctx.caller_history:
-        return "No earlier calls are on record for this caller. Treat them as a new caller."
+SETTLED = "Who the caller is is now settled for the whole call. No agent asks for their name again, or asks them to confirm it."
+
+
+def _say(words: str) -> str:
+    return f'Say exactly these words to the caller, and nothing else: "{words}"'
+
+
+def identify(ctx: CallContext, name: str) -> str:
+    """The caller said who they are. Code compares the name with the names on record for this number;
+    only on a match does the agent get that person's notes. Shared by text and voice modes."""
+    name = " ".join(name.split())
+    if ctx.identified:
+        who = f" as {ctx.caller_name}" if ctx.caller_name else ""
+        return f"The caller is already identified{who}. Do not call identify_caller again, and do not ask for their name. Answer what they last said."
+    ctx.identified = True
+    welcome = ctx.welcome
+    if not name:
+        words = welcome.new_caller() if welcome else ""
+        follow = (
+            "No name was given. Do not ask for it again. If the caller asked for something, answer it or route them, and do not say the words below. "
+            "If they asked for nothing, "
+        )
+        return follow + (_say(words) if words else "ask what they would like to do.")
+    memory = recall(ctx.leads, ctx.caller_number, name, exclude_call=ctx.call_control_id)
+    if memory is None:
+        ctx.caller_name = name
+        words = welcome.new_caller(name) if welcome else ""
+        return f"{_say(words) if words else f'Greet {name} by name, and ask what they would like to do.'}\n{SETTLED}"
     ctx.identity_confirmed = True
-    ctx.caller_name = ctx.returning_name or ctx.caller_name
-    return ctx.caller_history
+    ctx.returning_name = memory.name
+    ctx.caller_name = memory.name  # the spelling from their earlier call, which they confirmed then
+    ctx.caller_history = history_text(memory)
+    words = welcome.returning_caller(name, memory.topic) if welcome else ""
+    return f"{_say(words) if words else f'Welcome {name} back, and ask what they would like to do.'}\n\n{ctx.caller_history}\n{SETTLED}"
+
+
+def forget(ctx: CallContext) -> tuple[str, list[str]]:
+    """The caller asked to be forgotten. Their leads are deleted and their call rows are blanked; this call is
+    not summarised or saved. Returns the text for the model and the ids of the calls that were forgotten."""
+    name = ctx.returning_name or ctx.caller_name
+    memory = recall(ctx.leads, ctx.caller_number, name, exclude_call=ctx.call_control_id) if name else None
+    leads = list(memory.leads) if memory else []
+    if (current := ctx.leads.lead_for_call(ctx.call_control_id)) is not None:
+        leads.append(current[1])
+    call_ids = [call.call_control_id for call in memory.calls] if memory else []
+    if ctx.caller_number not in UNKNOWN_NUMBERS:
+        ctx.leads.forget(ctx.caller_number, call_ids=call_ids, leads=leads)
+    ctx.forgotten = True
+    ctx.caller_history, ctx.identity_confirmed, ctx.returning_name = "", False, ""
+    ctx.held_message, ctx.refused_transfer = None, None
+    log.info("call %s: the caller asked to be forgotten (%d earlier calls, %d messages)", ctx.call_control_id, len(call_ids), len(leads))
+    owner = ctx.owner_name.split()[0] if ctx.owner_name.strip() else "the owner"
+    words = f"Done. This line won't remember you. Any message already sent to {owner} stays with {owner}."
+    return f"{_say(words)} Then ask if there is anything else you can help with.", [*call_ids, ctx.call_control_id]
+
+
+def message_saved(ctx: CallContext) -> bool:
+    """True when the caller's own message is saved on this call. A note made only because they asked
+    for the owner does not count: it says who called, not what they want."""
+    return ctx.leads.lead_for_call(ctx.call_control_id) is not None and not ctx.transfer_note_id
+
+
+async def send_warm_lead_at_call_end(ctx: CallContext, summary: CallSummary, *, lead_saved: bool, visited: list[str] | None = None) -> bool:
+    """At the end of a call: a caller who talked about a project or a role but left no message still
+    reaches the owner, by email. `lead_saved`: the owner has the caller's message already. True when an email went out.
+
+    On 2026-11-17 a caller gave the consultant every detail of a role, said yes to the read-back, and
+    the voice model never called save_lead. The owner got only "wants to connect now". The summary
+    model reads the whole call, so this email has the details whatever the agents did."""
+    if ctx.forgotten or lead_saved or summary.interest not in ("project", "role") or ctx.caller_number in UNKNOWN_NUMBERS:
+        return False
+    name = ctx.caller_name or summary.caller_name
+    prior = ctx.leads.lead_for_call(ctx.call_control_id)
+    lead = Lead(
+        name=name or "A caller who gave no name",
+        email=prior[1].email if prior else "",
+        company=prior[1].company if prior else "",
+        need=summary.owner_note or summary.summary or "The call summary is empty.",
+        caller_number=ctx.caller_number,
+        call_control_id=ctx.call_control_id,
+        created_at=now_iso(),
+        timeline=summary.timeline,
+        size=summary.size,
+    )
+    await ctx.notifier.send_lead(lead, row_id=0, details=call_details(ctx, kind=f"warm-{summary.interest}", notes="", visited=visited or []))
+    log.info("call %s: warm lead email sent (%s)", ctx.call_control_id, summary.interest)
+    return True
 
 
 def _words(text: str) -> set[str]:
@@ -67,6 +149,8 @@ async def save_lead_record(
     company: str = "",
     callback_number: str = "",
     call_notes: str = "",
+    timeline: str = "",
+    size: str = "",
     visited: list[str] | None = None,
     kind: str = "message",
 ) -> tuple[str, dict[str, str]]:
@@ -86,8 +170,8 @@ async def save_lead_record(
     wants_file = email in ON_FILE
     if wants_file:
         email = ""
-    confirmed = first_name_of(ctx.returning_name)
-    if ctx.identity_confirmed and confirmed and ctx.caller_number not in UNKNOWN_NUMBERS and first_name_of(name) in ("", confirmed):
+    confirmed = ctx.returning_name
+    if ctx.identity_confirmed and confirmed and ctx.caller_number not in UNKNOWN_NUMBERS and (not name or same_person(name, confirmed)):
         prior = ctx.leads.latest_lead_for(ctx.caller_number, with_email=True, first_name=confirmed) or ctx.leads.latest_lead_for(
             ctx.caller_number, first_name=confirmed
         )
@@ -107,12 +191,12 @@ async def save_lead_record(
     # already saved the caller) would send the owner the same lead twice.
     if (earlier := ctx.leads.lead_for_call(ctx.call_control_id)) is not None:
         row_id, saved = earlier
-        same_person = saved.name.casefold() == name.casefold()
+        same_caller = saved.name.casefold() == name.casefold()
         nothing_new = not callback_number and email in ("", saved.email) and company.casefold() in ("", saved.company.casefold())
         # A record made before a transfer says only that the caller asked for the owner. A message
         # that the caller leaves after it is new. On 2026-11-16 such a message was dropped here.
         new_message = kind == "message" and row_id == ctx.transfer_note_id and not says_the_same(need, saved.need)
-        if same_person and nothing_new and not new_message:
+        if same_caller and nothing_new and not new_message:
             return (
                 f"Already saved on this call as record {row_id}. Do not save it again. Tell the caller the owner has their details and will follow up.",
                 {"id": str(row_id), "name": saved.name, "email": saved.email, "company": saved.company, "need": saved.need},
@@ -127,6 +211,8 @@ async def save_lead_record(
         caller_number=ctx.caller_number,
         call_control_id=ctx.call_control_id,
         created_at=now_iso(),
+        timeline=" ".join(timeline.split()),
+        size=" ".join(size.split()),
     )
     row_id = ctx.leads.save(lead)
     ctx.caller_name = lead.name
@@ -189,6 +275,8 @@ async def save_lead(
     company: str = "",
     callback_number: str = "",
     call_notes: str = "",
+    timeline: str = "",
+    size: str = "",
 ) -> Command:
     """Send the caller's message to the owner: it is stored, and emailed to the owner's inbox at once. Use this when the caller wants to leave a message, send or email the owner something, or get a follow-up. Call it once, after the caller confirms your one-sentence read-back.
 
@@ -199,6 +287,8 @@ async def save_lead(
         company: The caller's company, only if they gave one. Leave empty otherwise.
         callback_number: A phone number the caller asked to be called on, only if it differs from the number they are calling from.
         call_notes: One sentence for the owner on what the caller asked other agents earlier on this call, for example "Asked the tour agent how the system works and what a call costs." Never repeat the message here. Leave empty if the caller only left the message.
+        timeline: When the caller wants the work to start, in their words, only if they said it on this call. Leave empty otherwise.
+        size: How big the work is, in the caller's words, for example "a few weeks" or "a long engagement", only if they said it on this call. Leave empty otherwise.
     """
     state = runtime.state
     result, lead = await save_lead_record(
@@ -209,6 +299,8 @@ async def save_lead(
         company=company,
         callback_number=callback_number,
         call_notes=call_notes,
+        timeline=timeline,
+        size=size,
         visited=["classifier", *state.get("handoffs", [])],
     )
     update: dict = {"messages": [ToolMessage(content=result, tool_call_id=runtime.tool_call_id)]}
@@ -218,9 +310,19 @@ async def save_lead(
 
 
 @tool
-def confirm_returning_caller(runtime: ToolRuntime[CallContext, CallState]) -> str:
-    """Get the notes from this caller's earlier calls. Call this only when a "Returning caller note" in your instructions names a first name, and the caller has just said yes, they are that person. Never call it after a no or an unclear answer. Say nothing before you call it; speak after you have the result."""
-    return release_caller_history(runtime.context)
+def identify_caller(name: str, runtime: ToolRuntime[CallContext, CallState]) -> str:
+    """Tell the system who the caller is, right after they say their name. Code checks the name against earlier callers on this number. The result gives the exact words to say next.
+
+    Args:
+        name: The name the caller just gave, as you heard it. Empty when they gave no name.
+    """
+    return identify(runtime.context, name)
+
+
+@tool
+def forget_caller(runtime: ToolRuntime[CallContext, CallState]) -> str:
+    """Delete what this line knows about the caller, and do not save this call. Call it only after the caller asked to be forgotten and said yes to your one question. The result gives the exact words to say."""
+    return forget(runtime.context)[0]
 
 
 async def text_portfolio_link_to_caller(ctx: CallContext, *, owner_name: str) -> str:
@@ -257,7 +359,15 @@ async def text_owner_before_transfer(ctx: CallContext, reason: str) -> None:
 
 
 async def note_caller_before_transfer(
-    ctx: CallContext, *, lead_saved: bool, caller_name: str, company: str, reason: str, visited: list[str] | None = None
+    ctx: CallContext,
+    *,
+    lead_saved: bool,
+    caller_name: str,
+    company: str,
+    reason: str,
+    visited: list[str] | None = None,
+    timeline: str = "",
+    size: str = "",
 ) -> dict[str, str]:
     """Before the owner's phone rings, make sure the owner has a record of who called, so a call
     that is not answered still leaves a lead. Returns the lead saved now, or {} when one exists
@@ -267,7 +377,7 @@ async def note_caller_before_transfer(
     if lead_saved or not name:
         return {}
     _result, lead = await save_lead_record(
-        ctx, name=name, need=reason.strip() or "Asked to speak to the owner.", company=company, visited=visited, kind="transfer"
+        ctx, name=name, need=reason.strip() or "Asked to speak to the owner.", company=company, visited=visited, kind="transfer", timeline=timeline, size=size
     )
     return lead
 
@@ -279,14 +389,25 @@ def remember_refused_transfer(ctx: CallContext, *, caller_name: str, company: st
     ctx.caller_name = ctx.caller_name or caller_name.strip()  # the next agent on this call does not ask again
 
 
-async def note_refused_transfer_at_call_end(ctx: CallContext, *, lead_saved: bool, visited: list[str] | None = None) -> dict[str, str]:
+async def note_refused_transfer_at_call_end(
+    ctx: CallContext, *, lead_saved: bool, visited: list[str] | None = None, summary: CallSummary | None = None
+) -> dict[str, str]:
     """At the end of a call: a caller who asked for the owner, was refused, and left no message
-    still leaves a record. Returns the lead saved now, or {}."""
+    still leaves a record. With a call summary, the record holds what the caller said about the work,
+    not only the agent's one-line reason. Returns the lead saved now, or {}."""
     note, ctx.refused_transfer = ctx.refused_transfer, None
     if note is None:
         return {}
+    reason = summary.owner_note if summary and summary.owner_note else note["reason"]
     return await note_caller_before_transfer(
-        ctx, lead_saved=lead_saved, caller_name=note["name"], company=note["company"], reason=note["reason"], visited=visited
+        ctx,
+        lead_saved=lead_saved,
+        caller_name=note["name"],
+        company=note["company"],
+        reason=reason,
+        visited=visited,
+        timeline=summary.timeline if summary else "",
+        size=summary.size if summary else "",
     )
 
 
@@ -352,6 +473,29 @@ def confirmed_the_message(lines: list[str]) -> bool:
     return yes and bool(ASKS_IF_RIGHT.search(" ".join(asked)))
 
 
+SAVE_NOW = (
+    "The caller said yes to the message, but nothing is saved and nothing was sent. "
+    "Call save_lead now, with the details you read back. Say no words before it."
+)
+
+
+def missed_save(ctx: CallContext, lines: list[str]) -> int:
+    """The agent asked "Is that right?", the caller said yes, and the agent answered without saving.
+    Returns the number of lines up to the caller's yes (a key, so the agent is told once per yes), or 0.
+
+    On 2026-11-17 a voice agent heard "Yeah." and said "Perfect, thanks. I'll take that as confirming",
+    with no save_lead call. The caller's message never reached the owner.
+    """
+    if message_saved(ctx):
+        return 0
+    rest = list(lines)
+    while rest and rest[-1].startswith("agent:"):
+        rest.pop()
+    if len(rest) == len(lines):  # the agent has not answered the yes yet
+        return 0
+    return len(rest) if confirmed_the_message(rest) else 0
+
+
 def message_confirm_question(ctx: CallContext, lines: list[str]) -> str | None:
     """None when the message can be saved. Otherwise the text for the model: nothing saved yet, say it back first.
 
@@ -376,6 +520,7 @@ async def save_held_message_at_call_end(ctx: CallContext, *, visited: list[str] 
     """At the end of a call: a message that waited for the caller's yes is saved as it is. An
     unconfirmed message is better for the owner than a lost one. Returns the lead saved now, or {}."""
     held, ctx.held_message = ctx.held_message, None
+    # forget_caller clears a held message, so one that is here now came after it: the caller wants it kept.
     if not held:
         return {}
     notes = " ".join(part for part in (held.get("call_notes", "").strip(), NOT_CONFIRMED_NOTE) if part)
@@ -435,6 +580,16 @@ SAY_GOODBYE = (
 )
 
 
+def say_goodbye(website_spoken: str = "") -> str:
+    """The end_call result. With a website, the goodbye names it, so every caller leaves with the address."""
+    if not website_spoken:
+        return SAY_GOODBYE
+    return (
+        f'Say one short goodbye line now that gives the website, for example: "Thanks for calling. There\'s more at {website_spoken}. Goodbye." '
+        "Say nothing after it. The call ends when you stop speaking."
+    )
+
+
 @tool
 async def end_call(runtime: ToolRuntime[CallContext, CallState]) -> Command:
     """Hang up the phone call. Call this when the caller says goodbye, or says they need nothing else. Say nothing before you call it: the result gives you the goodbye line to say. Never call it while the caller still has a question."""
@@ -442,7 +597,7 @@ async def end_call(runtime: ToolRuntime[CallContext, CallState]) -> Command:
     if not said_goodbye(transcript_lines(runtime.state.get("messages", []))):
         return Command(update={"messages": [ToolMessage(content=CALL_NOT_ENDED, tool_call_id=runtime.tool_call_id)]})
     await ctx.telephony.hangup(ctx.call_control_id)
-    return Command(update={"call_ended": True, "messages": [ToolMessage(content=SAY_GOODBYE, tool_call_id=runtime.tool_call_id)]})
+    return Command(update={"call_ended": True, "messages": [ToolMessage(content=say_goodbye(ctx.website_spoken), tool_call_id=runtime.tool_call_id)]})
 
 
 @tool
@@ -503,3 +658,11 @@ def get_call_stats(runtime: ToolRuntime[CallContext, CallState]) -> str:
         lead_saved=bool(state.get("lead")),
         transfer_requested=bool(state.get("transfer_requested")),
     )
+
+
+@tool
+def search_writing(query: str) -> str:
+    """RAG search over the owner's published essays on software engineering, architecture, teams, hiring, and AI agents.
+    Returns the few passages that best match the question, never whole essays.
+    query: the caller's question, in plain words, with the topic in it."""
+    return search_result(default_library(), query)

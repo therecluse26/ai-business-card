@@ -42,6 +42,8 @@ from pipecat.services.openai.realtime.events import (
 from pipecat.services.openai.realtime import events as openai_events
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
+from ai_call_center.voice.repeat import DROP, HOLD, PASS, RepeatGuard
+
 from ai_call_center.agents.specs import AgentSpec, default_voice
 from ai_call_center.config import Settings
 
@@ -68,10 +70,71 @@ def noise_reduction(settings: Settings) -> InputAudioNoiseReduction | None:
     return InputAudioNoiseReduction(type=settings.openai_noise_reduction)
 
 
+HELD_AUDIO_MAX_CHARS = 192_000  # base64 text of about 3 s of audio; a held item with no verdict by then plays
+
+
+class OnceOpenAIRealtime(OpenAIRealtimeLLMService):
+    """OpenAI Realtime that drops an audio item which says again what the same answer said already.
+
+    See voice/repeat.py. Audio and text of a later item are held until the item's first letters
+    show if it is a copy. The first item is still playing then, so the caller hears no gap.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._repeat = RepeatGuard()
+        self._held: list[tuple[str, object]] = []  # ("audio" | "text", event) of the one item that is held
+
+    async def _play(self, kind: str, evt) -> None:
+        if kind == "audio":
+            await super()._handle_evt_audio_delta(evt)
+        else:
+            await super()._handle_evt_audio_transcript_delta(evt)
+
+    async def _release(self, verdict: str) -> None:
+        held, self._held = self._held, []
+        if not held:
+            return
+        if verdict == DROP:
+            log.info("%s: one answer had the same words two times; the second copy was dropped", self)
+            return
+        for kind, evt in held:
+            await self._play(kind, evt)
+
+    async def _route(self, kind: str, evt, verdict: str) -> None:
+        if self._held and self._held[0][1].item_id != evt.item_id:
+            await self._release(self._repeat.settle(self._held[0][1].item_id))  # the held item ended
+        if verdict == HOLD:
+            self._held.append((kind, evt))
+            if sum(len(e.delta or "") for k, e in self._held if k == "audio") > HELD_AUDIO_MAX_CHARS:
+                await self._release(self._repeat.give_up(evt.item_id))
+        elif verdict == DROP:
+            await self._release(DROP)
+        else:
+            await self._release(PASS)
+            await self._play(kind, evt)
+
+    async def _handle_evt_audio_delta(self, evt) -> None:
+        await self._route("audio", evt, self._repeat.audio(evt.response_id, evt.item_id))
+
+    async def _handle_evt_audio_transcript_delta(self, evt) -> None:
+        await self._route("text", evt, self._repeat.text(evt.response_id, evt.item_id, evt.delta or ""))
+
+    async def _handle_evt_speech_started(self, evt) -> None:
+        self._held = []  # the caller spoke: nothing that was held may play after it
+        await super()._handle_evt_speech_started(evt)
+
+    async def _handle_evt_response_done(self, evt) -> None:
+        if self._held:
+            item_id = self._held[0][1].item_id
+            await self._release(self._repeat.settle(item_id) if evt.response.status == "completed" else DROP)
+        await super()._handle_evt_response_done(evt)
+
+
 def build_openai_realtime(spec: AgentSpec, *, instructions: str, settings: Settings, tools: ToolsSchema | None = None) -> LLMService:
     """gpt-realtime-2.1-mini over the Realtime WebSocket. Audio stays PCM 24 kHz inside Pipecat;
     the Telnyx serializer converts to and from 8 kHz PCMU. Tools come from the shared context."""
-    return OpenAIRealtimeLLMService(
+    return OnceOpenAIRealtime(
         api_key=settings.openai_api_key.get_secret_value(),
         settings=OpenAIRealtimeLLMService.Settings(
             model=settings.openai_realtime_model,

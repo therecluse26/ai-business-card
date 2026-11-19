@@ -1,13 +1,13 @@
-"""Returning-caller memory: what the agents may know about a phone number before the greeting,
-and the end-of-call summary that feeds the next call.
+"""Returning-caller memory: what the agents may know about an earlier caller, and the end-of-call
+summary that feeds the next call.
 
-A phone number can be shared, so a number is not a person. Before the caller says who they are,
-the greeting agent knows one thing: the first name the most recent caller gave. It asks "Am I
-speaking with <name>?" and nothing else. Only after a yes does `confirm_returning_caller` release
-the history: company, saved interest, and a one- or two-sentence summary of each recent call.
-The history holds that person's calls only. Calls and leads that another name left on the same
-number stay out of it.
-What never reaches a prompt or a tool result: the email address and the phone number.
+A phone number can be shared, so a number is not a person. Every caller hears the same greeting,
+which asks who they are. The name they give goes to `identify_caller`; code (`names.same_person`)
+compares it with the names on record for the number. Only on a match does the agent get that
+person's notes: company, saved interest, and a short summary and topic of each recent call.
+Calls and leads that another name left on the same number never reach the agent.
+What never reaches a prompt or a tool result: the email address, the phone number, and the
+name on the phone account from a number lookup.
 """
 
 from __future__ import annotations
@@ -23,7 +23,8 @@ from zoneinfo import ZoneInfo
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
-from ai_call_center.leads import CallRecord, LeadStore, NumberInfo, first_name_of
+from ai_call_center.leads import CallRecord, Lead, LeadStore, NumberInfo
+from ai_call_center.names import same_person
 
 log = logging.getLogger(__name__)
 
@@ -33,54 +34,52 @@ UNKNOWN_NUMBERS = {"", "unknown", "anonymous", "restricted", "+10000000000"}
 
 @dataclass(frozen=True)
 class CallerMemory:
-    name: str  # full name as given, or ""
+    """One person's records on one number."""
+
+    name: str  # the name as they gave it before
     company: str
     need: str  # from the saved lead, or ""
     previous_calls: int
     recent: list[CallRecord] = field(default_factory=list)
-    contact_on_file: bool = False  # a saved lead holds an email address for this number
+    contact_on_file: bool = False  # a saved lead holds an email address for this person
+    topic: str = ""  # the topic of their last call that has one, for "Last time you asked about ..."
+    leads: list[Lead] = field(default_factory=list)  # all their leads, for forget_caller
+    calls: list[CallRecord] = field(default_factory=list)  # all their calls, for forget_caller
 
     @property
     def first_name(self) -> str:
         return self.name.split()[0] if self.name.strip() else ""
 
 
-def recall(store: LeadStore, caller_number: str, *, exclude_call: str = "") -> CallerMemory | None:
-    """What the store knows about this number. None for a first-time or hidden number."""
-    if caller_number in UNKNOWN_NUMBERS:
+def recall(store: LeadStore, caller_number: str, name: str, *, exclude_call: str = "") -> CallerMemory | None:
+    """The records of the person called `name` on this number. None when there is no match.
+
+    A record matches when `same_person` says its name is this name. A call with no name in the log
+    still belongs to them when their lead came from that call.
+    """
+    if caller_number in UNKNOWN_NUMBERS or not name.strip():
         return None
     # A lead saved on the call in progress is not history yet.
-    leads = [lead for lead in store.leads_for(caller_number) if lead.call_control_id != exclude_call]
+    leads = [lead for lead in store.leads_for(caller_number, limit=HISTORY_ROWS) if lead.call_control_id != exclude_call]
     calls = store.calls_for(caller_number, exclude=exclude_call, limit=HISTORY_ROWS)
-    if not leads and not calls:
-        return None
-    # The newest name wins, from a lead or from the call log. So when Bill calls after Steve, the
-    # next greeting asks for Bill.
-    named = [(lead.created_at, lead.name) for lead in leads if lead.name.strip()]
-    named += [(call.started_at, call.caller_name) for call in calls if call.caller_name.strip()]
-    newest = max(named, key=_moment)[1] if named else ""
-    who = first_name_of(newest)
-    if not who:
-        # Nobody gave a name. There is nothing to confirm, so no history can be released.
-        return CallerMemory(name="", company="", need="", previous_calls=store.call_count_for(caller_number, exclude=exclude_call), recent=calls[:RECENT_CALLS])
-    # Only this person's rows. Another name on the same number is another person.
-    own_leads = [lead for lead in leads if first_name_of(lead.name) == who]
-    # A call with no name in the log still belongs to them when their lead came from that call.
+    own_leads = [lead for lead in leads if same_person(name, lead.name)]
     lead_calls = {lead.call_control_id for lead in own_leads}
-    own_calls = [
-        call
-        for call in calls
-        if first_name_of(call.caller_name) == who or (not call.caller_name.strip() and call.call_control_id in lead_calls)
-    ]
+    own_calls = [call for call in calls if same_person(name, call.caller_name) or (not call.caller_name.strip() and call.call_control_id in lead_calls)]
+    if not own_leads and not own_calls:
+        return None
     lead = own_leads[0] if own_leads else None
+    named = [call.caller_name for call in own_calls if call.caller_name.strip()]
     return CallerMemory(
-        # A lead holds the name as the caller confirmed it; the call log holds what a model heard.
-        name=lead.name if lead else newest,
+        # A lead holds the name as the caller confirmed it; the call log holds what was heard.
+        name=lead.name if lead else (named[0] if named else name.strip()),
         company=lead.company if lead and lead.company.lower() != "none" else "",
         need=lead.need if lead else "",
         previous_calls=len(own_calls),
         recent=own_calls[:RECENT_CALLS],
         contact_on_file=any(lead.email for lead in own_leads),
+        topic=next((call.topic for call in own_calls if call.topic.strip()), ""),
+        leads=own_leads,
+        calls=own_calls,
     )
 
 
@@ -104,37 +103,9 @@ def _when(iso_utc: str) -> str:
     return when.strftime("%b %-d at %-I:%M %p Eastern")
 
 
-def greeting_note(memory: CallerMemory) -> str:
-    """For the greeting agent only, before the caller has said who they are.
-
-    Holds the first name and nothing else about earlier calls. Empty when no name is known:
-    with no name there is nothing to confirm, so the caller is greeted as a new caller.
-    """
-    name = memory.first_name
-    if not name:
-        return ""
-    return "\n".join(
-        [
-            "Returning caller note:",
-            f"- This phone number has called before. The most recent caller gave the first name {name}.",
-            "- A phone number can be shared. You do not know yet who is on the line, and you know nothing else about earlier calls yet.",
-            f'- This replaces the normal greeting. Say your opening line. Then ask only: "Am I speaking with {name}?" Stop and wait for the answer. Do not say what you can help with yet.',
-            '- Until the caller says yes, say nothing about an earlier call: no topic, no company, no date, and no "welcome back".',
-            # A voice model often speaks before a tool call. Measured 2026-11-16: "Hi, I'm the profile agent
-            # running on the speech platform" from the greeting agent. So it gets harmless words to say.
-            f'- If the caller says yes: say exactly "Welcome back, {name}." and call confirm_returning_caller in the same turn. '
-            'Say no other words with it: no introduction, no agent name, no "let me check", no "let me bring in". This is not a handoff. '
-            "The tool's result gives you the notes from their earlier calls.",
-            '- If the caller says no, or the answer is not clear, say "No problem." Then say what you can help with, and ask what brings them to call. '
-            "Never call confirm_returning_caller then. Treat them as a new caller for the whole call.",
-            "- If the caller asks who called before, or what an earlier call was about, say you cannot share anything about other calls.",
-        ]
-    )
-
-
 def history_text(memory: CallerMemory) -> str:
-    """The notes from earlier calls. Released by `confirm_returning_caller`, after the caller says who they are."""
-    lines = [f"The caller confirmed they are {memory.first_name or 'the earlier caller'}. Notes from their earlier calls:"]
+    """The notes from earlier calls, for the agents only. `identify_caller` gives them after a name match."""
+    lines = [f"Notes from {memory.first_name or 'this caller'}'s earlier calls, for you and the other agents only:"]
     if memory.name:
         who = memory.name + (f" from {memory.company}" if memory.company else "")
         lines.append(f"- Known as {who}.")
@@ -147,14 +118,7 @@ def history_text(memory: CallerMemory) -> str:
         lines.append(f"- {memory.previous_calls} earlier calls in total.")
     if memory.contact_on_file:
         lines.append('- Their contact details are on file. To reuse them, call save_lead with email "on file". Ask only for what is new.')
-    lines.append(
-        "This was not a handoff. You are still the same agent, and the caller knows who you are. "
-        'You said "Welcome back" already. Now say one sentence only, in this form: '
-        '"Last time you called about <the topic of their last call, in a few words>. Is this about that, or something new?" '
-        'Your reply starts with the words "Last time". Say nothing before them: no "welcome back", no "hi", no agent name, no platform. '
-        "Do not read these notes out. Never say an email address or a phone number aloud. Do not say that you looked anything up. "
-        "Who the caller is is now settled for the whole call. No agent asks for their name again, or asks them to confirm it."
-    )
+    lines.append("Do not read these notes out. Never say an email address or a phone number aloud. Do not say that you looked anything up.")
     return "\n".join(lines)
 
 
@@ -162,9 +126,10 @@ def lookup_text(info: NumberInfo) -> str:
     """The number-lookup block for the prompt. Empty when the lookup found nothing."""
     if info.empty:
         return ""
+    # The name on the phone account stays out: it can be another person, and saying it would leak it.
+    if not (info.line_type or info.carrier or info.city or info.state):
+        return ""
     lines = ["Public carrier data for the caller's phone number (from a number lookup; it can be wrong):"]
-    if info.caller_name:
-        lines.append(f"- Registered name: {info.caller_name.title()}")
     line = " ".join(part for part in (info.line_type, f"on {info.carrier}" if info.carrier else "") if part)
     if line:
         lines.append(f"- Line: {line}")
@@ -173,9 +138,7 @@ def lookup_text(info: NumberInfo) -> str:
         lines.append(f"- Area: {area}")
     lines.append(
         "How to use it: do not open the call with it. If the caller asks what you know about them, or asks what this system can do, "
-        "you may say the area and the line type as a live demonstration. "
-        "When you need the caller's name and nobody on this call has it yet, you may offer the registered name as a guess and ask if it is right. Accept a no without comment. "
-        "The registered name is the account holder; never treat it as confirmed."
+        "you may say the area and the line type as a live demonstration."
     )
     return "\n".join(lines)
 
@@ -205,26 +168,60 @@ def transcript_lines(messages: list[Any]) -> list[str]:
 
 
 SUMMARY_PROMPT = """Below is the transcript of a phone call to an AI assistant line.
-Write a JSON object with two keys:
+Write a JSON object with these keys:
 - "summary": at most 40 words, in one or two plain sentences: what the caller wanted, and how the call ended. Write it for the assistant that will take this caller's next call. Do not include email addresses or phone numbers.
 - "caller_name": the caller's name if they gave one, else "".
+- "topic": at most 8 words that finish the sentence "Last time you asked about ...", for example "a new booking platform". No names, no companies, no numbers, no email addresses. "" if the caller asked about nothing.
+- "interest": "project" if the caller talked about work they want done (a product, a system, a project, help for their business); "role" if they talked about a job or a role to fill; else "none".
+- "owner_note": a note for the owner of the line, at most 120 words, in plain sentences. Give every specific the caller said about the work: who they are, their company and what it does, the project or the role, what they want from the owner, when it starts, how long it runs, the rate or budget, and their questions. Only what the caller said; never guess. No email addresses or phone numbers. "" if the caller said nothing about work.
+- "timeline": when the caller wants the work to start, in their words, for example "in two weeks". "" if they did not say.
+- "size": how big or how long the work is, in their words, for example "ongoing, no end date". "" if they did not say.
 Return only the JSON object.
 
 Transcript:
 {transcript}"""
 
+INTERESTS = ("project", "role", "none")
 
-async def summarize_call(messages: list[Any], model: BaseChatModel) -> tuple[str, str]:
-    """(summary, caller_name) for the call log. Empty strings when there is nothing to summarise or the model fails."""
+
+@dataclass(frozen=True)
+class CallSummary:
+    summary: str = ""
+    caller_name: str = ""
+    topic: str = ""
+    interest: str = "none"  # one of INTERESTS
+    owner_note: str = ""  # every specific about the work, for the owner's email; never spoken
+    timeline: str = ""
+    size: str = ""
+
+
+def _short(text: str, words: int) -> str:
+    return " ".join(str(text or "").split()[:words]).strip(" .")
+
+
+async def summarize_call(messages: list[Any], model: BaseChatModel, config: dict[str, Any] | None = None) -> CallSummary:
+    """The call log entry. Empty when there is nothing to summarise or the model fails.
+
+    `config` is the LangChain run config, for example the call's LangSmith thread (`tracing.run_config`)."""
     lines = transcript_lines(messages)
     if not any(line.startswith("caller:") for line in lines):
-        return "", ""
+        return CallSummary()
     try:
-        reply = await model.ainvoke([HumanMessage(SUMMARY_PROMPT.format(transcript="\n".join(lines)))])
+        reply = await model.ainvoke([HumanMessage(SUMMARY_PROMPT.format(transcript="\n".join(lines)))], config=config)
         text = reply.text if isinstance(reply.text, str) else reply.text()
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
         data = json.loads(match.group(0)) if match else {}
-        return str(data.get("summary", "")).strip(), str(data.get("caller_name", "")).strip()
+        interest = str(data.get("interest", "none")).strip().lower()
+        return CallSummary(
+            summary=str(data.get("summary", "")).strip(),
+            caller_name=str(data.get("caller_name", "")).strip(),
+            # The topic is spoken to the caller next time. Code keeps it short, whatever the model wrote.
+            topic=_short(data.get("topic", ""), 8),
+            interest=interest if interest in INTERESTS else "none",
+            owner_note=" ".join(str(data.get("owner_note", "")).split()),
+            timeline=_short(data.get("timeline", ""), 12),
+            size=_short(data.get("size", ""), 12),
+        )
     except Exception:
         log.exception("call summary failed")
-        return "", ""
+        return CallSummary()

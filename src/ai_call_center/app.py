@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Response
 
+from ai_call_center import tracing
 from ai_call_center.config import Settings, get_settings
 from ai_call_center.guardrails import CallGuard
 from ai_call_center.leads import LeadStore
@@ -56,6 +57,7 @@ def log_to_file(path: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    tracing.start(settings)  # before any call builds a pipeline
     log.info("voice providers at start: %s", agent_legs_line(settings))
     app.state.telephony = TelnyxTelephony(settings)
     app.state.lookups = CallerLookup(app.state.telephony, LeadStore(settings.leads_db), mode=settings.caller_lookup)

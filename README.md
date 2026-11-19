@@ -12,12 +12,13 @@ M1 to M5 are done: the five agents run as a text chat and on a phone call.
 On the phone, each agent has its own voice. Two agents run on Google Gemini Live and three on OpenAI
 Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
 call stats, transfer to the owner) run from the voice model's requests. The line recognises a
-returning caller, looks up a new caller's carrier and area, and limits calls, call length, and
+returning caller by the name they give, looks up a new caller's carrier and area, and limits calls, call length, and
 transfer hours. When a voice provider stops answering, the call moves to the other provider.
 
 The tour agent can tell the caller how fast the agents answered and what the call has cost so far.
+With LangSmith set up, every call is traced; see "Tracing with LangSmith (M6)".
 
-Not built yet: the local pipeline leg (M7). Its timing spike is done; see "Pipeline leg spike (M7)".
+Dropped: the local pipeline leg (M7). Its timing spike showed it would answer about 1 s slower; see "Pipeline leg spike (M7)".
 
 | Agent | Job |
 |---|---|
@@ -102,13 +103,35 @@ Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova 
 
 A speech-to-speech model sometimes speaks a tool call as text. On a real call a Nova Sonic agent said "call transfer to underscore underscore contact", made no tool call, and went silent. The server reads each agent's text (`voice/spoken_tool.py`). If an agent says the name of a handoff tool and no tool call follows in 0.4 s, the server makes the handoff itself.
 
+### The same words two times in one answer
+
+An OpenAI Realtime answer can hold more than one audio item, and sometimes the second item is a copy of the first. On a real call the caller heard the full greeting two times, 18 seconds in all. The audio of an answer arrives much faster than it plays, so the server holds each later item until its first 24 letters are known (`voice/repeat.py`). A copy is dropped; an item with new words plays in order. An item that gets no text within about 3 seconds of audio plays, so the guard can never make an agent silent.
+
 ### The greeting
 
 The first words of a call are exact (`greeting_words` in `agents/specs.py`); the first message of the call gives them to the greeting agent word for word.
 
-- With `BRAND_NAME` set, every greeting starts "Hi, you've reached <brand>, <owner>'s AI business card."
-- New caller: "Hi, you've reached <owner>'s AI business card. I'm an AI assistant that <first name> built. I can tell you about <first name>, explain how this phone system works, talk through how AI could help your business, or take a message for <first name>. What brings you to call today?"
-- A number that gave a first name before: the first two sentences, then "Am I speaking with <name>?".
+- `OWNER_NAME_PRONUNCIATION` tells every agent how to say the owner's name, in plain words. It is a hint in the prompt: the voice models take no phonetic markup.
+- Every caller hears the same first words. With `BRAND_NAME` set: "Hi, you've reached <brand>. I'm one of five
+  AI agents <owner> built, and this call is a live sample of the work <first name> does for clients. I remember
+  callers, so first: who am I speaking with?" Without a brand, the first sentence is "Hi, you've reached
+  <owner>'s AI business card." The words say nothing about an earlier call, so they leak nothing.
+- The caller gives a name. The classifier says "Thanks, <name>." and calls `identify_caller`. Code checks the
+  name (see "Caller memory" below), and the tool result gives the next words exactly.
+- A new caller, or a name with no match: "Nice to meet you, <name>. <first name> is a software engineer and
+  architect, available for contract work or a full-time role. <first name>'s work covers new platforms and APIs,
+  cloud systems, modernizing old code, and AI agents like the ones on this call. Right now you're talking to a
+  graph of AI agents on models from <n> companies, with caller memory and RAG search over <first name>'s writing.
+  Interrupt me any time. Try asking me <tip>. So, do you have a project or a role in mind, or would you like
+  to look around first?" The company count comes from the legs that the call runs on (`companies_phrase`).
+- A name that matches an earlier caller on the number: "Welcome back, <name>. Last time you asked about <topic>.
+  Want to pick up there, or start something new?" Without a stored topic: "Welcome back, <name>. Good to hear
+  from you again. What can I do for you today?"
+- The tip is picked at random per call, and each one starts a real feature: "what this call has cost so far",
+  "which AI model you're talking to right now", and "to forget you". With the RAG search on, also
+  "what <first name> thinks about microservices" and "... about technical debt". Edit `CALL_TIPS` and `WRITING_TIPS`.
+- The consultant agent covers software engineering in general (products, platforms, APIs, cloud, architecture,
+  modernizing old systems) as well as AI, and it says so when plain software is the better tool.
 
 ### Live transfer to the owner
 
@@ -242,22 +265,36 @@ How this leg differs from the other two:
 
 - At hangup a text model (`SUMMARY_MODEL`) writes a summary of at most 40 words. It is stored with the
   caller's number in the `calls` table. No audio is stored.
-- On the next call from that number, the classifier gets one thing: the first name the most recent caller
-  gave. It asks only "Am I speaking with <name>?". A phone number can be shared, so nothing else is said yet.
-- The newest name wins, from a saved lead or from the call log. When Bill calls after Steve and says
-  "No, this is Bill", the next call asks for Bill.
-- After a yes, who the caller is is settled for the whole call. No agent asks for the name again or
-  asks the caller to confirm it.
-- After a yes, the classifier calls `confirm_returning_caller`. Only then do the company, the saved
-  interest, and the last three summaries enter the conversation. After a no, they never do, and no agent
-  will say who called before.
+- The summary model also writes a `topic` of at most 8 words ("a new booking platform"), with no names
+  or numbers, and an `interest`: `project`, `role`, or `none`. Code cuts the topic to 8 words.
+- No agent knows if a number called before. Every caller is asked who they are, and the name goes to
+  `identify_caller`. Code, never a model, compares it with each name on record for the number
+  (`names.same_person`): the same first name after cleanup, a short or long form of it (Bob and Robert),
+  or the same sound code and first letter (Steven and Stephen). With any doubt, the caller counts as new.
+- Only on a match do the company, the saved interest, and the last three summaries enter the conversation.
+  With no match, they never do, and no agent will say who called before.
+- After `identify_caller`, who the caller is is settled for the whole call. No agent asks for the name again.
 - The history holds one person's calls and leads only. What Steve left on a number is not released to
   Bill on the same number, and it is not reused for him.
+- "Forget me": after one yes, `forget_caller` deletes that person's leads and blanks the summary, name,
+  and topic of their calls. The call rows stay, because the per-number call limits count them. The call in
+  progress gets no summary, no transcript in the log, no warm-lead email, and its caller audio file is deleted.
+- Warm lead: when the summary says `project` or `role`, no message was saved, the caller was not forgotten,
+  and the number is not hidden, the owner gets an email "Warm lead: <name> talked about a project, no message left".
+- The summary model also writes `owner_note` (at most 120 words: every specific the caller gave about the
+  work), `timeline`, and `size`. The end-of-call emails use it: the warm lead, and the note for a refused
+  transfer with no message. So the owner gets the details even when no agent saved them. The summary runs
+  before those emails for this reason.
+- A missed save: when the caller says yes to the message read-back and the agent answers without calling
+  `save_lead`, the server tells the agent "Call save_lead now" (`missed_save`), once per yes.
+- The consultant asks two qualifying questions: "When would you want this to start?" and "Is this a few weeks
+  of work, or a longer engagement?". `save_lead` stores the answers as `timeline` and `size`, and the lead email
+  shows them first. Existing databases get the new columns at start.
 - A confirmed caller does not give their details again: `save_lead` reuses the email address that the
   same person left. The email address and the phone number never enter a prompt or a tool result.
 - `CALLER_LOOKUP` asks Telnyx Number Lookup for a new caller's carrier, line type, area, and registered
   name. Telnyx bills each lookup; the result is cached, so one number is looked up once. The agents are
-  told not to open the call with it and not to treat the name as confirmed.
+  told not to open the call with it. The registered name goes to the lead email only, never to a prompt.
 
 ### Guardrails (M5)
 
@@ -316,6 +353,41 @@ the estimate is on the high side. Check `PRICES` before you quote a cost to anyo
 Measured on one simulated call of 129 s with three agents: median answer time 1.3 s, handoffs
 1.9 s on average, 11,030 tokens in and 2,551 out, about 4 cents.
 
+### Tracing with LangSmith (M6)
+
+Off unless `.env` sets `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY`. `LANGSMITH_PROJECT` names
+the project (default `default`). The code is in `tracing.py`.
+
+Setup:
+
+1. Make a free account at smith.langchain.com, and an API key under Settings.
+2. Put `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY=...` and `LANGSMITH_PROJECT=voice-business-card` in `.env`.
+3. Restart the server. The log says `LangSmith tracing is on: project voice-business-card`.
+
+Each call is one LangSmith thread, keyed by the Telnyx call id. The thread holds:
+
+| Run | From |
+|---|---|
+| One trace per media stream: each turn, the caller's words, the agent's words, each tool call, the timing | Pipecat's OpenTelemetry spans, through LangSmith's Pipecat integration |
+| A second trace after a stream restart (failover, or a transfer nobody answered) | The same, with `call.restart_reason` set |
+| `call-summary`: the summary written at hangup | LangChain's LangSmith client |
+
+`uv run chat` traces too: a `chat-turn` run per caller turn, and the `call-summary`, in one thread
+named `chat-<id>`.
+
+Limits:
+
+- Pipecat 1.16 has no trace spans for Amazon Nova Sonic. An agent on Nova shows turns and timing only,
+  not its words or tool calls.
+- No audio is sent. LangSmith can attach a recording of each call, but this project stores no call
+  audio.
+- Call text is sent in full: names, numbers and what the caller said.
+- Spans are sent from a background thread, so tracing does not delay an answer. When LangSmith
+  refuses them (a wrong key, for example), the log shows one error and the call goes on.
+- The free Developer plan keeps up to 5,000 traces a month for 14 days.
+
+Tests never send traces: `tests/conftest.py` sets `LANGSMITH_TRACING=false` before the project loads.
+
 ### A message is saved only after the caller's yes
 
 A save emails the owner at once, so the voice session checks the caller's own words first
@@ -351,7 +423,7 @@ prints the server's answer and what to check.
 
 ### Pipeline leg spike (M7)
 
-The pipeline leg is planned as a local speech-to-text model, Claude through LangGraph, and local
+The pipeline leg (dropped on 2026-11-18) was planned as a local speech-to-text model, Claude through LangGraph, and local
 Kokoro text-to-speech. `scripts/spike_pipeline_leg.py` times each step on the CPU with phone-quality
 audio. The leg itself is not built. Run the spike:
 
@@ -384,24 +456,53 @@ With `SMS_ENABLED=true` and `PORTFOLIO_URL` set, an agent can text that one link
 once per call, and the owner gets a text just before a live transfer. US carriers block texts from an
 unregistered number: the Telnyx number needs a messaging profile and a registered 10DLC campaign first.
 
+### Website (off by default)
+
+With `WEBSITE_URL` set, every agent knows the owner's website, says it when a caller asks, and spells it
+on request. The goodbye line names it too. A voice says the address in words: a part of the host name that
+equals `BRAND_NAME` without spaces is said as the brand's words, so `digitalreformer.dev` with
+`BRAND_NAME="Digital Reformer"` is said "digital reformer dot dev".
+
+### Published writing: a RAG tool (off by default)
+
+With `WRITING_FEED_URL` set to an RSS feed, the profile agent answers questions about the owner's views
+with `search_writing`, a RAG search. It says so aloud first ("Let me run a quick RAG search..."),
+because the line is a showpiece. The tour agent can explain how the search works.
+
+- Each post is cut into passages of about 900 characters, one section of a post each.
+- A local embedding model ranks the passages by meaning: `WRITING_EMBEDDING_MODEL`, by default
+  `BAAI/bge-small-en-v1.5` through fastembed (ONNX on the CPU, about 65 MB, about 5 ms a query, no API cost).
+- BM25 ranks the passages by keyword. Reciprocal rank fusion merges the two lists.
+- A passage under a cosine similarity of 0.55 is dropped, so an off-topic question gets no passage.
+- The model reads at most 3 passages (about 400 tokens), never whole posts. The prompt holds only the
+  number of posts and the feed's description. So the cost per call stays the same as posts are added.
+
+The server reads the feed once at start, with a 5 s limit, and saves a copy in `data/writing.json`.
+When the feed cannot be read, the server uses that copy. Passage vectors are saved in
+`data/writing_vectors.npz` under a hash of each passage, so a restart embeds only new or changed passages.
+Restart the server to pick up a new post. The first start downloads the model to `data/models/`;
+a container image should include that folder. With `WRITING_EMBEDDING_MODEL=` empty, the search is BM25 only.
+
 This machine runs NixOS. `uv.toml` pins `python-preference = "only-managed"`, because prebuilt wheels
 (numpy, onnxruntime) load only under a Python that runs through nix-ld.
 
 ## Layout
 
 ```
-profile.md                       the only source for claims about the owner
+profile.md                       the only source for claims about the owner (with the writing feed)
 src/ai_call_center/
   config.py                      settings from .env
   agents/specs.py                one AgentSpec per agent: instructions, tools, handoffs, voice leg
   graph/state.py                 CallState (checkpointed) and CallContext (per call)
   graph/handoffs.py              transfer_to_<agent> tools
-  graph/tools.py                 save_lead, request_owner_transfer, confirm_returning_caller, get_call_stats, text_portfolio_link, end_call
+  graph/tools.py                 save_lead, request_owner_transfer, identify_caller, forget_caller, get_call_stats, text_portfolio_link, end_call
   graph/build.py                 the agent loop; middleware swaps prompt and tools per active agent
   leads.py                       SQLite store: leads, the call log, cached number lookups
   callers.py                     returning-caller memory: first-name question, history after a yes, summary at hangup
   guardrails.py                  call limits at admission and the transfer hours
   notify.py                      lead emails to the owner over SMTP
+  writing.py                     RAG over the owner's posts: RSS feed, passages, hybrid search, saved vectors
+  names.py                       same_person: does a spoken first name match a name on record (spelling, short form, sound)
   test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
   check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests

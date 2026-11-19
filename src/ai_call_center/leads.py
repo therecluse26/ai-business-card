@@ -21,6 +21,8 @@ class Lead:
     caller_number: str
     call_control_id: str
     created_at: str
+    timeline: str = ""  # when the caller wants the work to start, in their words
+    size: str = ""  # how big the work is, in their words: "a few weeks", "a long engagement"
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,7 @@ class CallRecord:
     agents: str
     summary: str
     caller_name: str
+    topic: str = ""  # a few words for "Last time you asked about ...", with no personal details
 
 
 @dataclass(frozen=True)
@@ -97,14 +100,19 @@ class LeadStore:
             )
             """
         )
+        # Columns added after the first release. An older database gets them here.
+        for table, column in (("leads", "timeline"), ("leads", "size"), ("calls", "topic")):
+            columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if column not in columns:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
 
     # --- leads ---
 
     def save(self, lead: Lead) -> int:
         cur = self._conn.execute(
-            "INSERT INTO leads (name, email, company, need, caller_number, call_control_id, created_at)"
-            " VALUES (:name, :email, :company, :need, :caller_number, :call_control_id, :created_at)",
+            "INSERT INTO leads (name, email, company, need, caller_number, call_control_id, created_at, timeline, size)"
+            " VALUES (:name, :email, :company, :need, :caller_number, :call_control_id, :created_at, :timeline, :size)",
             asdict(lead),
         )
         self._conn.commit()
@@ -112,14 +120,14 @@ class LeadStore:
 
     def all(self) -> list[Lead]:
         rows = self._conn.execute(
-            "SELECT name, email, company, need, caller_number, call_control_id, created_at FROM leads ORDER BY id"
+            "SELECT name, email, company, need, caller_number, call_control_id, created_at, timeline, size FROM leads ORDER BY id"
         ).fetchall()
         return [Lead(*row) for row in rows]
 
     def lead_for_call(self, call_control_id: str) -> tuple[int, Lead] | None:
         """The newest lead saved during this call, with its record number."""
         row = self._conn.execute(
-            "SELECT id, name, email, company, need, caller_number, call_control_id, created_at FROM leads"
+            "SELECT id, name, email, company, need, caller_number, call_control_id, created_at, timeline, size FROM leads"
             " WHERE call_control_id = ? ORDER BY id DESC LIMIT 1",
             (call_control_id,),
         ).fetchone()
@@ -128,7 +136,7 @@ class LeadStore:
     def leads_for(self, caller_number: str, *, limit: int = 20) -> list[Lead]:
         """Leads from this number, newest first."""
         rows = self._conn.execute(
-            "SELECT name, email, company, need, caller_number, call_control_id, created_at FROM leads"
+            "SELECT name, email, company, need, caller_number, call_control_id, created_at, timeline, size FROM leads"
             " WHERE caller_number = ? ORDER BY id DESC LIMIT ?",
             (caller_number, limit),
         ).fetchall()
@@ -137,11 +145,12 @@ class LeadStore:
     def latest_lead_for(self, caller_number: str, *, with_email: bool = False, first_name: str = "") -> Lead | None:
         """The newest lead from this number. With `with_email`, the newest one that holds an email address.
         With `first_name`, the newest one from that person: a phone number can be shared."""
-        want = first_name_of(first_name)
+        from ai_call_center.names import same_person
+
         for lead in self.leads_for(caller_number):
             if with_email and not lead.email:
                 continue
-            if want and first_name_of(lead.name) != want:
+            if first_name.strip() and not same_person(first_name, lead.name):
                 continue
             return lead
         return None
@@ -160,17 +169,35 @@ class LeadStore:
         self._conn.execute("UPDATE calls SET ended_at = NULL WHERE call_control_id = ?", (call_control_id,))
         self._conn.commit()
 
-    def finish_call(self, call_control_id: str, *, agents: list[str], summary: str, caller_name: str = "") -> None:
+    def finish_call(self, call_control_id: str, *, agents: list[str], summary: str, caller_name: str = "", topic: str = "") -> None:
         self._conn.execute(
-            "UPDATE calls SET ended_at = ?, agents = ?, summary = ?, caller_name = ? WHERE call_control_id = ?",
-            (now_iso(), " -> ".join(agents), summary.strip(), caller_name.strip(), call_control_id),
+            "UPDATE calls SET ended_at = ?, agents = ?, summary = ?, caller_name = ?, topic = ? WHERE call_control_id = ?",
+            (now_iso(), " -> ".join(agents), summary.strip(), caller_name.strip(), topic.strip(), call_control_id),
         )
+        self._conn.commit()
+
+    def forget(self, caller_number: str, *, call_ids: list[str], leads: list[Lead]) -> None:
+        """Remove what the line knows about one person on a number.
+
+        Their leads are deleted. Their call rows stay, with no summary, name or topic: the per-number
+        call limits count those rows, so a caller cannot reset a limit by asking to be forgotten.
+        """
+        for lead in leads:
+            self._conn.execute(
+                "DELETE FROM leads WHERE caller_number = ? AND call_control_id = ? AND name = ? AND created_at = ?",
+                (caller_number, lead.call_control_id, lead.name, lead.created_at),
+            )
+        for call_id in call_ids:
+            self._conn.execute(
+                "UPDATE calls SET summary = '', caller_name = '', topic = '' WHERE caller_number = ? AND call_control_id = ?",
+                (caller_number, call_id),
+            )
         self._conn.commit()
 
     def calls_for(self, caller_number: str, *, exclude: str = "", limit: int = 3) -> list[CallRecord]:
         """Finished calls from this number, newest first."""
         rows = self._conn.execute(
-            "SELECT call_control_id, caller_number, started_at, ended_at, agents, summary, caller_name FROM calls"
+            "SELECT call_control_id, caller_number, started_at, ended_at, agents, summary, caller_name, topic FROM calls"
             " WHERE caller_number = ? AND call_control_id != ? AND ended_at IS NOT NULL ORDER BY started_at DESC LIMIT ?",
             (caller_number, exclude, limit),
         ).fetchall()

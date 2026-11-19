@@ -10,6 +10,7 @@ from typing import Annotated, Literal, NotRequired
 
 from langchain.agents import AgentState
 
+from ai_call_center.agents.specs import Welcome
 from ai_call_center.guardrails import TransferHours
 from ai_call_center.leads import LeadStore, NumberInfo
 from ai_call_center.notify import Notifier
@@ -35,10 +36,12 @@ class CallContext:
     legs: dict[str, str] = field(default_factory=dict)  # agent name -> leg id
     mode: Literal["text", "voice"] = "text"
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    caller_greeting: str = ""  # for the greeting agent only: the first name to confirm, nothing else
-    caller_history: str = ""  # notes from earlier calls; released by confirm_returning_caller after a yes
-    identity_confirmed: bool = False  # the caller said they are the earlier caller
-    returning_name: str = ""  # the name the greeting asks about; after a yes, only this person's details are reused
+    caller_history: str = ""  # notes from earlier calls; set by identify_caller after a name match
+    identity_confirmed: bool = False  # the name the caller gave matched an earlier caller on this number
+    returning_name: str = ""  # the matched earlier caller's name; only this person's details are reused
+    identified: bool = False  # identify_caller has run on this call (with a name or without one)
+    welcome: Welcome | None = None  # the words after the caller says who they are; None = no fixed words
+    forgotten: bool = False  # the caller asked to be forgotten: nothing about this call is kept
     earlier_calls: int = 0  # finished calls from this number before this one, for the lead email
     number_info: NumberInfo | None = None  # the number lookup result, for the lead email
     # "caller: ..." and "agent: ..." lines of the call so far. The transfer check reads the caller's own words from it.
@@ -54,5 +57,7 @@ class CallContext:
     caller_line_type: str = ""  # from the number lookup: "mobile", "fixed line", ...
     texter: Texter | None = None  # None when texting is off
     portfolio_url: str = ""
+    owner_name: str = ""  # for words that name the owner, for example after forget_caller
+    website_spoken: str = ""  # the owner's website as a voice says it; the goodbye line names it
     texts_sent: int = 0
     transfer_hours: TransferHours | None = None  # None = a live transfer is allowed at any time

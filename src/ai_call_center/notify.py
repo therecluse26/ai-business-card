@@ -33,12 +33,14 @@ _EMAIL_RE = re.compile(r"^[^@\s<>,;]+@[^@\s<>,;]+\.[^@\s<>,;]+$")
 class CallDetails:
     """Facts about the call that a lead came from. They make the email specific. Any field can be empty."""
 
-    kind: str = "message"  # "message": the caller left a message. "transfer": the caller asked to speak to the owner.
+    # "message": the caller left a message. "transfer": the caller asked to speak to the owner.
+    # "warm-project" or "warm-role": the caller talked about a project or a role, and left no message.
+    kind: str = "message"
     notes: str = ""  # what else the caller asked or said on the call, written by the agent
     agents: tuple[str, ...] = ()  # the agents the caller spoke with, in order
     seconds: int = 0  # how long the call had run when the lead was saved
     earlier_calls: int = 0  # finished calls from this number before this one
-    confirmed_returning: bool = False  # the caller confirmed the first name from an earlier call
+    confirmed_returning: bool = False  # the name the caller gave matched an earlier caller on this number
     line: str = ""  # from the number lookup, for example "mobile on Verizon"
     area: str = ""  # from the number lookup, for example "Akron, OH"
     registered_name: str = ""  # from the number lookup: the account holder, not always the caller
@@ -92,7 +94,13 @@ def _rows(lead: Lead, row_id: int, details: CallDetails) -> tuple[list[tuple[str
     if _has(lead.company):
         reach.append(("Company", _one_line(lead.company), ""))
 
-    call: list[tuple[str, str, str]] = [("When", _local_time(lead.created_at), "")]
+    # The qualifying answers come first: they tell the owner how warm the lead is.
+    call: list[tuple[str, str, str]] = []
+    if _has(lead.timeline):
+        call.append(("Wants to start", _one_line(lead.timeline), ""))
+    if _has(lead.size):
+        call.append(("Size of the work", _one_line(lead.size), ""))
+    call.append(("When", _local_time(lead.created_at), ""))
     if details.seconds:
         call.append(("Call length so far", _duration(details.seconds), ""))
     if details.agents:
@@ -100,7 +108,7 @@ def _rows(lead: Lead, row_id: int, details: CallDetails) -> tuple[list[tuple[str
     if _has(details.notes):
         call.append(("Also on this call", _one_line(details.notes), ""))
     if details.confirmed_returning:
-        call.append(("Returning caller", "Yes. They confirmed their first name from an earlier call.", ""))
+        call.append(("Returning caller", "Yes. The name they gave matched an earlier caller on this number.", ""))
     if details.earlier_calls:
         call.append(("Earlier calls from this number", str(details.earlier_calls), ""))
     line = ", ".join(part for part in (details.line, details.area) if _has(part))
@@ -108,7 +116,8 @@ def _rows(lead: Lead, row_id: int, details: CallDetails) -> tuple[list[tuple[str
         call.append(("Phone line", line, ""))
     if _has(details.registered_name):
         call.append(("Name on the phone account", f"{details.registered_name.title()} (from a number lookup; it can be another person)", ""))
-    call.append(("Lead record", str(row_id), ""))
+    if row_id:
+        call.append(("Lead record", str(row_id), ""))
     call.append(("Call ID", lead.call_control_id, ""))
     return reach, call
 
@@ -117,6 +126,11 @@ FOOTNOTE = (
     "The agent read the details back to the caller, and the caller confirmed them. "
     "Speech recognition can still mishear a name or an email address."
 )
+WARM_FOOTNOTE = (
+    "The caller left no message, so nobody read details back to them. "
+    "The text above is the call summary, written by a model after the call."
+)
+WARM_TOPICS = {"warm-project": "a project", "warm-role": "a role"}
 TRANSFER_FOOTNOTE = (
     "The agent saved this before it tried your phone, so the record exists even when the call does not reach you. "
     "Speech recognition can still mishear a name."
@@ -173,6 +187,11 @@ def lead_email(lead: Lead, *, row_id: int, sender: str, to: str, details: CallDe
         subject = f"{name}{company} asked to speak to you"
         headline = f"{name} asked to speak to you on your voice business card."
         footnote = TRANSFER_FOOTNOTE
+    elif details.kind in WARM_TOPICS:
+        topic = WARM_TOPICS[details.kind]
+        subject = f"Warm lead: {name}{company} talked about {topic}, no message left"
+        headline = f"{name} talked about {topic} on your voice business card, but left no message."
+        footnote = WARM_FOOTNOTE
     else:
         subject = f"Message from {name}{company}"
         headline = f"{name} left you a message on your voice business card."
