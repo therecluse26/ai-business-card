@@ -1,0 +1,9 @@
+# Only what the Dockerfile copies goes to the builder. The .env files and data/ hold keys and callers' data.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!profile.md
+!src
+**/__pycache__
+**/*.pyc

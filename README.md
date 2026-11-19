@@ -60,6 +60,8 @@ uv run serve                      # FastAPI on 127.0.0.1:8000
 ```
 
 At startup the server sets the Telnyx Voice API application's webhook URL to `PUBLIC_URL/webhooks/telnyx`.
+This check, and the check for an outbound voice profile, run in the background: the server takes calls
+about 0.3 s after its imports end, and the first call waits for the checks only if they are still running.
 Telnyx sends call events there; the server answers each call with bidirectional PCMU media streaming
 to `wss://.../media`, where Pipecat bridges the audio to the active agent's voice leg.
 
@@ -477,14 +479,29 @@ because the line is a showpiece. The tour agent can explain how the search works
 - The model reads at most 3 passages (about 400 tokens), never whole posts. The prompt holds only the
   number of posts and the feed's description. So the cost per call stays the same as posts are added.
 
-The server reads the feed once at start, with a 5 s limit, and saves a copy in `data/writing.json`.
-When the feed cannot be read, the server uses that copy. Passage vectors are saved in
+The server keeps a copy of the feed in `data/writing.json`. At start it uses that copy at once and
+reads the feed in the background, so a slow feed cannot delay the start. When the feed has changed,
+the next call uses the new posts. Only the first run, which has no copy, waits for the feed (5 s limit).
+When the feed cannot be read, the server stays on the copy. Passage vectors are saved in
 `data/writing_vectors.npz` under a hash of each passage, so a restart embeds only new or changed passages.
 Restart the server to pick up a new post. The first start downloads the model to `data/models/`;
 a container image should include that folder. With `WRITING_EMBEDDING_MODEL=` empty, the search is BM25 only.
 
 This machine runs NixOS. `uv.toml` pins `python-preference = "only-managed"`, because prebuilt wheels
 (numpy, onnxruntime) load only under a Python that runs through nix-ld.
+
+## Hosting on Fly.io
+
+The server can run on one Fly.io machine that sleeps between calls and wakes for a call. The files are
+`Dockerfile`, `fly.toml` and `scripts/fly-secrets.sh`. The run book is [docs/hosting-fly.md](docs/hosting-fly.md):
+setup, the checks after the first deploy, the cost, the backups, and how to move the phone line between
+the laptop and Fly.io.
+
+A push to `main` that changes the server deploys it (`.github/workflows/fly-deploy.yml`). The deploy runs
+the tests first, and it waits until no call is in progress (`scripts/fly-deploy.sh`).
+
+In a container the server must listen on all addresses, so the image sets `HOST=0.0.0.0`. On the laptop
+the default stays `127.0.0.1`.
 
 ## Layout
 

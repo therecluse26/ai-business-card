@@ -1,0 +1,46 @@
+# Fly.io: one machine that sleeps between calls. See docs/hosting-fly.md.
+# The app name must be unique on Fly.io. If you change it, change PUBLIC_URL below too.
+app = "voice-business-card"
+primary_region = "iad"  # Ashburn, Virginia: one of Fly's two lowest-priced regions
+kill_signal = "SIGINT"
+kill_timeout = "30s"
+
+[env]
+  PUBLIC_URL = "https://voice-business-card.fly.dev"
+  # The volume. Everything that must outlive a deploy is here; the image holds the rest.
+  LEADS_DB = "/data/leads.sqlite3"
+  WRITING_CACHE_PATH = "/data/writing.json"
+  SERVER_LOG = "/data/server.log"
+
+[mounts]
+  source = "data"
+  destination = "/data"
+  initial_size = "1gb"
+  snapshot_retention = 5  # days; Fly takes one snapshot of the volume each day
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  # "suspend" keeps the server's memory, so a wake takes a few hundred ms and skips the Python start.
+  # It also keeps a transfer in progress: its state is in memory, and "stop" would lose it.
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 20
+    hard_limit = 50
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+
+# A full CPU, so several calls at one time do not share a burst balance. Billed by the second while the
+# machine runs: 33.00 USD a month if it never sleeps. Suspend needs 2 GB of memory or less.
+[[vm]]
+  size = "performance-1x"
+  memory = "2gb"

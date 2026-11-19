@@ -636,6 +636,7 @@ class CallSession:
                 tools=tools_for_agent(spec, schemas),
             )
             legs[name] = VoiceLeg(name, spec.leg, service)
+        await transfers.settled()  # the start-up check of the Telnyx application; no wait after the first second
         ctx = CallContext(
             call_control_id=self.call_control_id,
             caller_number=caller_number,

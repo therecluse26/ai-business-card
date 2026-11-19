@@ -458,3 +458,38 @@ async def test_restart_tries_again_when_telnyx_refuses_the_first_start():
 
     assert [entry[0] for entry in telephony.log] == ["stop_streaming", "start_streaming", "start_streaming"]
     assert transfers.take_resume(CALL) is not None  # the new session still gets the conversation
+
+
+async def test_a_call_waits_for_the_start_up_check_of_the_telnyx_application():
+    """The check runs while the server already takes calls. The first call must still see its result."""
+    import asyncio
+
+    from ai_call_center.app import check_telnyx_application
+    from ai_call_center.config import Settings
+
+    class NoProfile:
+        async def outbound_profile_id(self, app_id: str) -> str:
+            await asyncio.sleep(0.05)
+            return ""
+
+        async def ensure_webhook_url(self, app_id: str, url: str) -> bool:
+            return False
+
+    telephony = NoProfile()
+    transfers = TransferManager(telephony, stream_url="wss://example.test/media")  # type: ignore[arg-type]
+    settings = Settings(_env_file=None, telnyx_app_id="app-1", public_url="https://example.test")
+    transfers.checked = asyncio.create_task(check_telnyx_application(telephony, transfers, settings))  # type: ignore[arg-type]
+    assert transfers.unavailable == ""  # the check has not ended
+    await transfers.settled()
+    assert "no outbound voice profile" in transfers.unavailable
+
+
+async def test_a_check_that_hangs_does_not_hold_a_call():
+    import asyncio
+
+    transfers = TransferManager(object(), stream_url="wss://example.test/media")  # type: ignore[arg-type]
+    transfers.checked = asyncio.create_task(asyncio.sleep(60))
+    await transfers.settled(timeout=0.05)
+    assert not transfers.checked.done()  # the check is not cancelled; the call only stops waiting
+    transfers.checked.cancel()
+    await TransferManager(object(), stream_url="wss://example.test/media").settled()  # type: ignore[arg-type]

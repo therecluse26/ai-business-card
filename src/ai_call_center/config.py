@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     # Public HTTPS URL of this server (Tailscale Funnel or ngrok), no trailing slash.
     public_url: str = ""
     port: int = 8000
+    # The address the server listens on. On the laptop the tunnel reaches 127.0.0.1. In a container
+    # (Fly.io) the host's proxy comes from outside the container, so the image sets 0.0.0.0.
+    host: str = "127.0.0.1"
 
     # Voice legs
     openai_api_key: SecretStr = SecretStr("")

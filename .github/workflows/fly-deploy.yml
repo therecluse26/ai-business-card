@@ -1,0 +1,49 @@
+# A push to main that changes the server deploys it to Fly.io, when the tests pass.
+# The deploy waits until no call is in progress: see scripts/fly-deploy.sh.
+# Needs the repository secret FLY_API_TOKEN (`fly tokens create deploy`).
+# The settings in .env are not in the repository: after a change to .env, run scripts/fly-secrets.sh.
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - Dockerfile
+      - .dockerignore
+      - fly.toml
+      - pyproject.toml
+      - uv.lock
+      - profile.md
+      - scripts/fly-deploy.sh
+      - .github/workflows/fly-deploy.yml
+  workflow_dispatch:
+
+# One deploy at a time. A second push waits for the first deploy; it does not stop it.
+concurrency:
+  group: fly-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: bash scripts/fly-deploy.sh "gh-${GITHUB_SHA::12}"

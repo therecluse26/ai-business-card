@@ -130,3 +130,13 @@ async def test_a_service_pipecat_gave_up_on_is_dead(monkeypatch):
     frame.processor = object()  # reported by the switcher, not by the service
     w.dog._check(frame)  # noqa: SLF001
     assert len(w.dead) == 1 and "gave up" in w.dead[0][1]
+
+
+def test_the_server_listens_on_the_laptop_only_unless_host_is_set(monkeypatch):
+    """A container sets HOST=0.0.0.0. Without it, nothing outside this computer can reach the port."""
+    from ai_call_center.config import Settings
+
+    monkeypatch.delenv("HOST", raising=False)
+    assert Settings(_env_file=None).host == "127.0.0.1"
+    monkeypatch.setenv("HOST", "0.0.0.0")
+    assert Settings(_env_file=None).host == "0.0.0.0"

@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import re
+import threading
 
 import numpy as np
 from langchain_core.messages import HumanMessage, ToolMessage
 
 from ai_call_center.agents.specs import Profile, build_specs
 from ai_call_center.graph import tools as graph_tools
-from ai_call_center.writing import RESULT_PASSAGES, Library, about_line, load_writing, parse_feed, passages_of, search_result
+from ai_call_center.writing import (
+    RESULT_PASSAGES,
+    Library,
+    about_line,
+    load_writing,
+    parse_feed,
+    passages_of,
+    quick_library,
+    save_writing,
+    search_result,
+)
 from tests.conftest import OWNER, scripted, tool_call
 
 FEED = """<?xml version="1.0"?>
@@ -127,6 +138,65 @@ def test_the_saved_copy_is_used_when_the_feed_cannot_be_read(tmp_path, monkeypat
     monkeypatch.setattr("ai_call_center.writing.fetch_feed", offline)
     assert load_writing("https://example.dev/rss.xml", cache) == parse_feed(FEED)
     assert load_writing("https://example.dev/rss.xml", tmp_path / "missing.json").posts == []
+
+
+ONE_POST_FEED = FEED[: FEED.index("<item><title>VII.")] + "</channel></rss>"
+
+
+def _refresh_thread() -> threading.Thread | None:
+    return next((t for t in threading.enumerate() if t.name == "writing-refresh"), None)
+
+
+def _wait_for_refresh() -> None:
+    """The background read of the feed has ended. It may have ended before this looks for it."""
+    if thread := _refresh_thread():
+        thread.join(5)
+        assert not thread.is_alive()
+
+
+def test_a_start_with_a_saved_copy_does_not_wait_for_the_feed(tmp_path, monkeypatch):
+    cache = tmp_path / "writing.json"
+    save_writing(parse_feed(ONE_POST_FEED), cache)
+    feed_may_answer = threading.Event()
+
+    def slow_feed(url, timeout=5.0):
+        assert feed_may_answer.wait(5)
+        return FEED.encode()
+
+    monkeypatch.setattr("ai_call_center.writing.fetch_feed", slow_feed)
+    published: list[Library] = []
+    first = quick_library("https://example.dev/rss.xml", cache, Library, published.append)
+    assert len(first.posts) == 1 and published == []  # returned while the feed had not answered
+
+    feed_may_answer.set()
+    _wait_for_refresh()
+    assert len(published) == 1 and len(published[0].posts) == 3  # the changed feed becomes a new library
+    assert len(load_writing("", cache).posts) == 3  # and the saved copy is the new feed
+
+
+def test_an_unchanged_or_unreadable_feed_keeps_the_saved_copy(tmp_path, monkeypatch):
+    cache = tmp_path / "writing.json"
+    save_writing(parse_feed(FEED), cache)
+    published: list[Library] = []
+
+    monkeypatch.setattr("ai_call_center.writing.fetch_feed", lambda url, timeout=5.0: FEED.encode())
+    assert len(quick_library("https://example.dev/rss.xml", cache, Library, published.append).posts) == 3
+    _wait_for_refresh()
+
+    def offline(url, timeout=5.0):
+        raise OSError("network is down")
+
+    monkeypatch.setattr("ai_call_center.writing.fetch_feed", offline)
+    assert len(quick_library("https://example.dev/rss.xml", cache, Library, published.append).posts) == 3
+    _wait_for_refresh()
+    assert published == []
+    assert len(load_writing("", cache).posts) == 3
+
+
+def test_the_first_run_reads_the_feed_before_it_goes_on(tmp_path, monkeypatch):
+    monkeypatch.setattr("ai_call_center.writing.fetch_feed", lambda url, timeout=5.0: FEED.encode())
+    first = quick_library("https://example.dev/rss.xml", tmp_path / "writing.json", Library, lambda library: None)
+    assert len(first.posts) == 3
 
 
 def _specs(writing_about: str = ""):

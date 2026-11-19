@@ -134,12 +134,24 @@ class TransferManager:
         self.accept_secs = accept_secs
         self._owner_legs: dict[str, str] = {}  # the owner's leg -> the caller's leg, while a transfer is pending
         self.unavailable = ""  # why no transfer can be made on this server; "" when one can
+        self.checked: asyncio.Future | None = None  # the start-up check that can set `unavailable`
         self._pending: dict[str, _Pending] = {}
         self._resumes: dict[str, Snapshot] = {}
         self._after_speech: dict[str, Fallback] = {}  # calls where Telnyx's voice speaks before a transfer
         self.restart_attempts = 3
         self.restart_retry_secs = 0.4
         self._tasks: set[asyncio.Task] = set()
+
+    async def settled(self, timeout: float = 3.0) -> None:
+        """Wait until `unavailable` is final. The server checks the Telnyx application while it already takes
+        calls, so the first call after a start can arrive before that check ends. After `timeout` the call
+        goes on with the value so far."""
+        if self.checked is None or self.checked.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(self.checked), timeout)
+        except Exception:  # noqa: BLE001 - a late or failed check must not stop a call
+            log.warning("the start-up check of the Telnyx application did not end in %.0f s; the call goes on", timeout)
 
     def _spawn(self, coro) -> asyncio.Task:
         # Its own task: the call's pipeline, and every task inside it, is cancelled when the stream stops.

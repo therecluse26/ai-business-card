@@ -1,7 +1,8 @@
 """The owner's published writing, from an RSS feed, as a RAG tool for the profile agent.
 
-The server reads the feed once at start and keeps a copy on disk. When the feed cannot be read, the copy
-is used, so a call never waits on the network.
+The server keeps a copy of the feed on disk. At start it uses the copy at once and reads the feed in the
+background, so neither the start nor a call waits on the network. When the feed has changed, the next call
+uses the new posts. Only the first run, which has no copy, reads the feed before it goes on.
 
 Retrieval is hybrid. Each post is cut into short passages. A local embedding model (fastembed, ONNX on the
 CPU) ranks the passages by meaning, BM25 ranks them by keyword, and reciprocal rank fusion merges the two
@@ -17,11 +18,12 @@ import json
 import logging
 import math
 import re
+import threading
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 
@@ -116,13 +118,22 @@ def load_writing(url: str, cache_path: Path) -> Writing:
     if url:
         try:
             writing = parse_feed(fetch_feed(url))
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            saved = {"about": writing.about, "posts": [asdict(p) for p in writing.posts]}
-            cache_path.write_text(json.dumps(saved, indent=1), encoding="utf-8")
+            save_writing(writing, cache_path)
             log.info("writing: %d posts from %s", len(writing.posts), url)
             return writing
         except Exception as exc:  # noqa: BLE001 - any failure falls back to the saved copy
             log.warning("writing: cannot read the feed %s (%s); using the saved copy", url, exc)
+    return saved_writing(cache_path)
+
+
+def save_writing(writing: Writing, cache_path: Path) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    saved = {"about": writing.about, "posts": [asdict(p) for p in writing.posts]}
+    cache_path.write_text(json.dumps(saved, indent=1), encoding="utf-8")
+
+
+def saved_writing(cache_path: Path) -> Writing:
+    """The copy on disk. Nothing when there is no copy, or it cannot be read."""
     if cache_path.exists():
         try:
             saved = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -130,6 +141,36 @@ def load_writing(url: str, cache_path: Path) -> Writing:
         except Exception as exc:  # noqa: BLE001
             log.warning("writing: the saved copy %s is not usable (%s)", cache_path, exc)
     return Writing()
+
+
+def quick_library(url: str, cache_path: Path, build: Callable[[Writing], Library], publish: Callable[[Library], None]) -> Library:
+    """The library at once from the saved copy, when there is one. The feed is then read in the background.
+
+    Reading the feed takes 0.2 s when the site answers, and up to FETCH_TIMEOUT_SECS when it does not. The
+    server must not wait that long to start, because a call can be the reason it started. When the feed has
+    changed, `publish` gets a new library, and the next call uses it. With no saved copy (the first run),
+    the feed is read before this returns, as `load_writing` does.
+    """
+    saved = saved_writing(cache_path)
+    if not (url and saved.posts):
+        return build(load_writing(url, cache_path))
+    library = build(saved)
+    log.info("writing: %d posts from the saved copy; the feed is read in the background", len(saved.posts))
+
+    def refresh() -> None:
+        try:
+            fresh = parse_feed(fetch_feed(url))
+            if not fresh.posts or fresh == saved:
+                log.info("writing: the feed %s has no changes", url)
+                return
+            save_writing(fresh, cache_path)
+            publish(build(fresh))
+            log.info("writing: %d posts from %s, in use from the next call", len(fresh.posts), url)
+        except Exception as exc:  # noqa: BLE001 - the saved copy stays in use
+            log.warning("writing: cannot read the feed %s (%s); the saved copy stays in use", url, exc)
+
+    threading.Thread(target=refresh, name="writing-refresh", daemon=True).start()
+    return library
 
 
 def passages_of(post: Post, max_chars: int = PASSAGE_CHARS) -> list[Passage]:
@@ -320,17 +361,35 @@ def about_line(library: Library, owner: str) -> str:
     return f"{owner} has published {len(library.posts)} short essays on software engineering.{described}"
 
 
-@lru_cache(maxsize=1)
-def default_library() -> Library:
-    """The writing that the server uses, read and indexed once per process."""
-    from ai_call_center.config import get_settings
+_library: Library | None = None
+_library_lock = threading.Lock()
 
-    settings = get_settings()
-    writing = load_writing(settings.writing_feed_url, settings.writing_cache_path)
-    embedder: Embedder | None = None
-    if writing.posts and settings.writing_embedding_model:
-        try:
-            embedder = FastEmbedder(settings.writing_embedding_model, settings.writing_model_dir)
-        except Exception as exc:  # noqa: BLE001 - keyword search still works without the model
-            log.warning("writing: no embedding model (%s); keyword search only", exc)
-    return Library(writing, embedder=embedder, vector_cache=settings.writing_cache_path.with_name("writing_vectors.npz"))
+
+def default_library() -> Library:
+    """The writing that the server uses, read and indexed once per process. See `quick_library`."""
+    global _library
+    with _library_lock:
+        if _library is not None:
+            return _library
+        from ai_call_center.config import get_settings
+
+        settings = get_settings()
+        embedders: list[Embedder | None] = []  # the model is loaded once, and only when there are posts
+
+        def build(writing: Writing) -> Library:
+            if writing.posts and settings.writing_embedding_model and not embedders:
+                try:
+                    embedders.append(FastEmbedder(settings.writing_embedding_model, settings.writing_model_dir))
+                except Exception as exc:  # noqa: BLE001 - keyword search still works without the model
+                    log.warning("writing: no embedding model (%s); keyword search only", exc)
+                    embedders.append(None)
+            embedder = embedders[0] if embedders else None
+            return Library(writing, embedder=embedder, vector_cache=settings.writing_cache_path.with_name("writing_vectors.npz"))
+
+        def publish(library: Library) -> None:
+            global _library
+            with _library_lock:  # waits until the first library is in place, so it cannot be put back over this one
+                _library = library
+
+        _library = quick_library(settings.writing_feed_url, settings.writing_cache_path, build, publish)
+        return _library

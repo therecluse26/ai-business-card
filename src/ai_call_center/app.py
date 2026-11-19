@@ -5,6 +5,7 @@ Run: uv run serve
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -54,6 +55,25 @@ def log_to_file(path: str) -> None:
     logger.add(str(file), level="DEBUG", encoding="utf-8")  # Pipecat logs with loguru
 
 
+async def check_telnyx_application(telephony: TelnyxTelephony, transfers: TransferManager, settings: Settings) -> None:
+    """Can the Telnyx application make a transfer, and does it send its webhooks to this server?"""
+    if settings.telnyx_app_id:
+        try:
+            if not await telephony.outbound_profile_id(settings.telnyx_app_id):
+                transfers.unavailable = "the Telnyx application has no outbound voice profile"
+                log.warning("LIVE TRANSFER IS OFF: the Telnyx application has no outbound voice profile. Run `uv run setup-transfer`, then restart.")
+        except Exception as exc:  # noqa: BLE001 - the server still takes calls without this check
+            log.error("could not check the Telnyx outbound voice profile: %s", exc)
+    if settings.public_url and settings.telnyx_app_id:
+        try:
+            changed = await telephony.ensure_webhook_url(settings.telnyx_app_id, settings.webhook_url)
+            log.info("Telnyx webhook URL %s: %s", "updated" if changed else "already correct", settings.webhook_url)
+        except Exception as exc:  # noqa: BLE001 - the server is still useful; the user can fix the portal by hand
+            log.error("could not set the Telnyx webhook URL: %s", exc)
+    else:
+        log.warning("PUBLIC_URL or TELNYX_APP_ID not set; the Telnyx webhook URL was not checked")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
@@ -69,6 +89,7 @@ async def lifespan(app: FastAPI):
         max_call_minutes=settings.max_call_minutes,
         exempt_numbers=frozenset({settings.owner_phone}),
     )
+    app.state.handled = webhooks.HandledCalls()  # so a repeated call.initiated webhook does not answer a call twice
     app.state.health = ProviderHealth()  # which voice providers are answering; shared by all calls
     app.state.transfers = TransferManager(
         app.state.telephony,
@@ -79,23 +100,14 @@ async def lifespan(app: FastAPI):
         hold_audio_url=settings.hold_audio_url,
         accept_secs=settings.transfer_accept_secs,
     )
-    if settings.telnyx_app_id:
-        try:
-            if not await app.state.telephony.outbound_profile_id(settings.telnyx_app_id):
-                app.state.transfers.unavailable = "the Telnyx application has no outbound voice profile"
-                log.warning("LIVE TRANSFER IS OFF: the Telnyx application has no outbound voice profile. Run `uv run setup-transfer`, then restart.")
-        except Exception as exc:  # noqa: BLE001 - do not block startup on this check
-            log.error("could not check the Telnyx outbound voice profile: %s", exc)
-    if settings.public_url and settings.telnyx_app_id:
-        try:
-            changed = await app.state.telephony.ensure_webhook_url(settings.telnyx_app_id, settings.webhook_url)
-            log.info("Telnyx webhook URL %s: %s", "updated" if changed else "already correct", settings.webhook_url)
-        except Exception as exc:  # noqa: BLE001 - the server is still useful; the user can fix the portal by hand
-            log.error("could not set the Telnyx webhook URL: %s", exc)
-    else:
-        log.warning("PUBLIC_URL or TELNYX_APP_ID not set; the Telnyx webhook URL was not checked")
+    # The two checks of the Telnyx application take about 0.7 s. They run while the server already takes
+    # calls, because a call can be the reason the server started. A call waits for them only where it
+    # needs the result (`TransferManager.settled`).
+    checks = asyncio.create_task(check_telnyx_application(app.state.telephony, app.state.transfers, settings), name="telnyx-start-checks")
+    app.state.transfers.checked = checks
     log.info("ready: webhooks at %s, media at %s, number %s", settings.webhook_url, settings.media_stream_url, settings.telnyx_phone_number or "(none)")
     yield
+    checks.cancel()
 
 
 app = FastAPI(title="AI business card", lifespan=lifespan)
@@ -118,7 +130,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if get_settings().server_log:
         log_to_file(get_settings().server_log)
-    uvicorn.run("ai_call_center.app:app", host="127.0.0.1", port=get_settings().port, log_level="info")
+    uvicorn.run("ai_call_center.app:app", host=get_settings().host, port=get_settings().port, log_level="info")
 
 
 if __name__ == "__main__":
