@@ -36,6 +36,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
     { name = "telnyx", extra = ["webhooks"] },
+    { name = "typesafe-sdk" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -63,6 +64,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.16.3" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
     { name = "telnyx", extras = ["webhooks"], specifier = ">=4.191.0" },
+    { name = "typesafe-sdk", specifier = ">=0.7.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
 
@@ -3708,6 +3710,25 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/6c/aa/0de7986aa1fa856adb961c67345189b97d13f6e250b34ba68884df865f07/typer-0.29.1.tar.gz", hash = "sha256:ab6eb3880bf67ce96147734717f9ec333c06f66e361f3ea947d0be43da39f242", size = 205843, upload-time = "2026-11-11T09:18:39.782Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/05/ff/51969745f31cea6bcd12151e668febcf979656316e67a7755942267c1273/typer-0.29.1-py3-none-any.whl", hash = "sha256:00dbc549c13428bec1be55fe1f4d0fb8c6637a310e4f178ef14abe9534ee7b58", size = 121064, upload-time = "2026-11-11T09:18:38.671Z" },
+]
+
+[[package]]
+name = "typesafe-sdk"
+version = "0.7.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio" },
+    { name = "httpx2" },
+    { name = "packaging" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "tenacity" },
+    { name = "truststore", marker = "sys_platform != 'emscripten'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/26/4d/383aa14f4cfe5fb41023ea1cab52d7f79cc31ab200ee7314317cf89db744/typesafe_sdk-0.7.5.tar.gz", hash = "sha256:1eeeb0dc80a7161d84896db42a5016dc0a7c8872fa16540b70163e5357b6d398", size = 34152, upload-time = "2026-10-14T21:21:42.837Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/f6/bee4c3b49570c2d312057c9e37c1446cf37eb1b86bf5872f7a797e803326/typesafe_sdk-0.7.5-py3-none-any.whl", hash = "sha256:967a8b61494d536abb55ee3f3a2b10e81685cb6baad6ccdcab588bdc6c9b86d2", size = 49948, upload-time = "2026-10-14T21:21:41.337Z" },
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ from ai_call_center.agents.specs import (
 )
 from ai_call_center.callers import summarize_call
 from ai_call_center.config import get_settings
+from ai_call_center.decisions import default_decider
 from ai_call_center.graph.build import build_graph, default_model, default_specs
 from ai_call_center.graph.state import CallContext
 from ai_call_center.graph.tools import (
@@ -106,6 +107,7 @@ async def run(caller_number: str = "+10000000000") -> None:
             rag=bool(default_library().posts),
         ),
         owner_name=settings.owner_name,
+        decider=default_decider(settings),
         earlier_calls=store.call_count_for(caller_number, exclude=call_id),
         transfer_hours=TransferHours.parse(settings.transfer_hours, settings.transfer_days),
         website_spoken=site.spoken if (site := web_address(settings.website_url, settings.brand_name)) else "",

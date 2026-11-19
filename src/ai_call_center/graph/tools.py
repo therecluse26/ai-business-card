@@ -11,6 +11,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from ai_call_center.agents.specs import LEGS
+from ai_call_center.decisions import Decision
 from ai_call_center.graph.state import CallContext, CallState
 from ai_call_center.callers import UNKNOWN_NUMBERS, CallSummary, history_text, recall, transcript_lines
 from ai_call_center.leads import Lead, now_iso
@@ -263,6 +264,10 @@ def describe_call(ctx: CallContext, *, visited: list[str], active_agent: str, le
         f"Lead saved: {'yes' if lead_saved else 'no'}. "
         f"Transfer requested: {'yes' if transfer_requested else 'no'}."
         + (f" {figures}" if figures else "")
+        + "".join(
+            f" A decision model, Jev from TypeSafe AI, read the caller's request for a live call: {round(d.probability * 100)} percent yes, in {d.millis} milliseconds."
+            for d in ctx.decisions[-1:]
+        )
     )
 
 
@@ -411,6 +416,7 @@ async def note_refused_transfer_at_call_end(
     )
 
 
+# The fallback for the transfer check, when Jev is off or gave no decision (see `transfer_question`).
 # Words a caller uses to ask for a live call. "Leave a message", "email him", and "have him call
 # me" hold none of them. "Can you call Brad?" asks the agent to ring someone now; "can you call me
 # back" and "can you call my office" do not.
@@ -428,22 +434,65 @@ def asked_for_the_owner(lines: list[str]) -> bool:
     return any(LIVE_REQUEST.search(line.removeprefix("caller:")) for line in said)
 
 
-def transfer_question(ctx: CallContext, lines: list[str]) -> str | None:
+# Jev gives the probability that the caller asked for a live call.
+# A transfer rings the owner's phone, so a yes needs more than the 0.7 that TypeSafe gives as a start.
+# Between the two limits nobody knows: the agent asks the caller.
+LIVE_CALL_YES = 0.8
+LIVE_CALL_NO = 0.3
+
+NOT_ASKED = (
+    "No transfer was made, and nothing was saved. The caller did not ask, in their own words, to speak to the owner now. "
+    "A caller who wants to leave a message, send an email, or get a call back wants a message: take it and call save_lead. "
+    "If you are not sure which one they want, ask one question: do they want to leave a message, or be connected to the owner's phone now? Use the owner's name. "
+    "Call request_owner_transfer again only if they choose the live connection."
+)
+ASK_WHICH = (
+    "No transfer was made, and nothing was saved. It is not clear if the caller wants a live call or a message. "
+    "Ask one question now: do they want to leave a message, or be connected to the owner's phone now? Use the owner's name. "
+    "Call request_owner_transfer again only if they choose the live connection. If they choose a message, take it and call save_lead."
+)
+
+
+async def read_live_call(ctx: CallContext, lines: list[str]) -> Decision | None:
+    """Jev's reading of the caller's request. None when Jev is off or gave no decision in time.
+    A caller who asked to be forgotten is not sent to Jev."""
+    if ctx.decider is None or ctx.forgotten or not any(line.startswith("caller:") for line in lines):
+        return None
+    decision = await ctx.decider.asked_for_live_call(lines, owner_name=ctx.owner_name)
+    if decision is not None:
+        ctx.decisions.append(decision)
+    return decision
+
+
+async def transfer_question(ctx: CallContext, lines: list[str]) -> str | None:
     """None when the transfer can go ahead. Otherwise the text for the model: no transfer yet, ask first.
 
-    A transfer rings the owner's phone, so the model's reading of the caller is not enough. The
-    caller's own words must ask for a live call. When they do not, the agent asks one question.
-    The answer to that question decides, so the check passes on the next request.
+    A transfer rings the owner's phone, so the voice model's reading of the caller is not enough.
+    The caller's own words must ask for a live call. Jev reads them for their meaning (`decisions.py`):
+    a high probability lets the transfer go ahead, a middle one makes the agent ask one question,
+    and a low one means no transfer. One word can mean opposite things ("can I talk to him?", "I can't
+    talk right now"), so the word list decides only when Jev is off or gave no decision in time.
+    The caller's answer to the agent's question decides, so the check passes on the next request.
     """
-    if ctx.transfer_question_asked or asked_for_the_owner(lines):
+    if ctx.transfer_question_asked:
         return None
-    ctx.transfer_question_asked = True
-    return (
-        "No transfer was made, and nothing was saved. The caller did not ask, in their own words, to speak to the owner now. "
-        "A caller who wants to leave a message, send an email, or get a call back wants a message: take it and call save_lead. "
-        "If you are not sure which one they want, ask one question: do they want to leave a message, or be connected to the owner's phone now? Use the owner's name. "
-        "Call request_owner_transfer again only if they choose the live connection."
-    )
+    listed = asked_for_the_owner(lines)
+    decision = await read_live_call(ctx, lines)
+    if decision is None:  # Jev is off, too slow, or failed: the word list is the fallback
+        ctx.transfer_question_asked = not listed
+        return None if listed else NOT_ASKED
+    if decision.probability >= LIVE_CALL_YES:
+        outcome, question = "the transfer goes ahead", None
+    elif decision.probability > LIVE_CALL_NO:
+        outcome, question = "the agent asks the caller", ASK_WHICH
+    else:
+        outcome, question = "no transfer", NOT_ASKED
+    log.info(
+        "call %s: Jev read the transfer request: %.2f in %d ms (%s; word list: %s): %s",
+        ctx.call_control_id, decision.probability, decision.millis, decision.model, "match" if listed else "miss", outcome,
+    )  # fmt: skip
+    ctx.transfer_question_asked = question is not None
+    return question
 
 
 # A short yes to the agent's "is that right?". A long turn holds new details, so it is not a yes.
@@ -620,7 +669,7 @@ async def request_owner_transfer(reason: str, runtime: ToolRuntime[CallContext, 
     ctx = runtime.context
     update: dict = {}
     state = runtime.state
-    if question := transfer_question(ctx, transcript_lines(state.get("messages", []))):
+    if question := await transfer_question(ctx, transcript_lines(state.get("messages", []))):
         return Command(update={"messages": [ToolMessage(content=question, tool_call_id=runtime.tool_call_id)]})
     if closed := transfer_closed_message(ctx, caller_name=caller_name):
         remember_refused_transfer(ctx, caller_name=caller_name, company=company, reason=reason)

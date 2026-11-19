@@ -11,6 +11,7 @@ from typing import Annotated, Literal, NotRequired
 from langchain.agents import AgentState
 
 from ai_call_center.agents.specs import Welcome
+from ai_call_center.decisions import Decider, Decision
 from ai_call_center.guardrails import TransferHours
 from ai_call_center.leads import LeadStore, NumberInfo
 from ai_call_center.notify import Notifier
@@ -47,6 +48,8 @@ class CallContext:
     # "caller: ..." and "agent: ..." lines of the call so far. The transfer check reads the caller's own words from it.
     transcript: Callable[[], list[str]] | None = None
     transfer_question_asked: bool = False  # the agent was told to ask "connect now, or take a message?"
+    decider: Decider | None = None  # Jev reads a transfer request for its meaning; None = the word list decides alone
+    decisions: list[Decision] = field(default_factory=list)  # Jev's answers on this call, for the call stats
     message_confirm_asked: bool = False  # the agent was told to say the message back before it is saved
     held_message: dict[str, str] | None = None  # a save_lead call that waits for the caller's yes; saved at the end of the call if no yes came
     caller_lookup: str = ""  # public carrier data for the number, for every agent's prompt

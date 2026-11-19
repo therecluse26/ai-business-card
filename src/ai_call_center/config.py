@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr = SecretStr("")
 
+    # Jev, the decision model of TypeSafe AI (see decisions.py). It reads a caller's request for a live
+    # transfer for its meaning, and gives the probability of a yes. Empty key = the word list decides.
+    typesafe_api_key: SecretStr = SecretStr("")
+    jev_model: str = "jev-latest"
+    jev_timeout_ms: int = 500  # after this the word list's answer stands; measure with `uv run check-jev`
+
     # Telnyx (M2+). Run `bash scripts/telnyx-setup.sh` to fill these in.
     telnyx_api_key: SecretStr = SecretStr("")
     telnyx_public_key: str = ""

@@ -7,6 +7,8 @@ import os
 # No test sends a LangSmith trace. This runs before ai_call_center imports config, whose load_dotenv()
 # never overrides a variable that is already set, so the owner's .env cannot turn tracing on here.
 os.environ["LANGSMITH_TRACING"] = "false"
+# No test asks Jev over the network, for the same reason. A test that needs Jev passes a fake decider.
+os.environ["TYPESAFE_API_KEY"] = ""
 
 from collections.abc import Iterator, Sequence
 from typing import Any

@@ -24,6 +24,7 @@ dependencies = [
     "pydantic-settings>=2.16.3",
     "python-dotenv>=1.2.4",
     "telnyx[webhooks]>=4.191.0",
+    "typesafe-sdk>=0.7.5",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -33,6 +34,7 @@ serve = "ai_call_center.app:main"
 setup-transfer = "ai_call_center.telephony.outbound:main"
 test-email = "ai_call_center.test_email:main"
 check-nova = "ai_call_center.check_nova:main"
+check-jev = "ai_call_center.check_jev:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]

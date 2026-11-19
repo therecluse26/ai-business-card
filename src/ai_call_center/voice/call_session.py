@@ -70,6 +70,7 @@ from ai_call_center.callers import (
     transcript_lines,
 )
 from ai_call_center.config import Settings
+from ai_call_center.decisions import default_decider
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.graph.state import CallContext
@@ -663,6 +664,7 @@ class CallSession:
             transfer_note_id=resume.transfer_note_id if resume else 0,
             refused_transfer=resume.refused_transfer if resume else None,
             transfer_unavailable=transfers.unavailable,
+            decider=default_decider(self.settings),
             caller_line_type=info.line_type if info else "",
             texter=self.telephony if self.settings.sms_enabled else None,
             portfolio_url=self.settings.portfolio_url,
@@ -979,10 +981,16 @@ class CallSession:
             # A transfer rings the owner's phone, so the caller's own words must ask for it.
             # The provider's transcript of the last turn can arrive after the tool call: wait for it briefly.
             waited = 0.0
+            if ctx.decider is not None and not ctx.forgotten and not ctx.transfer_question_asked and not asked_for_the_owner(ctx.transcript()):
+                # No match in the word list yet, so the loop below waits for the transcript. Open Jev's
+                # connection during that wait. On a match there is no wait, and the question opens it.
+                warm_task = asyncio.create_task(ctx.decider.warm())
+                background.add(warm_task)
+                warm_task.add_done_callback(background.discard)
             while not ctx.transfer_question_asked and not asked_for_the_owner(ctx.transcript()) and waited < TRANSCRIPT_WAIT_SECS:
                 await asyncio.sleep(0.1)
                 waited += 0.1
-            if question := transfer_question(ctx, ctx.transcript()):
+            if question := await transfer_question(ctx, ctx.transcript()):
                 log.info("call %s: transfer held back; the caller did not ask for a live call", self.call_control_id)
                 await params.result_callback(question)
                 return

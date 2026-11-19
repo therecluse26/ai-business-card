@@ -158,7 +158,53 @@ the owner", "email the owner", and "have the owner call me" are messages: the co
 message with `save_lead`, and a saved message never leads to a transfer. Before a transfer, the server
 reads the caller's last four turns in the transcript. If none of them asks to speak, talk, or be
 connected (`LIVE_REQUEST` in `graph/tools.py`), no transfer is made and nothing is saved. The agent then
-asks one question: a message, or a live connection. The answer decides.
+asks one question: a message, or a live connection. The answer decides. This word list is the fallback.
+With a Jev key, a decision model reads the caller's words for their meaning: see the next section.
+
+### A decision model reads the caller's request (Jev)
+
+`LIVE_REQUEST` is a word list, and a word list reads words, not meaning. It fails in two directions:
+
+- "Is he around? I'd love a quick word with him" asks for a live call, and holds none of the words.
+- "Have him call me back. I can't talk right now" asks for a message, and holds the word "talk".
+
+With `TYPESAFE_API_KEY` set, Jev decides, and the word list is only the fallback. Jev is the decision model
+of TypeSafe AI (`decisions.py`). It writes no text. It answers one typed yes or no question with the
+probability of a yes.
+
+1. The server sends Jev the end of the call, from the caller's fourth-last turn on, and one question:
+   "Did the caller ask, in their own words, to speak with the owner on this call?"
+   The request also says whose business card this is, so Jev knows who "him" is.
+2. The probability decides (`LIVE_CALL_YES` and `LIVE_CALL_NO` in `graph/tools.py`):
+
+| Probability | What happens |
+|---|---|
+| 0.8 or more | The transfer goes ahead. |
+| Above 0.3, under 0.8 | No transfer. The agent asks one question: a message, or a live connection. |
+| 0.3 or less | No transfer. The agent takes a message. |
+
+3. With no decision, the word list decides, as it does without a key.
+
+- Jev can never stop a call. After `JEV_TIMEOUT_MS` (500), or on any error, there is no decision. The request
+  has no retry.
+- The yes limit is 0.8, above the 0.7 that TypeSafe gives as a start, because a wrong yes rings the owner's phone.
+- A wrong no costs one question: the agent asks, and the caller's answer lets the transfer go ahead.
+- The time: every first transfer request waits for Jev's answer, at most `JEV_TIMEOUT_MS`. When the word
+  list has no match, the handler already waits 0.8 s for the transcript of the caller's last turn, and the
+  server opens the connection to Jev during that wait.
+- A caller who only says yes to the agent's offer has not asked in their own words. The question says so.
+- A caller who asked to be forgotten is not sent to Jev. The word list decides for that caller.
+- The log line is `Jev read the transfer request: 0.93 in 212 ms (jev-1.14.0; word list: miss): the transfer goes ahead`.
+  It names the word list's answer too, so the log shows each case where the two differ.
+  `get_call_stats` gives the tour agent the probability and the time, so it can say them on the call.
+- `uv run check-jev` sends 16 made-up samples and prints each probability and time. Run it after you
+  set the key, and after each change to the question.
+- Measured on 2026-11-19 with `jev-latest`, 16 samples: each request for a live call got 0.96 or more, and
+  each other line got 0.09 or less. No sample came near a limit. A request took 71 to 165 ms on an open
+  connection. The first request opens the connection, and took 141 to 377 ms in four runs.
+- Context decides the result. With no line that names the owner, "Can I speak to him?" got 0.74, under the
+  yes limit. With that line it got 0.97. So `conversation_state` always sends it.
+- Not measured: a real call. The samples are short and clean, and a real transcript is not.
 
 How a transfer runs (`telephony/transfers.py`):
 
@@ -525,6 +571,8 @@ src/ai_call_center/
   notify.py                      lead emails to the owner over SMTP
   writing.py                     RAG over the owner's posts: RSS feed, passages, hybrid search, saved vectors
   names.py                       same_person: does a spoken first name match a name on record (spelling, short form, sound)
+  decisions.py                   Jev, a decision model: the probability that a caller asked for a live call, when the word list missed it
+  check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
   test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
   check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests
