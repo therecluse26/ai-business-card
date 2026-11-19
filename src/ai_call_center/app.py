@@ -19,6 +19,7 @@ from ai_call_center.leads import LeadStore
 from ai_call_center.telephony import media, webhooks
 from ai_call_center.telephony.hold_audio import ringback_wav
 from ai_call_center.telephony.lookup import CallerLookup
+from ai_call_center.telephony.stream_tokens import StreamTokens
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
 from ai_call_center.telephony.transfers import TransferManager
 from ai_call_center.voice.health import ProviderHealth
@@ -91,6 +92,8 @@ async def lifespan(app: FastAPI):
     )
     app.state.handled = webhooks.HandledCalls()  # so a repeated call.initiated webhook does not answer a call twice
     app.state.health = ProviderHealth()  # which voice providers are answering; shared by all calls
+    # The media endpoint takes a stream only with a one-time token that this server gave Telnyx for a call.
+    app.state.stream_tokens = StreamTokens(settings.media_stream_url)
     app.state.transfers = TransferManager(
         app.state.telephony,
         stream_url=settings.media_stream_url,
@@ -99,13 +102,14 @@ async def lifespan(app: FastAPI):
         screen=settings.transfer_screening and bool(settings.telnyx_app_id),  # the call to the owner needs the app id
         hold_audio_url=settings.hold_audio_url,
         accept_secs=settings.transfer_accept_secs,
+        tokens=app.state.stream_tokens,
     )
     # The two checks of the Telnyx application take about 0.7 s. They run while the server already takes
     # calls, because a call can be the reason the server started. A call waits for them only where it
     # needs the result (`TransferManager.settled`).
     checks = asyncio.create_task(check_telnyx_application(app.state.telephony, app.state.transfers, settings), name="telnyx-start-checks")
     app.state.transfers.checked = checks
-    log.info("ready: webhooks at %s, media at %s, number %s", settings.webhook_url, settings.media_stream_url, settings.telnyx_phone_number or "(none)")
+    log.info("ready: webhooks at %s, media at %s/<token>, number %s", settings.webhook_url, settings.media_stream_url, settings.telnyx_phone_number or "(none)")
     yield
     checks.cancel()
 

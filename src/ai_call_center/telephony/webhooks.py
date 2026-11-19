@@ -11,6 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 from ai_call_center.config import Settings, get_settings
 from ai_call_center.guardrails import CallGuard
 from ai_call_center.telephony.lookup import CallerLookup
+from ai_call_center.telephony.stream_tokens import StreamTokens
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony, decode_state
 from ai_call_center.telephony.transfers import TransferManager
 
@@ -52,6 +53,7 @@ async def handle_event(
     guard: CallGuard | None = None,
     transfers: TransferManager | None = None,
     handled: HandledCalls | None = None,
+    tokens: StreamTokens | None = None,
 ) -> None:
     event_type = data.get("event_type")
     payload = data.get("payload") or {}
@@ -77,7 +79,9 @@ async def handle_event(
                 return
             if lookups is not None:
                 lookups.start(caller)  # runs while we answer; the session reads the result
-            await telephony.answer_with_stream(ccid, stream_url=settings.media_stream_url)
+            # The token in the URL lets the media endpoint know this stream: it is for a call that passed the guard.
+            stream_url = tokens.url_for(ccid) if tokens is not None else settings.media_stream_url
+            await telephony.answer_with_stream(ccid, stream_url=stream_url)
         except Exception:
             if handled is not None:
                 handled.forget(ccid)  # the call got no answer, so a repeat of the webhook may try again
@@ -106,5 +110,5 @@ async def telnyx_webhook(request: Request, background: BackgroundTasks) -> Respo
     except Exception as exc:  # noqa: BLE001 - any failure here means "not from Telnyx"
         log.warning("rejected webhook: %s", exc)
         return Response(status_code=400)
-    background.add_task(handle_event, data, settings, telephony, getattr(request.app.state, "lookups", None), getattr(request.app.state, "guard", None), getattr(request.app.state, "transfers", None), getattr(request.app.state, "handled", None))
+    background.add_task(handle_event, data, settings, telephony, getattr(request.app.state, "lookups", None), getattr(request.app.state, "guard", None), getattr(request.app.state, "transfers", None), getattr(request.app.state, "handled", None), getattr(request.app.state, "stream_tokens", None))
     return Response(status_code=200)

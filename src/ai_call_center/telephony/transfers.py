@@ -37,6 +37,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ai_call_center.telephony.stream_tokens import StreamTokens
+
 log = logging.getLogger(__name__)
 
 APOLOGY = "Sorry, I could not connect the call. The owner will follow up with you. Goodbye."
@@ -124,9 +126,11 @@ class TransferManager:
         screen: bool = False,
         hold_audio_url: str = "",
         accept_secs: int = 6,
+        tokens: StreamTokens | None = None,
     ) -> None:
         self.telephony = telephony
         self.stream_url = stream_url
+        self.tokens = tokens  # with tokens, each restarted stream gets a URL with its own one-time token
         self.ring_secs = ring_secs
         self.detect_voicemail = detect_voicemail
         self.screen = screen
@@ -141,6 +145,9 @@ class TransferManager:
         self.restart_attempts = 3
         self.restart_retry_secs = 0.4
         self._tasks: set[asyncio.Task] = set()
+
+    def _stream_url_for(self, call_control_id: str) -> str:
+        return self.tokens.url_for(call_control_id) if self.tokens is not None else self.stream_url
 
     async def settled(self, timeout: float = 3.0) -> None:
         """Wait until `unavailable` is final. The server checks the Telnyx application while it already takes
@@ -174,7 +181,7 @@ class TransferManager:
         # Telnyx can refuse a start while the old stream is still closing, so try a few times.
         for attempt in range(1, self.restart_attempts + 1):
             try:
-                await self.telephony.start_streaming(call_control_id, stream_url=self.stream_url)
+                await self.telephony.start_streaming(call_control_id, stream_url=self._stream_url_for(call_control_id))
                 log.info("call %s: media stream restarted (%s)", call_control_id, snapshot.reason)
                 return
             except Exception as exc:  # noqa: BLE001
@@ -371,7 +378,7 @@ class TransferManager:
         pending.snapshot.reason = reason
         self._resumes[call_control_id] = pending.snapshot
         try:
-            await self.telephony.start_streaming(call_control_id, stream_url=self.stream_url)
+            await self.telephony.start_streaming(call_control_id, stream_url=self._stream_url_for(call_control_id))
         except Exception as exc:  # noqa: BLE001
             self._resumes.pop(call_control_id, None)
             log.warning("call %s: could not restart the media stream (%s); using the spoken apology", call_control_id, exc)

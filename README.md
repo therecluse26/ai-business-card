@@ -63,7 +63,12 @@ At startup the server sets the Telnyx Voice API application's webhook URL to `PU
 This check, and the check for an outbound voice profile, run in the background: the server takes calls
 about 0.3 s after its imports end, and the first call waits for the checks only if they are still running.
 Telnyx sends call events there; the server answers each call with bidirectional PCMU media streaming
-to `wss://.../media`, where Pipecat bridges the audio to the active agent's voice leg.
+to `wss://.../media/<token>`, where Pipecat bridges the audio to the active agent's voice leg.
+
+The token protects the media endpoint. A webhook carries Telnyx's signature, but a media stream carries
+none. So the server puts a random one-time token in each stream URL that it gives Telnyx, and the media
+endpoint refuses a stream with no valid token (`telephony/stream_tokens.py`). Without this, anyone could
+open a paid AI session with no phone call, outside the guardrails.
 
 ### How a voice call runs (M4)
 
