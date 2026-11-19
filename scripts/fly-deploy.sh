@@ -21,10 +21,10 @@ LABEL="${1:-manual-$(date -u +%Y%m%d%H%M%S)}"
 APP="$(sed -n 's/^app = "\(.*\)".*/\1/p' fly.toml)"
 IMAGE="registry.fly.io/$APP:$LABEL"
 
-echo "== 1/3 Build the image $IMAGE. The running server is not touched."
+echo "== 1/4 Build the image $IMAGE. The running server is not touched."
 flyctl deploy --build-only --push --image-label "$LABEL"
 
-echo "== 2/3 Wait until no call is in progress."
+echo "== 2/4 Wait until no call is in progress."
 states() {
     flyctl machine list --json | python3 -c 'import json, sys; print(" ".join(m["state"] for m in json.load(sys.stdin)))'
 }
@@ -57,5 +57,13 @@ while :; do
     sleep 15
 done
 
-echo "== 3/3 Deploy $IMAGE."
+echo "== 3/4 Deploy $IMAGE."
 flyctl deploy --image "$IMAGE" --ha=false
+
+# A deploy leaves a machine that slept in the state "stopped". The next call would then wait for a full
+# start of the server (about 9 s). So start it now: the server starts with no caller on the line, and
+# Fly's proxy suspends it again after some minutes with no traffic. A wake from that sleep is fast.
+echo "== 4/4 Start the machine, so the next call does not wait for the server's start."
+flyctl machine list --json | python3 -c 'import json, sys; print("\n".join(m["id"] for m in json.load(sys.stdin) if m["state"] != "started"))' | while read -r id; do
+    [ -n "$id" ] && flyctl machine start "$id"
+done

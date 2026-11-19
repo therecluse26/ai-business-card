@@ -137,6 +137,8 @@ each request with its path. Tell Claude what the log shows.
 2. It builds the new image. The running server is not touched.
 3. It waits until the machine sleeps, so no call is in progress. It checks each 15 seconds.
 4. It deploys.
+5. It starts the machine. A deploy leaves a sleeping machine stopped, and the next call would then wait
+   about 9 s for the server's start. After the start, the machine sleeps again by itself.
 
 The workflow runs only when the server's files change: `src/`, `Dockerfile`, `fly.toml`,
 `pyproject.toml`, `uv.lock`, `profile.md`. A change to the docs or the tests deploys nothing.
@@ -155,8 +157,8 @@ nix shell nixpkgs#flyctl -c bash scripts/fly-deploy.sh
 Know these effects of each deploy:
 
 - **The phone line moves to Fly.io.** If the laptop has the line for a test, a push to `main` takes it away.
-- **The first call after a deploy can meet a cold start.** That is about 9 s. The machine sleeps about
-  2 minutes later, and a wake from the sleep takes 0.26 s.
+- **A call in the first seconds after a deploy can meet the server's start.** That is about 9 s. After
+  2 to 7 minutes with no traffic the machine sleeps, and a wake from the sleep takes 0.26 s.
 - **A call can still be cut in a gap of a few seconds,** between the last check and the machine's stop.
 - **The settings are not deployed.** `.env` is not in the repository. After a change to `.env`, run
   `bash scripts/fly-secrets.sh`. It restarts the machine at once, with no wait for a call.
