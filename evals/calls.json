@@ -64,5 +64,15 @@
       "Goodbye."
     ],
     "expect": {"forgotten": true, "outcome": "none"}
+  },
+  {
+    "id": "question-with-name",
+    "about": "The caller gives a name and asks a question in the same turn. The question must not be lost under the welcome.",
+    "caller": [
+      "Hi, I'm Morgan Ellery. How long has this call been running so far?",
+      "Okay. And which voice providers have spoken on it?",
+      "Thanks, that is all. Goodbye."
+    ],
+    "expect": {"visits": ["tour"], "outcome": "none"}
   }
 ]

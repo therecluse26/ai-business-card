@@ -34,6 +34,10 @@ def _say(words: str) -> str:
     return f'Say exactly these words to the caller, and nothing else: "{words}"'
 
 
+# A caller may ask a question in the same turn as their name. The welcome words must not bury it.
+ASKED = "If the caller also asked for something, answer it or route them, and do not say the words below. Otherwise: "
+
+
 def identify(ctx: CallContext, name: str) -> str:
     """The caller said who they are. Code compares the name with the names on record for this number;
     only on a match does the agent get that person's notes. Shared by text and voice modes."""
@@ -54,13 +58,13 @@ def identify(ctx: CallContext, name: str) -> str:
     if memory is None:
         ctx.caller_name = name
         words = welcome.new_caller(name) if welcome else ""
-        return f"{_say(words) if words else f'Greet {name} by name, and ask what they would like to do.'}\n{SETTLED}"
+        return f"{ASKED + _say(words) if words else f'Greet {name} by name, and ask what they would like to do.'}\n{SETTLED}"
     ctx.identity_confirmed = True
     ctx.returning_name = memory.name
     ctx.caller_name = memory.name  # the spelling from their earlier call, which they confirmed then
     ctx.caller_history = history_text(memory)
     words = welcome.returning_caller(name, memory.topic) if welcome else ""
-    return f"{_say(words) if words else f'Welcome {name} back, and ask what they would like to do.'}\n\n{ctx.caller_history}\n{SETTLED}"
+    return f"{ASKED + _say(words) if words else f'Welcome {name} back, and ask what they would like to do.'}\n\n{ctx.caller_history}\n{SETTLED}"
 
 
 def forget(ctx: CallContext) -> tuple[str, list[str]]:
