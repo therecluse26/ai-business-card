@@ -1,0 +1,36 @@
+# A pull request runs the unit tests before a person merges it. A merge to main deploys (fly-deploy.yml).
+#
+# The run tests the pull request merged into main as main is now, not the branch alone.
+#
+# The fix job (improve.yml) opens its pull request with the token of its own run. GitHub starts no
+# workflow for an event that such a token made, so "opened" starts no run for that pull request.
+# A fix that the scorer does not show is a draft. When a person marks the draft as ready for review,
+# that person made the event, and the tests run then. A draft cannot merge, so the tests run before the merge.
+# For a pull request that the fix job opened as ready, a person starts the run: close it and open it again.
+#
+# The run has no secret, and its token can only read. The tests make no model request.
+name: Test a pull request
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# One run for each pull request. A new commit stops the run of the commit before it.
+concurrency:
+  group: test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - run: uv run pytest -q
