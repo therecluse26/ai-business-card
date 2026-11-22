@@ -207,6 +207,12 @@ Verified on 2026-11-19, on the real host:
 - A call wakes a suspended machine with no error. The machine resumed in 0.26 s, and the greeting
   started 2.4 s after the call reached Fly.io. A call to the awake machine took 3.1 s for the same steps.
 
+- The deploy on a push works (run 44576915874). The tests took 23 s and the image build 15 s. A call of
+  571 s was in progress: the deploy waited 9 minutes 15 seconds and did not cut it. The machine
+  suspended 1 minute 48 seconds after that call ended, and the server was `ready` 16 s later.
+- The media endpoint refuses a stream with no valid token: `/media` and `/media/a-guess` get HTTP 403.
+  A real call gets its stream on `/media/<token>`.
+
 Still open:
 
 - How many requests from bots wake the machine.

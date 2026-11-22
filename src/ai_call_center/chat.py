@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import select
 import sys
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
@@ -21,11 +22,15 @@ from ai_call_center.agents.specs import (
     companies_phrase,
     greeting_tip,
     greeting_words,
+    load_profile,
     web_address,
 )
-from ai_call_center.callers import summarize_call
+from ai_call_center.analytics import MESSAGE, NO_OUTCOME, TEXT, TRANSFER, CallAnalytics, call_day, forget_call, harness_version, record_call
+from ai_call_center.callers import summarize_call, transcript_lines
 from ai_call_center.config import get_settings
+from ai_call_center.decision_grader import default_decision_grader
 from ai_call_center.decisions import default_decider
+from ai_call_center.grading import describe_scores
 from ai_call_center.graph.build import build_graph, default_model, default_specs
 from ai_call_center.graph.state import CallContext
 from ai_call_center.graph.tools import (
@@ -158,9 +163,11 @@ async def run(caller_number: str = "+10000000000") -> None:
         if not text:
             text = "[silence]"
     visited = ["classifier", *handoffs]
+    transferred = bool(telephony.transfers)
     if ctx.forgotten:
         await note_refused_transfer_at_call_end(ctx, lead_saved=message_saved(ctx), visited=visited)
         store.finish_call(call_id, agents=visited, summary="")
+        forget_call(store.connection, call_id)
         print("\n[the caller asked to be forgotten: no summary saved]")
     elif result_messages:
         summary = await summarize_call(result_messages, init_chat_model(settings.summary_model), config=tracing.run_config(call_id, "call-summary"))
@@ -170,6 +177,31 @@ async def run(caller_number: str = "+10000000000") -> None:
             print(f"\n[call summary saved for {caller_number}: {summary.summary} (topic: {summary.topic or '-'}, interest: {summary.interest})]")
         if await send_warm_lead_at_call_end(ctx, summary, lead_saved=bool(noted) or message_saved(ctx), visited=visited):
             print("[warm lead email sent: the caller talked about a project or a role and left no message]")
+        # The grader scores the call, as it does after a phone call. A call from this simulator is marked as a test.
+        try:
+            record = await record_call(
+                store.connection,
+                CallAnalytics(
+                    call_id=call_id,
+                    day=call_day(ctx.started_at),
+                    channel=TEXT,
+                    version=harness_version(settings.harness_version),
+                    test=True,
+                    duration_secs=int((datetime.now(UTC) - ctx.started_at).total_seconds()),
+                    agents=visited,
+                    outcome=TRANSFER if transferred else MESSAGE if message_saved(ctx) else NO_OUTCOME,
+                ),
+                transcript_lines(result_messages),
+                summary_tries=summary.tries,
+                profile=load_profile(settings.profile_path).full,
+                owner=settings.owner_name,
+                grader=init_chat_model(settings.grader_model) if settings.grader_model else None,
+                config=tracing.run_config(call_id, "call-grade"),
+                decider=None if settings.grader_model else default_decision_grader(settings),  # the text mode has no audio: the grader model is first (see score.py)
+            )
+            print(f"[grade: {describe_scores(record.scores)}]")
+        except Exception as exc:  # noqa: BLE001 - the grade must not hide the end of the session
+            print(f"[the call was not graded: {type(exc).__name__}: {exc}]")
     leads = ctx.leads.all()
     print(f"\n[hung up] active agent: {active}; leads saved this process: {len(leads)}")
     if isinstance(notifier, RecordingNotifier) and notifier.sent:

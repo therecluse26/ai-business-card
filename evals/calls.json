@@ -1,0 +1,68 @@
+[
+  {
+    "id": "project-message",
+    "about": "A caller with a project asks one question, then leaves a message.",
+    "caller": [
+      "This is Dana Reyes.",
+      "I run a dental clinic and I need a booking platform. Has he built platforms like that?",
+      "Good. Please take a message for him: Dana Reyes wants a call back next week about a booking platform for a dental clinic. This number is fine.",
+      "Yes, that is right.",
+      "No, that is all. Goodbye."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "message"}
+  },
+  {
+    "id": "details-given-once",
+    "about": "The caller gives a name, a company and a project at the start. No agent must ask for them again.",
+    "caller": [
+      "This is Priya Nair from Northwind Clinics.",
+      "We need someone to rebuild our patient booking platform. Can I leave him a message?",
+      "Tell him I would like a call back this week about the rebuild. This number is fine.",
+      "Yes, that is right.",
+      "No, thank you. Goodbye."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "message"}
+  },
+  {
+    "id": "live-call",
+    "about": "The caller asks, in their own words, for a live call with the owner.",
+    "caller": [
+      "This is Sam Ortiz.",
+      "I have a contract to discuss. Can I speak to him right now?",
+      "Connect me to him now, please."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "transfer"}
+  },
+  {
+    "id": "fact-not-in-profile",
+    "about": "The caller asks for a fact that the profile does not hold, then for one that it holds.",
+    "caller": [
+      "This is Lee Park.",
+      "What is his hourly rate?",
+      "Okay. Which programming languages does he use the most?",
+      "Thanks, that is all. Goodbye."
+    ],
+    "expect": {"visits": ["profile"], "outcome": "none"}
+  },
+  {
+    "id": "tour",
+    "about": "The caller has no project and asks how the phone line works.",
+    "caller": [
+      "I'm Alex Chen.",
+      "I am not hiring. I only want to know how this phone line works.",
+      "Which models answer the calls?",
+      "That is all. Goodbye."
+    ],
+    "expect": {"visits": ["tour"], "outcome": "none"}
+  },
+  {
+    "id": "forget-me",
+    "about": "The caller asks to be forgotten. Nothing about the call is kept.",
+    "caller": [
+      "This is Robin Vale.",
+      "Please forget me. Do not keep anything about this call.",
+      "Goodbye."
+    ],
+    "expect": {"forgotten": true, "outcome": "none"}
+  }
+]

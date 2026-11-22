@@ -9,6 +9,11 @@ import os
 os.environ["LANGSMITH_TRACING"] = "false"
 # No test asks Jev over the network, for the same reason. A test that needs Jev passes a fake decider.
 os.environ["TYPESAFE_API_KEY"] = ""
+# No test uploads the public report. A test that needs the upload passes its own settings and a fake sender.
+os.environ["REPORT_R2_BUCKET"] = ""
+# No test starts a job on GitHub, for the same reason. A test that needs a fix request passes its own settings and a fake sender.
+os.environ["IMPROVE_GITHUB_TOKEN"] = ""
+os.environ["GRADER_DECISION_MODEL"] = ""  # no test sends a call to the decision grader
 
 from collections.abc import Iterator, Sequence
 from typing import Any

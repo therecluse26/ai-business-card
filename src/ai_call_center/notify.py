@@ -44,6 +44,7 @@ class CallDetails:
     line: str = ""  # from the number lookup, for example "mobile on Verizon"
     area: str = ""  # from the number lookup, for example "Akron, OH"
     registered_name: str = ""  # from the number lookup: the account holder, not always the caller
+    voice: str = ""  # how the caller sounded, from the voice readings (caller_voice.voice_summary)
 
 
 @runtime_checkable
@@ -107,6 +108,8 @@ def _rows(lead: Lead, row_id: int, details: CallDetails) -> tuple[list[tuple[str
         call.append(("Spoke with", ", ".join(f"{a} agent" for a in details.agents), ""))
     if _has(details.notes):
         call.append(("Also on this call", _one_line(details.notes), ""))
+    if _has(details.voice):
+        call.append(("Caller's voice", _one_line(details.voice), ""))
     if details.confirmed_returning:
         call.append(("Returning caller", "Yes. The name they gave matched an earlier caller on this number.", ""))
     if details.earlier_calls:

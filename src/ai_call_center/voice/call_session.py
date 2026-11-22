@@ -17,6 +17,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from functools import cached_property
 
 from fastapi import WebSocket
 from langchain.chat_models import init_chat_model
@@ -60,8 +62,11 @@ from ai_call_center.agents.specs import (
     companies_phrase,
     greeting_tip,
     greeting_words,
+    load_profile,
     web_address,
 )
+from ai_call_center.analytics import MESSAGE, NO_OUTCOME, TRANSFER, VOICE, CallAnalytics, call_day, forget_call, harness_version, record_call
+from ai_call_center.caller_voice import VoiceReading, keep_reading
 from ai_call_center.callers import (
     UNKNOWN_NUMBERS,
     CallSummary,
@@ -70,10 +75,14 @@ from ai_call_center.callers import (
     transcript_lines,
 )
 from ai_call_center.config import Settings
+from ai_call_center.decision_grader import default_decision_grader
 from ai_call_center.decisions import default_decider
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.graph.state import CallContext
+from ai_call_center.grading import describe_scores, differences, grade_call
+from ai_call_center.improve import request_fixes
+from ai_call_center.publish import publish_report
 from ai_call_center.graph.tools import (
     CALL_NOT_ENDED,
     SAVE_NOW,
@@ -109,6 +118,7 @@ from ai_call_center.telephony.transfers import (
     TransferManager,
     screening_prompt,
 )
+from ai_call_center.voice.call_audio import call_audio, recorder
 from ai_call_center.voice.caller_audio import CallerAudioFile, caller_audio_path
 from ai_call_center.voice.cutoff import CallerSoundWatch
 from ai_call_center.voice.health import ProviderHealth
@@ -126,9 +136,11 @@ from ai_call_center.voice.legs import (
     tell_now,
 )
 from ai_call_center.voice.leveler import VoiceLeveler
+from ai_call_center.voice.respell import Respelling
 from ai_call_center.voice.spoken_tool import SpokenToolWatch
 from ai_call_center.voice.stats import CallStats
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
+from ai_call_center.voice.voice_reader import CallerVoiceReader, FrustrationNote, default_voice_model
 from ai_call_center.writing import default_library, search_result
 
 log = logging.getLogger(__name__)
@@ -565,16 +577,21 @@ class CallSession:
     resume: Snapshot | None = None  # set when the stream restarts: after a transfer that did not connect, or to change provider
     health: ProviderHealth | None = None  # which voice providers are answering; shared by all calls
 
+    @cached_property
+    def respell(self) -> Respelling:
+        """The words that the voice models read in another spelling (RESPELLINGS), so that they say them right."""
+        return Respelling.parse(self.settings.respellings)
+
     @property
     def call_control_id(self) -> str:
         return self.call_data["call_id"]
 
-    async def _finish_call(self, store: LeadStore, ctx: CallContext, messages: list, *, visited: list[str], transferred: bool) -> None:
+    async def _finish_call(self, store: LeadStore, ctx: CallContext, messages: list, *, visited: list[str], transferred: bool) -> CallSummary:
         """The summary model reads the whole call. Its summary is what the next call from this number sees.
         Its note for the owner goes into the end-of-call email: a refused transfer with no message, or a
         warm lead. Either way the owner gets what the caller said, even when no agent saved it."""
         try:
-            summary = await summarize_call(messages, init_chat_model(self.settings.summary_model), config=tracing.run_config(self.call_control_id, "call-summary"))
+            summary = await summarize_call(self.respell.written_messages(messages), init_chat_model(self.settings.summary_model), config=tracing.run_config(self.call_control_id, "call-summary"))
         except Exception:
             log.exception("call %s: the call summary failed", self.call_control_id)
             summary = CallSummary()
@@ -591,12 +608,85 @@ class CallSession:
         except Exception:
             log.exception("call %s: could not save the call summary", self.call_control_id)
         if transferred:
-            return  # the owner is on the line with the caller, or the call comes back to an agent
+            return summary  # the owner is on the line with the caller, or the call comes back to an agent
         try:
             if await send_warm_lead_at_call_end(ctx, summary, lead_saved=noted or message_saved(ctx), visited=visited):
                 log.info("call %s: no message was saved; the owner got a warm lead email (%s)", self.call_control_id, summary.interest)
         except Exception:
             log.exception("call %s: could not send the warm lead email", self.call_control_id)
+        return summary
+
+    async def _record_analytics(self, ctx: CallContext, stats: CallStats, messages: list, *, visited: list[str], outcome: str, summary_tries: int) -> None:
+        """The grader scores the call, and the figures and the scores go to the analytics store (`analytics.py`).
+
+        A caller who asked to be forgotten gets no record. Nothing here can stop the end of a call: a failure is logged.
+        Then the public report is published again (`publish.py`), so the page shows this call.
+        Last, each failed rule starts the job on GitHub that proposes a fix (`improve.py`).
+
+        The decision grader hears the call audio (`voice/call_audio.py`). The audio is deleted here, graded or not.
+        After a transfer it stays for a short time: the call comes back when nobody answers."""
+        audio = call_audio.get(self.call_control_id)
+        try:
+            if ctx.forgotten:
+                audio = None
+                forget_call(self.settings.leads_db, self.call_control_id)  # a record from before a transfer that came back
+                await publish_report(self.settings)
+                return
+            try:
+                profile = load_profile(self.settings.profile_path).full
+            except OSError:
+                profile = ""
+            dollars, _ = stats.cost()
+            call = CallAnalytics(
+                call_id=self.call_control_id,
+                day=call_day(stats.started_at),
+                channel=VOICE,
+                version=harness_version(self.settings.harness_version),
+                test=ctx.caller_number == self.settings.owner_phone,
+                duration_secs=int((datetime.now(UTC) - stats.started_at).total_seconds()),
+                agents=visited,
+                outcome=outcome,
+                failovers=stats.failovers,
+                tokens_in=sum(usage.tokens_in for usage in stats.usage.values()),
+                tokens_out=sum(usage.tokens_out for usage in stats.usage.values()),
+                cost_usd=dollars,
+                answers=list(stats.answers),
+                handoff_secs=list(stats.handoffs),
+            )
+            lines = transcript_lines(self.respell.written_messages(messages))
+            grader = init_chat_model(self.settings.grader_model) if self.settings.grader_model else None
+            decider = default_decision_grader(self.settings)
+            record = await record_call(
+                self.settings.leads_db,
+                call,
+                lines,
+                summary_tries=summary_tries,
+                profile=profile,
+                owner=self.settings.owner_name,
+                grader=grader,
+                config=tracing.run_config(self.call_control_id, "call-grade"),
+                decider=decider,
+                audio=audio,
+            )
+            log.info("call %s: grade (version %s): %s", self.call_control_id, record.version, describe_scores(record.scores))
+            if record.readings:
+                log.info("call %s: how the call sounded: %s", self.call_control_id, ", ".join(f"{key} {value}" for key, value in record.readings.items()))
+            if self.settings.grader_compare and decider is not None and grader is not None:
+                # One more request, to the grader model. Its verdicts are for the log only; the record keeps the decision grader's.
+                read = await grade_call(lines, visited=visited, summary_tries=summary_tries, profile=profile, owner=self.settings.owner_name, model=grader)
+                differ = differences(record.scores, read)
+                log.info("call %s: the grader model against the decision grader: %s", self.call_control_id, "; ".join(differ) if differ else "the same verdict for each rule that both checked")
+            if not record.test:  # a test call is not in the report
+                await publish_report(self.settings)
+            # A failed rule starts the job that proposes a fix. A test call can start it too: it shows the loop with no caller.
+            await request_fixes(self.settings, self.settings.leads_db, record)
+        except Exception:
+            log.exception("call %s: could not record the analytics", self.call_control_id)
+        finally:
+            if outcome == TRANSFER and not ctx.forgotten:
+                call_audio.drop_later(self.call_control_id)
+            else:
+                call_audio.drop(self.call_control_id)
 
     async def run(self) -> None:
         started = time.monotonic()
@@ -618,7 +708,7 @@ class CallSession:
             store.reopen_call(self.call_control_id)
         # Every caller hears the same greeting, which asks who they are. No agent knows if the number
         # called before: identify_caller checks the name in code and gives the notes only on a match.
-        hello = greeting_words(self.settings.owner_name, self.settings.brand_name)
+        hello = self.respell.spoken(greeting_words(self.settings.owner_name, self.settings.brand_name))
         # Number lookup started at call.initiated; take the result if it is ready.
         info = await self.lookups.get(caller_number) if self.lookups else None
         lookup_block = lookup_text(info) if info is not None else ""
@@ -632,7 +722,7 @@ class CallSession:
         for name, spec in self.specs.items():
             service = build_leg(
                 spec,
-                instructions=voice_instructions(spec, spec.leg, lookup_block),
+                instructions=self.respell.instructions(voice_instructions(spec, spec.leg, lookup_block)),
                 settings=self.settings,
                 tools=tools_for_agent(spec, schemas),
             )
@@ -699,12 +789,13 @@ class CallSession:
             instruction = handoff_instruction(entry_agent, entry_platform, resume.caller_name) if resume.reason == HANDOFF_REROUTED else failover_instruction(entry_agent, entry_platform)
             first_messages = [*resume.messages, {"role": "developer", "content": instruction}]
         elif resume:
-            first_messages = [*after_transfer_attempt(resume.messages), {"role": "developer", "content": resume_message(resume.reason, self.settings.owner_name, state.lead_saved)}]
+            first_messages = [*after_transfer_attempt(resume.messages), {"role": "developer", "content": self.respell.spoken(resume_message(resume.reason, self.settings.owner_name, state.lead_saved))}]
         else:
             first_messages = [{"role": "developer", "content": connect_message(hello)}]
         context = LLMContext(messages=first_messages, tools=tools_for_agent(entry, schemas))
         caller_words = CallerWords()
-        ctx.transcript = lambda: caller_words.with_newest(transcript_lines(context.messages))
+        # The transcript is for code and for people (the transfer check, the lead email): it has the written words.
+        ctx.transcript = lambda: [self.respell.written(line) for line in caller_words.with_newest(transcript_lines(context.messages))]
         aggregators = LLMContextAggregatorPair(context)
         user_aggregator, assistant_aggregator = aggregators
         # LangSmith: this call's spans and the caller's words go to the call's thread. Off unless tracing is on.
@@ -749,7 +840,7 @@ class CallSession:
             task.add_done_callback(background.discard)
 
         def spoken_fallback() -> Fallback:
-            owner = self.settings.owner_name
+            owner = self.respell.spoken(self.settings.owner_name)
             can_transfer = self.settings.transfer_on_failure and bool(self.settings.owner_phone) and transfer_closed_message(ctx) is None
             return Fallback(
                 to=self.settings.owner_phone if can_transfer else "",
@@ -873,7 +964,27 @@ class CallSession:
             # Into the switcher, not the head of the pipeline: the active voice service must see
             # the message first and put it in its session. The assistant aggregator then adds it
             # to the shared context and asks for an answer once the agent has stopped speaking.
-            await switcher.queue_frame(LLMMessagesAppendFrame(messages=[{"role": "developer", "content": text}], run_llm=True))
+            await switcher.queue_frame(LLMMessagesAppendFrame(messages=[{"role": "developer", "content": self.respell.spoken(text)}], run_llm=True))
+
+        async def send_voice_note(text: str):
+            if not self.settings.voice_steer or state.ending or state.transfer_requested:
+                return None
+            return await tell_now(legs[state.active_agent].service, text)
+
+        frustration = FrustrationNote(send_voice_note, forget_note, current=lambda note: note.service is legs[state.active_agent].service)
+
+        async def on_voice_reading(reading: VoiceReading) -> None:
+            """The voice model read the caller's turn: keep the reading, and tell the agent when the caller sounds frustrated."""
+            keep_reading(ctx.voice_readings, reading)
+            log.info(
+                "call %s: the caller's voice in turn %d: %s %.2f, arousal %.2f, laughter %.2f, %.1f syllables/s, sarcasm %.2f, upset %.2f (%.1f s read in %d ms)",
+                self.call_control_id, reading.turn, reading.tone, reading.confidence, reading.arousal, reading.laughter, reading.speech_rate, reading.sarcasm, reading.upset, reading.seconds, reading.millis,
+            )  # fmt: skip
+            try:
+                if await frustration.on_reading(reading):
+                    log.info("call %s: the caller sounds frustrated in turn %d; the %s agent got a note", self.call_control_id, reading.turn, state.active_agent)
+            except Exception:
+                log.exception("call %s: could not send or remove the note about the caller's voice", self.call_control_id)
 
         save_nudged: set[int] = set()
 
@@ -896,7 +1007,10 @@ class CallSession:
             spawn(check())
 
         caller_audio = CallerAudioFile(caller_audio_path(self.settings.caller_audio_dir, self.call_control_id)) if self.settings.save_caller_audio else None
-        processors = [transport.input(), *([caller_audio] if caller_audio else []), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher, CallerSoundWatch(on_sound, drop_sound_note), SpokenToolWatch(self.specs, on_spoken_tool)]
+        # The voice reader hears each caller turn. It is off for a caller who asked to be forgotten.
+        voice_model = default_voice_model(self.settings)
+        voice_reader = CallerVoiceReader(voice_model, on_voice_reading, active=lambda: not ctx.forgotten) if voice_model else None
+        processors = [transport.input(), *([caller_audio] if caller_audio else []), *([voice_reader] if voice_reader else []), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher, CallerSoundWatch(on_sound, drop_sound_note), SpokenToolWatch(self.specs, on_spoken_tool)]
         if self.settings.voice_level_dbfs:
             # Every voice at one loudness, so a handoff does not sound like a volume change.
             voice_by_service = {id(vl.service): self.specs[name].voice or "" for name, vl in legs.items()}
@@ -907,9 +1021,12 @@ class CallSession:
                     seeds=VOICE_LEVELS_DBFS,
                 )
             )
-        pipeline = Pipeline([*processors, transport.output(), gate, AgentStoppedWatch(on_agent_stopped), assistant_aggregator])
+        # The decision grader hears the call after hangup, so both sides are recorded in memory (voice/call_audio.py).
+        hearing = default_decision_grader(self.settings)
+        recording = recorder(self.call_control_id, sample_rate=TELNYX_SAMPLE_RATE, forgotten=lambda: ctx.forgotten) if hearing is not None and hearing.hears and not ctx.forgotten else None
+        pipeline = Pipeline([*processors, transport.output(), *([recording] if recording else []), gate, AgentStoppedWatch(on_agent_stopped), assistant_aggregator])
 
-        stats.bind({vl.service.name: vl.leg for vl in legs.values()}, lambda: legs[state.active_agent].leg)
+        stats.bind({vl.service.name: vl.leg for vl in legs.values()}, lambda: legs[state.active_agent].leg, lambda: state.active_agent)
         worker = PipelineWorker(
             pipeline,
             params=PipelineParams(
@@ -953,6 +1070,11 @@ class CallSession:
 
         async def on_forget_caller(params: FunctionCallParams) -> None:
             result, _ = forget(ctx)
+            if ctx.forgotten:
+                # The call audio goes at once, and the rest of the call is not recorded.
+                if recording:
+                    await recording.stop_recording()
+                call_audio.drop(self.call_control_id)
             await params.result_callback(result)
 
         async def on_call_stats(params: FunctionCallParams) -> None:
@@ -1062,17 +1184,18 @@ class CallSession:
 
             return on_handoff
 
+        respelled = self.respell.tool  # a tool's result goes to the voice model respelled; its arguments come in as written
         for vl in legs.values():  # any service can become active, so each one knows every tool
-            vl.service.register_function("save_lead", on_save_lead)
-            vl.service.register_function("identify_caller", on_identify_caller)
-            vl.service.register_function("forget_caller", on_forget_caller)
-            vl.service.register_function("get_call_stats", on_call_stats)
-            vl.service.register_function("search_writing", on_search_writing)
-            vl.service.register_function("request_owner_transfer", on_transfer)
-            vl.service.register_function("text_portfolio_link", on_text_link)
-            vl.service.register_function("end_call", on_end_call)
+            vl.service.register_function("save_lead", respelled(on_save_lead))
+            vl.service.register_function("identify_caller", respelled(on_identify_caller))
+            vl.service.register_function("forget_caller", respelled(on_forget_caller))
+            vl.service.register_function("get_call_stats", respelled(on_call_stats))
+            vl.service.register_function("search_writing", respelled(on_search_writing))
+            vl.service.register_function("request_owner_transfer", respelled(on_transfer))
+            vl.service.register_function("text_portfolio_link", respelled(on_text_link))
+            vl.service.register_function("end_call", respelled(on_end_call))
             for name in self.specs:
-                vl.service.register_function(handoff_tool_name(name), make_handoff(name))
+                vl.service.register_function(handoff_tool_name(name), respelled(make_handoff(name)))
 
         async def enforce_time_limit() -> None:
             """Warn one minute before the limit, ask for a goodbye 15 s before it, then end the call."""
@@ -1115,6 +1238,7 @@ class CallSession:
             await runner.cancel()
 
         await runner.add_workers(worker)
+        summary_tries, message_left = 0, False
         try:
             await runner.run()
         finally:
@@ -1139,6 +1263,10 @@ class CallSession:
                         log.info("call %s: the call ended before the caller confirmed the message; saved as it is", self.call_control_id)
                 except Exception:
                     log.exception("call %s: could not save the held message", self.call_control_id)
+                try:
+                    message_left = message_saved(ctx)  # read now: the store closes below
+                except Exception:
+                    log.exception("call %s: could not read if a message was saved", self.call_control_id)
                 if ctx.forgotten:
                     # The caller asked to be forgotten: no transcript in the log, no summary, no warm-lead email.
                     # The call row stays, empty, for the per-number call limits.
@@ -1152,10 +1280,11 @@ class CallSession:
                     log.info("call %s: the caller asked to be forgotten; nothing about the call is kept", self.call_control_id)
                 else:
                     # What was said, as each agent heard it. Without it, a call that went wrong cannot be read afterwards.
-                    log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(context.messages)) or "(nothing)")
-                    await self._finish_call(store, ctx, context.messages, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer")
+                    log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(self.respell.written_messages(context.messages))) or "(nothing)")
+                    summary_tries = (await self._finish_call(store, ctx, context.messages, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer")).tries
             store.close()
         if state.end_reason == "failover":
+            call_audio.drop_later(self.call_control_id)  # the next media stream keeps it; with no next stream it is deleted
             return
         log.info("call %s: figures: %s", self.call_control_id, stats.describe())
         log.info(
@@ -1166,6 +1295,8 @@ class CallSession:
             state.lead_saved,
             state.transfer_requested,
         )
+        outcome = TRANSFER if state.end_reason == "transfer" else MESSAGE if message_left else NO_OUTCOME
+        await self._record_analytics(ctx, stats, context.messages, visited=[ENTRY_AGENT, *state.handoffs], outcome=outcome, summary_tries=summary_tries)
 
     async def _handoff(
         self,

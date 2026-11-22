@@ -23,6 +23,7 @@ from ai_call_center.telephony.stream_tokens import StreamTokens
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
 from ai_call_center.telephony.transfers import TransferManager
 from ai_call_center.voice.health import ProviderHealth
+from ai_call_center.voice.voice_reader import load_voice_model
 
 log = logging.getLogger(__name__)
 
@@ -109,9 +110,12 @@ async def lifespan(app: FastAPI):
     # needs the result (`TransferManager.settled`).
     checks = asyncio.create_task(check_telnyx_application(app.state.telephony, app.state.transfers, settings), name="telnyx-start-checks")
     app.state.transfers.checked = checks
+    # The voice model loads in a thread, about 2 s. A call that comes before the end of the load gets no voice readings.
+    voice_model = asyncio.create_task(load_voice_model(settings), name="voice-model-load")
     log.info("ready: webhooks at %s, media at %s/<token>, number %s", settings.webhook_url, settings.media_stream_url, settings.telnyx_phone_number or "(none)")
     yield
     checks.cancel()
+    voice_model.cancel()
 
 
 app = FastAPI(title="AI business card", lifespan=lifespan)

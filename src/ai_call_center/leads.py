@@ -107,6 +107,11 @@ class LeadStore:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         self._conn.commit()
 
+    @property
+    def connection(self) -> sqlite3.Connection:
+        """The open database, for another store that keeps its own tables in it (`analytics.AnalyticsStore`)."""
+        return self._conn
+
     # --- leads ---
 
     def save(self, lead: Lead) -> int:

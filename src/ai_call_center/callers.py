@@ -15,13 +15,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ai_call_center.leads import CallRecord, Lead, LeadStore, NumberInfo
 from ai_call_center.names import same_person
@@ -181,7 +181,19 @@ Return only the JSON object.
 Transcript:
 {transcript}"""
 
+SUMMARY_RETRY = """Your answer broke these rules:
+{faults}
+Write the JSON object again, with every rule kept. Return only the JSON object."""
+
 INTERESTS = ("project", "role", "none")
+SUMMARY_WORDS = 40  # the next call's agents read the summary, so its size is fixed
+SUMMARY_TRIES = 2  # the first answer, and one more when the check finds a fault
+CHECKED_FIELDS = ("summary", "topic", "owner_note", "timeline", "size")  # the texts that are stored, spoken, or emailed
+REMOVED = "[removed]"
+
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_PHONE = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+PHONE_DIGITS = 9  # a shorter run of digits is a date, a price, or a count
 
 
 @dataclass(frozen=True)
@@ -193,35 +205,109 @@ class CallSummary:
     owner_note: str = ""  # every specific about the work, for the owner's email; never spoken
     timeline: str = ""
     size: str = ""
+    tries: int = 0  # the answers the summary model gave: 0 = no summary was asked for, 2 = the check sent the first one back
 
 
 def _short(text: str, words: int) -> str:
     return " ".join(str(text or "").split()[:words]).strip(" .")
 
 
+def contact_details(text: str) -> list[str]:
+    """The email addresses and phone numbers that are written in a text."""
+    return [*_EMAIL.findall(text), *(run for run in _PHONE.findall(text) if sum(ch.isdigit() for ch in run) >= PHONE_DIGITS)]
+
+
+def without_contact_details(text: str) -> str:
+    for item in contact_details(text):
+        text = text.replace(item, REMOVED)
+    return " ".join(text.split())
+
+
+def _fit(text: str, words: int) -> str:
+    """The text in at most `words` words: whole sentences while they fit, else the first words."""
+    if len(text.split()) <= words:
+        return text
+    kept: list[str] = []
+    for sentence in re.split(r"(?<=[.?!])\s+", text):
+        if len(" ".join([*kept, sentence]).split()) > words:
+            break
+        kept.append(sentence)
+    return " ".join(kept) if kept else " ".join(text.split()[:words])
+
+
+def _parse_summary(text: str) -> CallSummary:
+    """The model's answer as a summary. Empty when the answer holds no JSON object."""
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    interest = str(data.get("interest", "none")).strip().lower()
+    return CallSummary(
+        summary=str(data.get("summary", "")).strip(),
+        caller_name=str(data.get("caller_name", "")).strip(),
+        # The topic is spoken to the caller next time. Code keeps it short, whatever the model wrote.
+        topic=_short(data.get("topic", ""), 8),
+        interest=interest if interest in INTERESTS else "none",
+        owner_note=" ".join(str(data.get("owner_note", "")).split()),
+        timeline=_short(data.get("timeline", ""), 12),
+        size=_short(data.get("size", ""), 12),
+    )
+
+
+def summary_faults(summary: CallSummary) -> list[str]:
+    """The rules of the summary prompt that this summary breaks. Code checks them; the prompt alone is a request, not a guard."""
+    faults: list[str] = []
+    if not summary.summary:
+        faults.append('- The "summary" is empty, or the answer was not a JSON object.')
+    if len(summary.summary.split()) > SUMMARY_WORDS:
+        faults.append(f'- The "summary" has more than {SUMMARY_WORDS} words.')
+    for key in CHECKED_FIELDS:
+        if contact_details(getattr(summary, key)):
+            faults.append(f'- The "{key}" holds an email address or a phone number.')
+    if any(ch.isdigit() for ch in summary.topic):
+        faults.append('- The "topic" holds a number.')
+    return faults
+
+
+def _repaired(summary: CallSummary) -> CallSummary:
+    """The summary with each remaining fault removed by code. After this, `summary_faults` finds only an empty summary."""
+    clean = {key: without_contact_details(getattr(summary, key)) for key in CHECKED_FIELDS}
+    clean["summary"] = _fit(clean["summary"], SUMMARY_WORDS)
+    if REMOVED in clean["topic"] or any(ch.isdigit() for ch in clean["topic"]):
+        clean["topic"] = ""  # a caller hears the topic on the next call; a cut topic is worse than none
+    return replace(summary, **clean)
+
+
 async def summarize_call(messages: list[Any], model: BaseChatModel, config: dict[str, Any] | None = None) -> CallSummary:
     """The call log entry. Empty when there is nothing to summarise or the model fails.
+
+    A check in code reads each answer (`summary_faults`). An answer with a fault goes back to the model
+    one time, with the faults named. What is still wrong after that, code removes: the summary is
+    stored, read by the next call's agents, and emailed, so a fault must not pass.
 
     `config` is the LangChain run config, for example the call's LangSmith thread (`tracing.run_config`)."""
     lines = transcript_lines(messages)
     if not any(line.startswith("caller:") for line in lines):
         return CallSummary()
+    asked: list[Any] = [HumanMessage(SUMMARY_PROMPT.format(transcript="\n".join(lines)))]
+    best, best_faults, tries = CallSummary(), [""], 0
     try:
-        reply = await model.ainvoke([HumanMessage(SUMMARY_PROMPT.format(transcript="\n".join(lines)))], config=config)
-        text = reply.text if isinstance(reply.text, str) else reply.text()
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        data = json.loads(match.group(0)) if match else {}
-        interest = str(data.get("interest", "none")).strip().lower()
-        return CallSummary(
-            summary=str(data.get("summary", "")).strip(),
-            caller_name=str(data.get("caller_name", "")).strip(),
-            # The topic is spoken to the caller next time. Code keeps it short, whatever the model wrote.
-            topic=_short(data.get("topic", ""), 8),
-            interest=interest if interest in INTERESTS else "none",
-            owner_note=" ".join(str(data.get("owner_note", "")).split()),
-            timeline=_short(data.get("timeline", ""), 12),
-            size=_short(data.get("size", ""), 12),
-        )
+        while tries < SUMMARY_TRIES:
+            reply = await model.ainvoke(asked, config=config)
+            tries += 1
+            text = reply.text if isinstance(reply.text, str) else reply.text()
+            summary = _parse_summary(text)
+            faults = summary_faults(summary)
+            if tries == 1 or len(faults) < len(best_faults):
+                best, best_faults = summary, faults
+            if not faults:
+                break
+            log.warning("call summary, try %d of %d, broke %d rule(s): %s", tries, SUMMARY_TRIES, len(faults), " ".join(faults))
+            asked = [*asked, AIMessage(text), HumanMessage(SUMMARY_RETRY.format(faults="\n".join(faults)))]
     except Exception:
+        # The answer of an earlier try stands. With no answer at all, the summary is empty.
         log.exception("call summary failed")
-        return CallSummary()
+    return replace(_repaired(best), tries=tries)

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from pydantic import SecretStr
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
@@ -44,8 +44,40 @@ class Settings(BaseSettings):
 
     llm_model: str = "anthropic:claude-opus-5-5"
     summary_model: str = "anthropic:claude-haiku-5-5"  # writes the two-sentence call summary at hangup
+    # The grader: after hangup, this text model scores the call against the model rules in grading.py.
+    # Empty = the code rules only. The scores go to the analytics store (analytics.py).
+    grader_model: str = "anthropic:claude-sonnet-5-5"
+    # The decision grader (decision_grader.py): a decision model that hears the audio of a voice call and answers
+    # typed questions. It needs GOOGLE_API_KEY. For a voice call it is the first choice, and GRADER_MODEL reads
+    # the call only when the decision model gives no answer. Empty = off.
+    grader_decision_model: str = "gemini-decision-1"
+    grader_hears_call: bool = True  # false = the call audio stays on the server, and the decision model reads the transcript
+    grader_fail_at: float = 0.8  # a rule fails only at this probability of a failure, or more
+    # true = the grader model checks each voice call too, and the log shows where the two differ. It is one more
+    # request for each call. Set it to false when the two agree on real calls.
+    grader_compare: bool = True
+    # The git commit of this build, for the analytics. The container image sets it; empty = ask git.
+    harness_version: str = ""
+    # After each call, the public report (analytics.public_report) goes to this Cloudflare R2 bucket as one
+    # JSON file (publish.py). With one of the first four empty, there is no upload.
+    report_r2_account_id: str = ""
+    report_r2_bucket: str = ""
+    report_r2_access_key_id: str = ""
+    report_r2_secret_access_key: SecretStr = SecretStr("")
+    report_r2_key: str = "calls.json"  # the name of the file in the bucket
+    # A fix request starts the job on GitHub that proposes a fix for a failed rule (`improve.py`).
+    # With the token or the repository empty, no fix request is sent.
+    improve_github_token: SecretStr = SecretStr("")  # a fine-grained token: this repository only, "Actions" (write) only
+    improve_repo: str = ""  # "owner/name"
+    improve_workflow: str = "improve.yml"
+    improve_ref: str = "main"
+    improve_daily_limit: int = 2  # fix requests in one day (US Eastern), at most
     owner_name: str = "the owner"
     owner_name_pronunciation: str = ""  # optional; how the agents say the owner's name, in plain words
+    # Words written so that a voice model says them right, as "<written>=<respelling>" pairs with commas
+    # between: "Magyar=Mag-yar". The voice models read the respelling; people read the written word.
+    # See voice/respell.py. This is stronger than the hint above: a voice model says what it reads.
+    respellings: str = ""
     brand_name: str = ""  # optional; the greeting then says "<brand>, <owner>'s AI business card"
     owner_phone: str = "+15555550100"
     profile_path: Path = Path("profile.md")
@@ -75,6 +107,13 @@ class Settings(BaseSettings):
     typesafe_api_key: SecretStr = SecretStr("")
     jev_model: str = "jev-latest"
     jev_timeout_ms: int = 500  # after this the word list's answer stands; measure with `uv run check-jev`
+
+    # Pipecat Voice Reader (see voice/voice_reader.py): a small local model that hears the sound of each
+    # caller turn: tone of voice, laughter, speech rate. It reads the sound only, not the words.
+    voice_reader: bool = True
+    voice_reader_variant: Literal["base", "tiny"] = "base"  # "tiny" costs about half the CPU and reads tone less well
+    voice_model_dir: Path = Path("data/models")  # the model is downloaded here once, about 28 MB
+    voice_steer: bool = True  # when the caller sounds frustrated, the agent gets one note (OpenAI agents only)
 
     # Telnyx (M2+). Run `bash scripts/telnyx-setup.sh` to fill these in.
     telnyx_api_key: SecretStr = SecretStr("")
@@ -164,6 +203,14 @@ class Settings(BaseSettings):
     # Move agents to another voice leg, for example "consultant=nova_sonic,tour=gemini_live".
     # Empty = the defaults in agents/specs.py.
     agent_legs: str = ""
+
+    @field_validator("respellings")
+    @classmethod
+    def _respellings_are_pairs(cls, value: str) -> str:
+        from ai_call_center.voice.respell import Respelling
+
+        Respelling.parse(value)  # a typing mistake stops the server at start, not in the middle of a call
+        return value
 
     @property
     def webhook_url(self) -> str:

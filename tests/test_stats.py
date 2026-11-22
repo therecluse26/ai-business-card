@@ -2,6 +2,7 @@
 
 from pipecat.metrics.metrics import LLMTokenUsage
 
+from ai_call_center.analytics import Answer
 from ai_call_center.voice.stats import PRICES, AnswerTimer, CallStats, Price, Usage
 
 LOUD, QUIET = 0.1, 0.0001
@@ -70,7 +71,7 @@ def test_cost_uses_one_price_for_each_kind_of_token():
 
 def test_describe_reports_speed_handoffs_tokens_and_cost():
     stats = CallStats()
-    stats.answers += [("openai_realtime", 0.6), ("openai_realtime", 1.0), ("gemini_live", 1.4)]
+    stats.answers += [Answer("openai_realtime", 0.6), Answer("openai_realtime", 1.0), Answer("gemini_live", 1.4)]
     stats.note_handoff(1.5)
     stats.note_handoff(2.5)
     stats.add_usage("openai_realtime", LLMTokenUsage(prompt_tokens=20_000, completion_tokens=2_000, total_tokens=22_000, input_audio_tokens=500, output_audio_tokens=1_500))

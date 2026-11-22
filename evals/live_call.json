@@ -1,0 +1,18 @@
+[
+  {"lines": ["Can I speak to him?"], "wants_live_call": true},
+  {"lines": ["Is Brad around? I'd love a quick word with him."], "wants_live_call": true},
+  {"lines": ["Any chance you could get him on the line for me right now?"], "wants_live_call": true},
+  {"lines": ["I'd rather just chat with him directly, if he's free."], "wants_live_call": true},
+  {"lines": ["Put me through to him, please."], "wants_live_call": true},
+  {"lines": ["Is there a real person I can talk to?"], "wants_live_call": true},
+  {"lines": ["I don't want to leave a message. I want to talk to him."], "wants_live_call": true},
+  {"lines": ["agent: I can take a message, or connect you to him now.", "Connect me, please."], "wants_live_call": true},
+  {"lines": ["I would like to leave a message with him."], "wants_live_call": false},
+  {"lines": ["Just have him call me back. I can't talk right now."], "wants_live_call": false},
+  {"lines": ["Could he give me a call next week?"], "wants_live_call": false},
+  {"lines": ["No need to bother him. Just pass on my number."], "wants_live_call": false},
+  {"lines": ["Can you email him my details?"], "wants_live_call": false},
+  {"lines": ["What kind of projects does he take on?"], "wants_live_call": false},
+  {"lines": ["Yes."], "wants_live_call": false},
+  {"lines": ["agent: Would you like me to connect you to him?", "Sure."], "wants_live_call": false}
+]

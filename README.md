@@ -16,7 +16,12 @@ returning caller by the name they give, looks up a new caller's carrier and area
 transfer hours. When a voice provider stops answering, the call moves to the other provider.
 
 The tour agent can tell the caller how fast the agents answered and what the call has cost so far.
+A small model on the server hears how the caller sounds; see "The server hears how the caller sounds (Pipecat Voice Reader)".
 With LangSmith set up, every call is traced; see "Tracing with LangSmith (M6)".
+After hangup a grader scores each call against ten rules, and the figures and the scores are stored for a public report;
+see "A grader scores each call after hangup" and "Call analytics and the public report".
+A failed rule starts a job on GitHub that opens a pull request with a fix, with no action from the owner;
+see "The improvement loop: a failed rule opens a pull request".
 
 Dropped: the local pipeline leg (M7). Its timing spike showed it would answer about 1 s slower; see "Pipeline leg spike (M7)".
 
@@ -119,6 +124,7 @@ An OpenAI Realtime answer can hold more than one audio item, and sometimes the s
 The first words of a call are exact (`greeting_words` in `agents/specs.py`); the first message of the call gives them to the greeting agent word for word.
 
 - `OWNER_NAME_PRONUNCIATION` tells every agent how to say the owner's name, in plain words. It is a hint in the prompt: the voice models take no phonetic markup.
+- `RESPELLINGS` is the stronger tool when a voice still says a name wrong. It holds `<written>=<respelling>` pairs, for example `Lovelace=Luv-layss`. A voice model says a word the way the word is written in the text it reads. So the server puts the respelling in everything a voice model reads: the instructions, the greeting, each tool result. The lead email, the call summary, the log and the text chat keep the written word (`voice/respell.py`).
 - Every caller hears the same first words. With `BRAND_NAME` set: "Hi, you've reached <brand>. I'm one of five
   AI agents <owner> built, and this call is a live sample of the work <first name> does for clients. I remember
   callers, so first: who am I speaking with?" Without a brand, the first sentence is "Hi, you've reached
@@ -316,7 +322,8 @@ How this leg differs from the other two:
 
 ### Caller memory and number lookup
 
-- At hangup a text model (`SUMMARY_MODEL`) writes a summary of at most 40 words. It is stored with the
+- At hangup a text model (`SUMMARY_MODEL`) writes a summary of at most 40 words. Code checks it, and a
+  summary with a fault goes back to the model one time: see "A grader scores each call after hangup". It is stored with the
   caller's number in the `calls` table. No audio is stored.
 - The summary model also writes a `topic` of at most 8 words ("a new booking platform"), with no names
   or numbers, and an `interest`: `project`, `role`, or `none`. Code cuts the topic to 8 words.
@@ -406,6 +413,56 @@ the estimate is on the high side. Check `PRICES` before you quote a cost to anyo
 Measured on one simulated call of 129 s with three agents: median answer time 1.3 s, handoffs
 1.9 s on average, 11,030 tokens in and 2,551 out, about 4 cents.
 
+### The server hears how the caller sounds (Pipecat Voice Reader)
+
+Pipecat 1.16 has a feature in alpha, expressive conversation. It has two halves, and one of them fits this server:
+
+- **Not used: tags that a TTS service performs.** The LLM writes a tag such as `<<sympathetic>>`, and the TTS
+  service speaks in that way. Each agent here is one speech-to-speech model. It has no TTS service, and it
+  chooses its own delivery.
+- **Used: a model that hears the caller's voice.** Pipecat Voice Reader is a small model that runs on this
+  server's CPU. It reads the sound of a turn, not the words: the tone of voice (positive, neutral, sad,
+  frustrated), how activated the voice is, laughter, and the speech rate.
+
+Pipecat's own processor puts a reading at the head of the user's message, for a text LLM to read. A
+speech-to-speech model gets the caller's audio and no such message. So `voice/voice_reader.py` runs the same
+model in a processor of its own, directly after the transport's input:
+
+1. Silero, a local speech detector, finds each stretch of the caller's speech. It sends no frame, so the
+   voice services still decide when a turn starts and ends.
+2. A turn is every stretch from the agent's last words to its next words. Each time the caller pauses
+   (0.2 s), the model reads the turn, at most its last 8 seconds. A turn under 0.8 s is not read.
+3. The read runs in a thread. No audio frame waits for it, so it adds no time to an answer.
+
+What a voice reading does:
+
+- **The log.** One line for each read: `the caller's voice in turn 3: neutral 0.87, arousal 0.49, ...`.
+- **The tour agent.** `get_call_stats` gives the counts, the speech rate, and the read time, so the agent
+  can say what the model heard on this call.
+- **The lead email.** A row "Caller's voice" gives the counts. It says that a model measured them.
+- **A note to the agent.** When a turn reads "frustrated" at 0.6 or more (`FRUSTRATED_AT`), the agent that
+  holds the call gets one note: show that you understood, then help directly. The note stays for two
+  caller turns, then the server takes it out. Only an OpenAI agent takes a note; `VOICE_STEER=false`
+  turns the note off.
+
+Rules and limits:
+
+- A reading is a measurement of one turn, not a fact about a person. The texts give counts, not a verdict.
+- The reader sends no audio and no reading out of the server, except the row in the owner's lead email.
+  The decision grader is another part: it sends the call audio to Google after hangup; see "A grader
+  scores each call after hangup". The readings are in memory for the length of the call. A caller who asks to be forgotten loses them, and the reader
+  hears no more of that call.
+- A phone call is 8 kHz, and the model hears 16 kHz. Each clip is resampled.
+- `uv run check-voice` reads saved caller audio (`SAVE_CALLER_AUDIO=true`) with the same parts, and prints
+  each turn's reading and read time.
+- Measured on 2026-11-19, on 13 saved calls from tests: 88 turns read, read time 45 to 147 ms with a median
+  of 58 ms on a laptop. 87 turns read neutral and 1 positive, so no turn would have sent a note. In a real
+  Pipecat pipeline the reader passed 2039 audio frames at 0.29 ms a frame.
+- Not measured: a real call with the reader on, a caller who is frustrated, the read time on the Fly.io
+  CPU, and what the note does to an agent's answer.
+- `VOICE_READER=false` turns the reader off. The model is about 28 MB. The image holds it; on a laptop
+  the first start downloads it from Hugging Face into `VOICE_MODEL_DIR`.
+
 ### Tracing with LangSmith (M6)
 
 Off unless `.env` sets `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY`. `LANGSMITH_PROJECT` names
@@ -432,14 +489,318 @@ Limits:
 
 - Pipecat 1.16 has no trace spans for Amazon Nova Sonic. An agent on Nova shows turns and timing only,
   not its words or tool calls.
-- No audio is sent. LangSmith can attach a recording of each call, but this project stores no call
-  audio.
+- No audio is sent to LangSmith. LangSmith can attach a recording of each call, but this project writes
+  no call audio to a file.
 - Call text is sent in full: names, numbers and what the caller said.
 - Spans are sent from a background thread, so tracing does not delay an answer. When LangSmith
   refuses them (a wrong key, for example), the log shows one error and the call goes on.
 - The free Developer plan keeps up to 5,000 traces a month for 14 days.
 
 Tests never send traces: `tests/conftest.py` sets `LANGSMITH_TRACING=false` before the project loads.
+
+### A grader scores each call after hangup
+
+A grader is a check of a result against a list of rules. On a phone call, a grader cannot check an
+answer before the caller hears it: the voice models speak while they think, and a check would add to
+the answer time. So this line has two graders, and both run after hangup.
+
+**The summary check, with one more try** (`callers.summarize_call`). The summary is stored, read by the
+next call's agents, and emailed, and no caller waits for it. Code reads each answer of the summary model:
+
+- The summary has at most 40 words, and it is not empty.
+- No text holds an email address or a phone number. A phone number is a run of 9 digits or more.
+- The topic holds no number.
+
+An answer that breaks a rule goes back to the model one time, with the broken rules named. What is
+still wrong after the second answer, code removes: it cuts the summary to whole sentences inside 40
+words, writes `[removed]` in place of an address or a number, and drops a topic that is not safe to say.
+
+**The call grader, with no retry** (`grading.py`). The call is over, so a score cannot repair it. The
+score shows if a change to a prompt or a tool made the calls better.
+
+| Rule | Checked by |
+|---|---|
+| `tool_name_not_spoken`: no agent said the name of a tool aloud | Code |
+| `handoff_intro`: after each handoff, the new agent said which agent it is | Code |
+| `summary_first_try`: the call summary passed its check on the first try | Code |
+| `name_asked_once`: the agents asked for the caller's name one time at most | A model |
+| `nothing_asked_again`: no agent asked for something the caller had said already | A model |
+| `question_answered`: each question got an answer, an honest "I do not know", or the right agent | A model |
+| `facts_from_profile`: each fact about the owner came from the profile notes | A model |
+| `tone_fits_caller`: the agent's tone fitted how the caller sounded | A model that hears the call |
+| `no_talk_over`: no agent talked over the caller | A model that hears the call |
+| `speech_clear`: the agents' speech was clear and complete | A model that hears the call |
+
+- A verdict is `pass`, `fail`, or `na`. `na` means that the call had no moment where the rule applies.
+- A failure also names the agent at fault and a cause code. Each is a word from a fixed list in `grading.py`.
+- With no model, or when each model fails, the code rules still give their scores.
+
+Two models can check the model rules:
+
+**The decision grader** (`decision_grader.py`) is the first choice for a voice call. It is Gemini Decision 1,
+a decision model of Google. A decision model writes no text: it answers typed questions, and each answer
+is one option from a fixed list, with a probability for each option.
+
+1. During the call, the server records both sides in memory, in one channel (`voice/call_audio.py`).
+2. After hangup, one request holds the audio, the profile notes, the agents on the call, and the transcript.
+   The request says that the recording is right where the two differ.
+3. Each cause code of a model rule has one yes/no question about one event. An example: "Did an agent
+   ask the caller for a fact that the caller had already told that same agent?" The answer is a probability.
+4. A rule fails when the model gives one of its events a probability of `GRADER_FAIL_AT` (0.8) or more.
+   That event is the cause code. A failure starts a paid job that proposes a fix, so the limit is high.
+   Under the limit the rule passes, and a note keeps a failure that the model thought likely.
+   One more question for each rule gives the agent at fault.
+5. Two rules have questions about single lines too. Each rule needs a search through the call, so code
+   does the search, and the model judges one line at a time.
+   - `nothing_asked_again`: code finds each agent line that asks something. For each one, the model answers:
+     "Had the caller already given the answer in lines 1 to 8?" Two more small questions take a line out of
+     the count: a question for the name, and a read-back.
+   - `question_answered`: code finds each question of the caller, but not one in the caller's last turn. For
+     each one, the model answers: "Did the agents leave that question without a response?"
+   - Code knows which agent said a line. So for these failures, code names the agent at fault.
+6. The same request asks for three readings: how the caller sounded over the call, how the caller sounded
+   at the end, and how the agents' voices sounded. A reading is not a rule. It is stored, and it is private.
+
+**The grader model** (`GRADER_MODEL`) is a text model that reads the transcript. It checks a call when the
+decision grader is off or gives no answer, and it is the first choice in the text mode. It cannot check an
+audio rule. It writes a note of at most 25 words for a failure; the note is for the owner only. With
+doubt, it must pass a rule.
+
+- With `GRADER_COMPARE=true` (the default), the grader model checks each voice call too. The log shows where
+  the two differ; the record keeps the decision grader's verdicts. Set it to `false` when the two agree
+  on real calls: it is one more request for each call.
+- `GRADER_DECISION_MODEL=` (empty) turns the decision grader off. It also needs `GOOGLE_API_KEY`.
+- `GRADER_HEARS_CALL=false` keeps the call audio on the server. The decision grader then reads the transcript.
+
+The call audio:
+
+- It is in memory only. The server never writes it to a file.
+- It leaves the server one time: after hangup, in the request to Google's Decisions API.
+- It is deleted after the grade. After a transfer it stays for 5 minutes, because a call comes back
+  when nobody answers the transfer.
+- A caller who asks to be forgotten loses it at once, and the rest of that call is not recorded.
+- Use a paid tier for `GOOGLE_API_KEY`: on the free tier, Google's terms let it use the data to improve its products.
+- This is a recording of a phone call, held for a short time. Some places want the consent of each person
+  on a call. The greeting does not say that the call is recorded.
+
+Measured on 2026-11-21:
+
+- The test set is `evals/grader_calls.json`: 41 made-up calls, as transcripts. They hold 24 planted
+  failures and 140 checks that must not fail. `uv run check-grader --set` runs it.
+- The decision grader found 22 of the 24 at the limit of 0.8. It gave no false alarm. Each found failure got
+  the right agent and a right cause. The two misses got 0.64 and 0.74: in both, a later agent asked for what
+  the caller told the first agent.
+- The highest probability of a check that must not fail was 0.64: an agent that said "I do not know his rates".
+  At a limit of 0.6 the grader finds 24 of 24, but gives 1 false alarm. So the limit stays at 0.8.
+- The grader model found 9 of 9 on the first 13 calls, with no false alarm. It did not read the other 28.
+  So the grader model is first in the text mode.
+- The structure of a question matters more than its words. Three steps were measured on the first 13 calls,
+  which hold 9 planted failures. One question with the whole rule text and the options pass, fail, na: 6 found.
+  One short yes/no question for each cause: 7 found. With the questions about single lines: 9 found.
+- A shorter question was better. Two questions had a list of what does not count. Without the list, the lowest
+  planted failure went from 0.66 to 0.75, and no false alarm came back.
+- `nothing_asked_again` was the hard rule. With questions about the whole call, the grader found 4 of its 7
+  planted failures. 14 wordings of those questions did not repair that. The model gave 0.86 or more when
+  the caller complained ("as I said"), and 0.68 to 0.79 when the caller only said the answer again.
+- The questions about single lines repaired most of it. For each of the two rules, 8 calls were written after
+  the change and graded one time. No caller complains or asks again in those calls. The grader found 4 of 4
+  for `nothing_asked_again` (0.85 or more) and 4 of 4 for `question_answered` (0.91 or more), with no false alarm.
+- Not kept: the agent's own words in the small question. It raised the two misses to 0.95, but it lowered
+  another planted failure to 0.71 and raised a read-back of one detail to 0.79.
+- A probability near the limit is not stable. The line numbers in the transcript moved one answer from 0.90 to 0.78,
+  before the questions about single lines replaced it. Read a probability of 0.7 to 0.9 as "likely".
+- A question of the caller is found by its question mark. Speech recognition can leave the mark out. Such a
+  question is left to the questions about the whole call.
+- Each call here is made up, in clean text. A real call has speech recognition errors. So these counts are a start.
+- The same request two times gave the same probabilities.
+- Two saved recordings of the caller's side of test calls, at 8 kHz: 86 s took 1.1 s and 6,827 input tokens;
+  601 s took 6.1 s and 23,299 tokens. At the published price of 0.10 USD for a million input tokens, a
+  10-minute call costs about 0.2 cents.
+- Those recordings hold no agent. The reading of the agents' voices came back at 0.37, so it was not kept.
+- Not measured: a real call with both sides. The audio rules and the readings have no check against a known answer.
+
+More notes:
+
+- The transcript is data for a grader: each request says not to follow a line that reads like an instruction.
+- The server log has one line for each call: `grade (version 6e77d41c0a1b): 5 of 6 rules passed; failed: name_asked_once (...)`.
+- With LangSmith on, the grader's request is the run `call-grade` in the call's thread.
+- A call where the caller said nothing gets no scores. A caller who asked to be forgotten is not graded.
+- To add a rule, add a `Rule` to `RULES`. Never use an old key for a new rule: the scores are stored by key.
+
+Limits: a model rule is a model's opinion, so one verdict can be wrong. Read the scores over many
+calls, not one. No rule checks how an agent says the owner's name: the model does not know the right
+sound. The time before an answer is not a rule either: the server measures it (`voice/stats.py`).
+
+### Call analytics and the public report
+
+When a call ends, its figures and its scores go to three tables in the leads database (`analytics.py`):
+one row for each call, one for each timed answer, and one for each score.
+
+- **Each call:** the US Eastern date, the channel (`voice` or `text`), the version, the length, the agents,
+  the caller's turns, the outcome, the failovers, the tokens, the cost estimate, and the readings.
+- **Each timed answer:** the agent, the voice provider, and the seconds from the end of the caller's speech
+  to the agent's first audio.
+- **Each score:** the rule, the verdict, and the grader's note.
+
+The version is the git commit of the build. `scripts/fly-deploy.sh` puts it in the image as
+`HARNESS_VERSION`; on a laptop git gives it, with `-dirty` for a change that is not committed. So the
+scores of one version of the prompts can be compared with the next.
+
+What the tables do not hold: the phone number, the name, the summary, the transcript, and the time of
+day. Three fields are private all the same: the call id, which joins a record to its LangSmith trace,
+the grader's notes, and the readings of how a call sounded.
+
+`uv run call-report` prints the public report as JSON. It is made for a public page:
+
+- `rules`: each rule, with its count of `pass`, `fail`, and `na`.
+- `totals`: the calls, the score, the median answer time, and the outcomes.
+- `versions`: the calls, the score, and the median answer time of each version, in the order the versions took calls.
+- `calls`: one entry for each call, with the fields of an allow-list (`_public_call`).
+
+The score is the passed verdicts as a share of the passed and the failed ones. `na` does not count.
+
+What the report leaves out, and why:
+
+- The call id, the grader's notes, and the readings: they are private.
+- The outcome of one call (a message, a transfer, or none): it can say something about one caller. The
+  report gives totals only, and only from 5 calls on. Limit: a reader who keeps two reports can still
+  see the change between them.
+- Test calls: a call from `OWNER_PHONE`, and each call of the terminal simulator. `--tests` puts them in.
+- A field that is not on the allow-list. A new field is private until someone adds it to `_public_call`.
+
+`uv run call-report --notes` prints each call's scores with the notes, as text. That output is private.
+
+`uv run check-grader` sends one made-up call to each grader. The call has three failures on purpose.
+The run prints each rule with the verdict of each grader and the verdict it must get. For the decision
+grader it prints the probability of the most probable cause too. Run it after you change a rule,
+`GRADER_MODEL`, or `GRADER_DECISION_MODEL`. It is two paid requests; `--only decision` or `--only model` sends one.
+`--audio FILE` sends a WAV file to the decision grader, to see what it hears.
+
+`uv run check-grader --set` measures a grader. It sends each made-up call of `evals/grader_calls.json`.
+Each call there has known verdicts. The run counts the failures found and the false alarms. For the
+decision grader it shows the same counts at other limits too. Run it before you trust a change to a
+question (`ASKS` in `decision_grader.py`), to a rule, or to `GRADER_FAIL_AT`. Write a new call and its
+verdicts before you run a grader on it. `--only decision` costs less than one cent for the 41 calls;
+the grader model costs about 1 to 2 cents for each call. The job that proposes a fix cannot change this file.
+
+**The public page.** After each call, the server writes the public report as `calls.json` to a
+Cloudflare R2 bucket (`publish.py`). The page `/calls` on the owner's site reads that file, so a
+visitor to the page never starts this server. A test call does not start an upload. When a caller
+asks to be forgotten, the file is written again without that call.
+
+- The upload is one signed PUT to R2's S3 API. The signing code is in `publish.py`, with no AWS package.
+  A test checks it against the example signature in the AWS documentation.
+- A failed upload is one line in the log. It cannot stop the end of a call.
+- `uv run call-report --publish` writes the file now. Use it for the first upload, and after you change a rule's title.
+
+To set it up:
+
+1. Make the bucket: `pnpm wrangler r2 bucket create voice-card-report`, in the site's repository.
+2. In the Cloudflare dashboard, open **R2 object storage**, then **API Tokens**. Make a token with the
+   permission **Object Read & Write**, for this bucket only.
+3. Put the four values in `.env`: `REPORT_R2_ACCOUNT_ID`, `REPORT_R2_BUCKET`, `REPORT_R2_ACCESS_KEY_ID`,
+   and `REPORT_R2_SECRET_ACCESS_KEY`. With one of them empty, there is no upload.
+4. Run `uv run call-report --publish`. Then run `bash scripts/fly-secrets.sh` to copy the values to Fly.
+
+"Forget me" and the analytics: the call in progress gets no record, and a record from earlier in the
+same call is deleted. The notes of that person's earlier calls are deleted too. The figures and the
+verdicts of those earlier calls stay, because they say nothing about a person.
+
+### A fixed score for a change to a prompt or a word list
+
+A change to a prompt or a word list is good only if a fixed measure says so. `uv run score-harness`
+is that measure (`score.py`). It reads a made-up test set, the folder `evals/`. No line in it is from
+a real call.
+
+- `evals/live_call.json`: caller lines, each with the answer to "does this caller want a live call?".
+  The word list of the transfer check must give that answer. This part makes no model request, and it
+  gives the same result each time. `uv run check-jev` reads the same file.
+- `evals/calls.json`: made-up calls. Each one has the caller's lines and what the call must do: the
+  agents that take part, the outcome, and if the caller is forgotten. The agents answer the lines in
+  the text mode. Then the grader scores the call against its rules. This part makes model requests
+  that cost money, so it runs only with `--calls`.
+
+```
+uv run score-harness                                  # the word list only: no model request
+uv run score-harness --out before.json                # keep the result of the version before a change
+uv run score-harness --compare before.json            # after the change; exit 1 when a check that passed now fails
+uv run score-harness --calls --only live-call --show  # one made-up call, with its text (paid)
+uv run score-harness --calls                          # each made-up call (paid)
+```
+
+- In a made-up call the caller's lines are fixed: the caller does not react to the agent. No email
+  is sent, no phone rings, and the lead store is in memory. Jev is off, so the word list decides a transfer.
+- The agents' answers change from run to run. Thus one check of a made-up call can pass in one run
+  and fail in the next. Read the checks that changed before you trust a small difference.
+- A rule that does not apply to a call gives no check. A model rule with no verdict is a failed check.
+- Add a new sample or a new call at the end of its file. Do not change or remove an old one: two
+  results are compared by the name of each check.
+
+### The improvement loop: a failed rule opens a pull request
+
+No person starts this loop. A call ends, and the rest runs with no action from the owner:
+
+1. **The grader scores the call** against its rules (`grading.py`). For a failed rule it also names
+   the agent at fault and a cause code.
+2. **The server sends a fix request** (`improve.py`). It starts the workflow
+   `.github/workflows/improve.yml` with GitHub's REST API.
+3. **A coding agent makes one change** (the Claude Code GitHub Action). It reads the rule and the
+   agent's instructions. It adds one made-up call to `evals/calls.json` that shows the fault. Then it
+   changes one prompt or one word list.
+4. **Fixed code measures the change** (`proposal.py`, `score.py`). It checks which files changed, runs
+   the unit tests, and runs the scorer before the change and after it.
+5. **The job opens a pull request** with the failure, the change, and both scores.
+6. **The owner reviews it.** A merge to `main` deploys the server. The next calls have a new harness
+   version, and their scores show if the change helped.
+
+What a fix request holds: the rule, the agent, the cause code, the harness version, and two counts.
+Each name is a word from a fixed list in `grading.py`; a value that is not in its list is not sent,
+and the job refuses it again. So a fix request cannot hold what a caller said, and it cannot hold an
+instruction that a caller planted. The job has no transcript and no access to the traces. The
+repository is public, and everything in the job is safe to show there.
+
+Limits:
+
+- One fix request for each (rule, agent, cause) at one harness version. The same failure on the next
+  call starts no second job. After a deploy the version is new, so the failure can ask again.
+- At most `IMPROVE_DAILY_LIMIT` fix requests in one day (default 2).
+- Only a server whose version is a clean git commit sends a fix request. `uv run chat` sends none.
+- A call from the owner's phone can send one. That shows the loop with no real caller.
+- A caller who asked to be forgotten is not graded, so that call sends nothing.
+- The audio rules `no_talk_over` and `speech_clear` send none. No prompt and no word list can repair them:
+  the voice provider's turn detection and its audio decide them. Their scores are in the report all the same.
+
+What the coding agent can and cannot do:
+
+- It has a token that can only read the repository. Its change leaves its job as a patch.
+- It can change the agents' instructions (`agents/specs.py`), the handoff text (`graph/handoffs.py`),
+  the tool words and the word lists (`graph/tools.py`), the summary prompt (`callers.py`), the tests,
+  and the test set. The job refuses a patch that changes another file: the grader, the scorer, a
+  workflow, or a script.
+- It can add an entry at the end of a test set file. It cannot change or remove an old entry.
+
+What the pull request shows, and its limits:
+
+- **Better:** a check that failed now passes, and no check got worse. The pull request is ready for review.
+- **Same:** no check changed. The pull request is a draft, and it says that the scorer does not show
+  the change. The scorer runs the agents in the text mode. A fault that only a voice model makes,
+  for example a tool name said aloud, does not happen there.
+- **Worse:** a check that passed now fails. The job opens no pull request; its summary shows the scores.
+- The agents' answers change from run to run, so one check of a made-up call can change with no cause.
+- The grader can be wrong about a call. Then the coding agent is told to change nothing when it finds no reason.
+
+To turn the loop on:
+
+1. In the repository, add the secret `ANTHROPIC_API_KEY`: **Settings**, **Secrets and variables**, **Actions**.
+2. In **Settings**, **Actions**, **General**, turn on "Allow GitHub Actions to create and approve pull requests".
+3. Make a fine-grained personal access token: this repository only, with the one repository
+   permission **Actions** (read and write). It can start a workflow. It cannot change code.
+4. Put `IMPROVE_GITHUB_TOKEN` and `IMPROVE_REPO` (as `owner/name`) in `.env`. Then run
+   `bash scripts/fly-secrets.sh` to copy them to Fly.
+
+Optional repository variables: `IMPROVE_MODEL` (the coding agent's model), `IMPROVE_SCORE_CALLS`
+(`all`, `new` or `none`: which made-up calls the scorer runs; these cost money), and `OWNER_NAME`.
+The workflow runs on a public repository, where the standard runners use no paid minutes.
 
 ### A message is saved only after the caller's yes
 
@@ -571,8 +932,18 @@ src/ai_call_center/
   notify.py                      lead emails to the owner over SMTP
   writing.py                     RAG over the owner's posts: RSS feed, passages, hybrid search, saved vectors
   names.py                       same_person: does a spoken first name match a name on record (spelling, short form, sound)
-  decisions.py                   Jev, a decision model: the probability that a caller asked for a live call, when the word list missed it
+  decisions.py                   Jev, a decision model: the probability that a caller asked for a live call; the word list is the fallback
+  grading.py                     the grader: the rules, the code checks, and the request to the grader model, after hangup
+  decision_grader.py             the decision grader: Gemini Decision 1 hears the call audio and answers typed questions; the grader model is the fallback
+  analytics.py                   the figures, answer times and scores of each call; the public report (`uv run call-report`)
+  publish.py                     the upload of the public report to a Cloudflare R2 bucket, for the page on the owner's site
+  check_grader.py                `uv run check-grader`: one made-up call to each grader, to check the keys, the questions and the verdicts
+  caller_voice.py                a voice reading for each caller turn, and the texts for the tour agent and the lead email
+  score.py                       `uv run score-harness`: the fixed score of the prompts and the word lists, against the made-up test set in evals/
+  improve.py                     a fix request: a failed rule starts the GitHub workflow that proposes a fix
+  proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard on changed files, the pull request text)
   check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
+  check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time
   test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
   check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests
@@ -583,6 +954,8 @@ src/ai_call_center/
   voice/leveler.py               one loudness for every agent voice
   voice/health.py                which voice providers are answering; a failed one is avoided for 5 minutes
   voice/stats.py                 live figures for a call: answer time, handoff time, tokens, cost estimate
+  voice/call_audio.py            both sides of a call, in memory until the decision grader has heard them
+  voice/voice_reader.py          Pipecat Voice Reader on the caller's audio: a voice reading for each turn, and the note when a caller sounds frustrated
   voice/legs.py                  builds one speech-to-speech service per agent (OpenAI, Gemini, or Nova) and drives it
   voice/tools.py                 the LangGraph tools as Pipecat function schemas
   voice/call_session.py          one phone call: pipeline, switcher, tool handlers, transfer gate, time limit

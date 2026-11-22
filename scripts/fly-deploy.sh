@@ -22,7 +22,10 @@ APP="$(sed -n 's/^app = "\(.*\)".*/\1/p' fly.toml)"
 IMAGE="registry.fly.io/$APP:$LABEL"
 
 echo "== 1/4 Build the image $IMAGE. The running server is not touched."
-flyctl deploy --build-only --push --image-label "$LABEL"
+# The git commit goes into the image, for the analytics of each call. "-dirty": a tracked file has a change that is not committed.
+VERSION="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+[ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] || VERSION="$VERSION-dirty"
+flyctl deploy --build-only --push --image-label "$LABEL" --build-arg HARNESS_VERSION="$VERSION"
 
 echo "== 2/4 Wait until no call is in progress."
 states() {

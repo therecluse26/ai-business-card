@@ -25,6 +25,7 @@ from pipecat.metrics.metrics import LLMTokenUsage, LLMUsageMetricsData
 from pipecat.observers.base_observer import BaseObserver, FramePushed
 
 from ai_call_center.agents.specs import LEG_PLATFORMS
+from ai_call_center.analytics import Answer
 
 
 @dataclass(frozen=True)
@@ -141,7 +142,7 @@ class CallStats(BaseObserver):
     media stream restarts; call `bind` with the services of each new pipeline."""
 
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    answers: list[tuple[str, float]] = field(default_factory=list)  # (leg, seconds)
+    answers: list[Answer] = field(default_factory=list)  # one for each timed answer: the leg, the seconds, the agent
     handoffs: list[float] = field(default_factory=list)  # seconds from the tool call to the switch
     usage: dict[str, Usage] = field(default_factory=dict)  # leg -> tokens
     failovers: int = 0
@@ -152,10 +153,12 @@ class CallStats(BaseObserver):
         super().__init__()
         self._leg_of: dict[str, str] = {}  # Pipecat processor name -> leg
         self._active_leg: Callable[[], str] = lambda: ""
+        self._active_agent: Callable[[], str] = lambda: ""
 
-    def bind(self, leg_of_service: dict[str, str], active_leg: Callable[[], str]) -> None:
+    def bind(self, leg_of_service: dict[str, str], active_leg: Callable[[], str], active_agent: Callable[[], str] | None = None) -> None:
         self._leg_of = dict(leg_of_service)
         self._active_leg = active_leg
+        self._active_agent = active_agent or (lambda: "")
 
     # --- what the pipeline reports ---
 
@@ -177,7 +180,7 @@ class CallStats(BaseObserver):
     def agent_started(self) -> None:
         gap = self.timer.agent_started(self.clock())
         if gap is not None:
-            self.answers.append((self._active_leg(), gap))
+            self.answers.append(Answer(leg=self._active_leg(), seconds=gap, agent=self._active_agent()))
 
     def add_usage(self, leg: str, usage: LLMTokenUsage) -> None:
         self.usage.setdefault(leg, Usage()).add(usage)
@@ -203,14 +206,14 @@ class CallStats(BaseObserver):
         """The figures as sentences an agent can say."""
         parts: list[str] = []
         if self.answers:
-            times = [secs for _, secs in self.answers]
+            times = [answer.seconds for answer in self.answers]
             parts.append(
                 f"Speed: over {len(times)} answer{'s' if len(times) != 1 else ''}, an agent started to speak "
                 f"{_seconds(statistics.median(times))} seconds after the caller stopped talking (the median); the slowest answer took {_seconds(max(times))} seconds."
             )
             by_leg: dict[str, list[float]] = {}
-            for leg, secs in self.answers:
-                by_leg.setdefault(leg, []).append(secs)
+            for answer in self.answers:
+                by_leg.setdefault(answer.leg, []).append(answer.seconds)
             if len(by_leg) > 1:
                 parts.append(
                     "By provider: "

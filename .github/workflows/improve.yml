@@ -1,0 +1,221 @@
+# A call that fails a rule of the grader starts this job. Nobody starts it by hand.
+#
+# The phone server sends a fix request (src/ai_call_center/improve.py): the rule, the agent at fault,
+# a cause code, the harness version, and two counts. Each name is a word from a fixed list in
+# grading.py. The job has no transcript, so it cannot show what a caller said.
+#
+# Two jobs, so the coding agent never has a token that can write:
+#   change   the agent changes one prompt or one word list. Its token can only read. The change
+#            leaves this job as a patch.
+#   measure  code that the agent cannot edit checks the patch, runs the tests, and runs the scorer
+#            before the change and after it. Then it opens a pull request with the evidence.
+#            A person reviews the pull request. A merge to main deploys (fly-deploy.yml).
+#
+# Needs:
+#   - the repository secret ANTHROPIC_API_KEY (the coding agent, and the models of the scorer)
+#   - Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests"
+# Optional repository variables:
+#   - IMPROVE_MODEL        the model of the coding agent (default: claude-opus-5-5)
+#   - IMPROVE_SCORE_CALLS  "all" (default): the scorer runs each made-up call, before and after.
+#                          "new": only the made-up call that the agent added. "none": the word list only.
+#                          The made-up calls are model requests that cost money.
+#   - OWNER_NAME           the owner's name, as the agents say it
+name: Propose a fix for a failed rule
+
+on:
+  workflow_dispatch:
+    inputs:
+      rule:
+        description: "The key of the failed rule (grading.py)"
+        required: true
+        type: string
+      agent:
+        description: "The agent at fault; empty when the grader named none"
+        required: false
+        default: ""
+        type: string
+      cause:
+        description: "A cause code of the rule, or other"
+        required: true
+        default: "other"
+        type: string
+      version:
+        description: "The harness version of the call (a git commit)"
+        required: true
+        type: string
+      failed_calls:
+        description: "Graded calls at this version that failed the rule"
+        required: false
+        default: "1"
+        type: string
+      graded_calls:
+        description: "Graded calls at this version where the rule applied"
+        required: false
+        default: "1"
+        type: string
+
+# One proposal at a time. A second fix request waits; it does not stop the first.
+concurrency:
+  group: improve
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The inputs go to the steps as environment values, never as text inside a command.
+  FIX_RULE: ${{ inputs.rule }}
+  FIX_AGENT: ${{ inputs.agent }}
+  FIX_CAUSE: ${{ inputs.cause }}
+  FIX_VERSION: ${{ inputs.version }}
+  FIX_FAILED_CALLS: ${{ inputs.failed_calls }}
+  FIX_GRADED_CALLS: ${{ inputs.graded_calls }}
+  OWNER_NAME: ${{ vars.OWNER_NAME }}
+
+jobs:
+  change:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.patch.outputs.changed }}
+      answer: ${{ steps.agent.outputs.structured_output }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the agent reads what changed after the version of the call
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Check the fix request and write the task
+        id: task
+        run: |
+          uv run proposal task --out "$RUNNER_TEMP/task.md" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo 'text<<END_OF_TASK_7c1e52'
+            cat "$RUNNER_TEMP/task.md"
+            echo
+            echo 'END_OF_TASK_7c1e52'
+            echo "schema=$(uv run proposal schema)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: The coding agent makes one change
+        id: agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          prompt: ${{ steps.task.outputs.text }}
+          claude_args: |
+            --model ${{ vars.IMPROVE_MODEL || 'claude-opus-5-5' }}
+            --max-turns 40
+            --permission-mode acceptEdits
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(uv run pytest:*),Bash(uv run score-harness),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --disallowedTools "WebFetch,WebSearch"
+            --json-schema '${{ steps.task.outputs.schema }}'
+
+      - name: Make a patch of the change
+        id: patch
+        run: |
+          # Only src, tests and evals go into the patch. The next job refuses a file that the agent must not change.
+          git add -A -- src tests evals
+          git diff --cached --binary HEAD > "$RUNNER_TEMP/change.patch"
+          if [ -s "$RUNNER_TEMP/change.patch" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Nothing to propose
+        if: steps.patch.outputs.changed != 'true'
+        run: echo "The coding agent changed nothing, so there is no pull request." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.patch.outputs.changed == 'true'
+        with:
+          name: change
+          path: ${{ runner.temp }}/change.patch
+          retention-days: 14
+
+  measure:
+    needs: change
+    if: needs.change.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }} # the same commit that the agent changed
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+      - uses: actions/download-artifact@v4
+        with:
+          name: change
+          path: ${{ runner.temp }}
+
+      - name: Check the patch, then apply it
+        id: guard
+        run: uv run proposal guard --patch "$RUNNER_TEMP/change.patch"
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      - name: Score before the change and after it
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SCORE_CALLS: ${{ vars.IMPROVE_SCORE_CALLS || 'all' }}
+          NEW_CALLS: ${{ steps.guard.outputs.new_calls }}
+        run: |
+          set -euo pipefail
+          flags=()
+          case "$SCORE_CALLS" in
+            all) flags+=(--calls) ;;
+            new)
+              if [ -n "$NEW_CALLS" ]; then
+                flags+=(--calls)
+                for id in $NEW_CALLS; do flags+=(--only "$id"); done
+              fi ;;
+            none) ;;
+            *) echo "IMPROVE_SCORE_CALLS must be all, new or none"; exit 1 ;;
+          esac
+          # Before: the old prompts and word lists, with the new made-up call. So the two scores have the same checks.
+          git diff HEAD -- src tests > "$RUNNER_TEMP/code.patch"
+          if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply -R "$RUNNER_TEMP/code.patch"; fi
+          uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/before.json"
+          if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply "$RUNNER_TEMP/code.patch"; fi
+          uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/after.json"
+
+      - name: Write the pull request text
+        id: body
+        env:
+          AGENT_ANSWER: ${{ needs.change.outputs.answer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          uv run proposal body --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json" --out "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The score got worse, so there is no pull request
+        if: steps.body.outputs.verdict == 'worse'
+        run: echo "A check that passed before the change now fails. The job opens no pull request." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open the pull request
+        if: steps.body.outputs.verdict != 'worse'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.body.outputs.title }}
+          VERDICT: ${{ steps.body.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          branch="improve/${FIX_RULE}-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add -A -- src tests evals
+          git commit -m "$TITLE" -m "A fix request for the rule ${FIX_RULE} (agent: ${FIX_AGENT:-not known}, cause: ${FIX_CAUSE}). The pull request holds the evidence."
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+          # A change that the scorer does not show is a draft: a person must judge it with no measure.
+          draft=()
+          if [ "$VERDICT" != "better" ]; then draft=(--draft); fi
+          gh pr create --base "${GITHUB_REF_NAME}" --head "$branch" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md" "${draft[@]}"

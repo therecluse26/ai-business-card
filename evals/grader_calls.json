@@ -1,0 +1,1121 @@
+{
+  "about": "Made-up calls with known verdicts, to measure a grader: `uv run check-grader --set`. Each transcript is made up; no caller's words are here. {owner} is the owner's name. The facts fit profile.md: when you change a fact there, change the calls that use it. `fail` names each model rule that must fail, with the agent at fault and the cause codes that are right. A rule that is not in `fail` must not fail. `na` names the rules that have no moment in the call. Write a new call and its verdicts before you run a grader on it.",
+  "calls": [
+    {
+      "id": "facts_from_the_notes",
+      "about": "A recruiter asks two questions. Each answer is in the profile notes.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Hi, it's Marcus.",
+        "agent: Thanks, Marcus. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'm a recruiter. How many years of experience does he have?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. He has more than 12 years of experience with platforms, cloud systems, and APIs.",
+        "caller: Does he know Go?",
+        "agent: Yes. Go is one of his languages, with Python, TypeScript, and Rust.",
+        "caller: Great, that's all I needed. Thanks.",
+        "agent: You're welcome, Marcus. Goodbye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "message_with_a_read_back",
+      "about": "The contact agent asks for new details only, then reads the message back.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: My name is Priya Shah.",
+        "agent: Thanks, Priya. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to leave a message. We need someone to add an AI agent to our call center.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Priya, I can pass that on. What company are you with?",
+        "caller: Northwind Health.",
+        "agent: And what is the best email for a reply?",
+        "caller: priya at northwind health dot com.",
+        "agent: So, Priya Shah from Northwind Health wants to add an AI agent to a call center, and the reply goes to priya at northwind health dot com. Is that right?",
+        "caller: Yes, that's right.",
+        "agent: I have sent it. He will follow up."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "name_asked_again_by_the_same_agent",
+      "about": "The first agent asks for the name a second time.",
+      "visited": [
+        "classifier"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Tom.",
+        "agent: Thanks, Tom. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Just looking around. What is this thing?",
+        "agent: It is a phone line that {owner} built. AI voice agents answer it. Sorry, what was your name again?",
+        "caller: Tom.",
+        "agent: Thanks, Tom. Would you like a tour of how it works?",
+        "caller: No, that's fine. Bye."
+      ],
+      "fail": {
+        "name_asked_once": {
+          "agent": "classifier",
+          "causes": [
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "name_confirmed",
+      "about": "The first agent asks the caller to confirm the name. The contact agent's question about the project is new.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Elena Petrova.",
+        "agent: Did I get that right, your name is Elena Petrova?",
+        "caller: Yes.",
+        "agent: Thanks, Elena. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'd like him to email me about a consulting project.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Elena, what is the consulting project about?",
+        "caller: Moving our app to a multi-tenant setup.",
+        "agent: And what email should he use?",
+        "caller: elena at brightpath dot io.",
+        "agent: So you want {owner} to email you at elena at brightpath dot io about a move to a multi-tenant setup. Is that right?",
+        "caller: Correct."
+      ],
+      "fail": {
+        "name_asked_once": {
+          "agent": "classifier",
+          "causes": [
+            "asked_to_confirm_name",
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "email_asked_two_times",
+      "about": "The contact agent asks for the email address that the caller gave it two turns before.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: It's Jordan.",
+        "agent: Thanks, Jordan. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Yeah, I need a quote for a Shopify integration. Can someone email me?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Jordan, I can send that to him. What is your email address?",
+        "caller: jordan at lakeside goods dot com.",
+        "agent: Thanks. Which company is this for?",
+        "caller: Lakeside Goods.",
+        "agent: Got it. And what email address should he reply to?",
+        "caller: The same one, jordan at lakeside goods dot com.",
+        "agent: So Jordan from Lakeside Goods wants a quote for a Shopify integration, at jordan at lakeside goods dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "date_asked_after_a_handoff",
+      "about": "The caller tells the first agent the date. The consultant agent asks for it.",
+      "visited": [
+        "classifier",
+        "consultant"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Hi, this is Wei.",
+        "agent: Thanks, Wei. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Yes. We need a voice agent for our clinic's phone line, and it has to be live by March.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. A voice agent for a clinic is work that {owner} does. When do you need it to be live?",
+        "caller: By March, as I said.",
+        "agent: Understood. Does the clinic have a phone system today?",
+        "caller: Yes, we use RingCentral.",
+        "agent: Good. He builds voice agents that connect to a business's phone system. Shall I bring in the contact agent to take your details?",
+        "caller: Not yet, I'll call back."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "consultant",
+          "causes": [
+            "asked_again_after_handoff"
+          ]
+        }
+      }
+    },
+    {
+      "id": "question_not_answered",
+      "about": "The caller asks two times if the owner has led teams. The profile agent talks about other things.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Sofia here.",
+        "agent: Thanks, Sofia. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A role. We're hiring a staff engineer. Is he open to that?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes, he is open to staff engineer and software architect roles.",
+        "caller: Good. Has he led teams before?",
+        "agent: He has built a central generative AI platform that serves many brands. Would you like to hear about his projects?",
+        "caller: No. I asked if he has led teams.",
+        "agent: He has also built durable multi-agent workflows. Is there something else I can help with?",
+        "caller: No, thanks. Bye."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "profile",
+          "causes": [
+            "question_ignored",
+            "answered_other_question"
+          ]
+        }
+      }
+    },
+    {
+      "id": "answer_to_another_question",
+      "about": "The caller asks about programming languages. The tour agent answers about call transfers.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Ahmed.",
+        "agent: Thanks, Ahmed. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'd like to look around. How does this phone line work?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. A phone number routes your call between AI voice agents on different providers.",
+        "caller: Interesting. Which programming languages does he use?",
+        "agent: The agents can transfer the call to him during business hours.",
+        "caller: Okay, never mind. Bye."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "tour",
+          "causes": [
+            "answered_other_question",
+            "question_ignored"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wrong_number_in_a_fact",
+      "about": "The profile agent says 30 percent. The profile notes say 70 percent.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Hi, I'm Grace.",
+        "agent: Thanks, Grace. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I have an online store that is slow. Has he done performance work?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He has built ecommerce platforms, and one rework cut page load times by 30 percent.",
+        "caller: Nice. What databases does he know?",
+        "agent: PostgreSQL, MySQL, SQL Server, and Redis.",
+        "caller: Thanks, that helps."
+      ],
+      "fail": {
+        "facts_from_profile": {
+          "agent": "profile",
+          "causes": [
+            "wrong_fact"
+          ]
+        }
+      }
+    },
+    {
+      "id": "near_misses",
+      "about": "No failure. An unclear turn, the caller's name said aloud, an honest refusal, a fact about the phone system, a read-back, and a question in the last turn.",
+      "visited": [
+        "classifier",
+        "profile",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Dev Patel.",
+        "agent: Thanks, Dev. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: [unclear]",
+        "agent: Sorry, I did not catch that. Do you have a project or a role in mind?",
+        "caller: A project. Does he do advisory work for startups?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes, Dev. He takes advisory roles, such as technical or AI advisor to a company.",
+        "caller: Where is he based?",
+        "agent: I do not share his location. He shares that directly. I can pass your details to him.",
+        "caller: Okay. What model are you?",
+        "agent: I run on Google Gemini. Each agent on this line runs on a different provider.",
+        "caller: Ha. Sure, pass my details on.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Dev, what is the best email for you?",
+        "caller: dev at kestrel labs dot com.",
+        "agent: So Dev Patel wants to talk about advisory work for a startup, and the reply goes to dev at kestrel labs dot com. Is that right?",
+        "caller: Yes. Oh, and how soon will he reply?"
+      ],
+      "fail": {}
+    },
+    {
+      "id": "wrong_number",
+      "about": "The caller has the wrong number. No question, and no fact about the owner.",
+      "visited": [
+        "classifier"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Oh. I think I have the wrong number.",
+        "agent: No problem. Is there something I can help with?",
+        "caller: No, sorry. Bye.",
+        "agent: Goodbye."
+      ],
+      "fail": {},
+      "na": [
+        "question_answered",
+        "facts_from_profile"
+      ]
+    },
+    {
+      "id": "price_made_up_and_no_handoff",
+      "about": "The profile agent states a price that no note holds. Then it does not bring in the contact agent for a message.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Nora.",
+        "agent: Thanks, Nora. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I need a contractor for an API project. What does he charge?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. He charges 150 dollars an hour for contract work.",
+        "caller: Okay. Can you take a message for him?",
+        "agent: I am the profile agent. I can tell you about his skills and his projects.",
+        "caller: So, no message?",
+        "agent: Would you like to hear about his projects?",
+        "caller: No. I guess not. Bye."
+      ],
+      "fail": {
+        "facts_from_profile": {
+          "agent": "profile",
+          "causes": [
+            "invented_fact"
+          ]
+        },
+        "question_answered": {
+          "agent": "profile",
+          "causes": [
+            "no_handoff_for_question",
+            "question_ignored"
+          ]
+        }
+      }
+    },
+    {
+      "id": "facts_in_other_words",
+      "about": "No failure. Two agents state facts from the profile notes in other words.",
+      "visited": [
+        "classifier",
+        "consultant",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Rachel Kim.",
+        "agent: Thanks, Rachel. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: We have a single-customer app and we want to sell it to many customers. Is that something he does?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. Yes. He turns single-customer applications into multi-tenant platforms, with roles and permissions for each customer.",
+        "caller: We're on AWS. Is that a problem?",
+        "agent: No. He works with AWS, Docker, and CI/CD.",
+        "caller: And has he built anything of his own I can look at?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. One is Reflex Search, a code search engine for developers and AI coding assistants. Another is Plenum, a database safety layer for AI coding agents.",
+        "caller: Perfect. I'll take a look. Thanks."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "company_asked_after_a_handoff",
+      "about": "The caller tells the first agent the company. The contact agent asks for it.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: It's Hannah.",
+        "agent: Thanks, Hannah. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'm with Bluepeak Logistics, and we want a chat agent for customer support. Can he get in touch?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Hannah, I can pass that to him. Which company are you with?",
+        "caller: Bluepeak Logistics.",
+        "agent: And what is the best email?",
+        "caller: hannah at bluepeak dot com.",
+        "agent: So Hannah from Bluepeak Logistics wants a chat agent for customer support, and the reply goes to hannah at bluepeak dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_after_handoff"
+          ]
+        }
+      }
+    },
+    {
+      "id": "budget_asked_again_in_other_words",
+      "about": "The consultant agent asks for the budget two times, in different words.",
+      "visited": [
+        "classifier",
+        "consultant"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Oscar.",
+        "agent: Thanks, Oscar. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We want to add AI to our support inbox.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. He integrates AI into existing products and workflows. What budget do you have for this?",
+        "caller: About forty thousand dollars.",
+        "agent: Good. How many support messages do you get in a month?",
+        "caller: Around nine thousand.",
+        "agent: Thanks. And how much money can you spend on the project?",
+        "caller: Forty thousand, like I said.",
+        "agent: Understood. Shall I bring in the contact agent to take your details?",
+        "caller: Not now. Thanks."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "consultant",
+          "causes": [
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "name_asked_by_the_contact_agent",
+      "about": "The contact agent asks for the name that the caller gave at the start.",
+      "visited": [
+        "classifier",
+        "profile",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Luis Ortega.",
+        "agent: Thanks, Luis. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Does he work with Rust?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. Rust is one of his languages.",
+        "caller: Good. I'd like him to contact me.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. I can pass that on. May I have your name, please?",
+        "caller: Luis Ortega. I gave it at the start.",
+        "agent: Thanks, Luis. What is the best email for you?",
+        "caller: luis at ortega dev dot com.",
+        "agent: So Luis Ortega wants {owner} to get in touch, at luis at ortega dev dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "name_asked_once": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_after_handoff"
+          ]
+        }
+      }
+    },
+    {
+      "id": "question_skipped_two_times",
+      "about": "The caller asks two times if the line can transfer the call. The tour agent talks about handoffs.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Mei.",
+        "agent: Thanks, Mei. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Look around, I guess. Can this thing transfer me to him?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line has several AI voice agents, and each one runs on a different provider. Would you like to hear how a handoff works?",
+        "caller: Sure. But can it transfer me to him or not?",
+        "agent: In a handoff, one agent passes the call and its notes to the next agent. What else would you like to know?",
+        "caller: Nothing. Bye."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "tour",
+          "causes": [
+            "question_ignored",
+            "answered_other_question"
+          ]
+        }
+      }
+    },
+    {
+      "id": "employer_made_up",
+      "about": "The profile agent names two employers. The profile notes hold no employer. The company names are made up.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: I'm Daniel.",
+        "agent: Thanks, Daniel. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A role. Where has he worked?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. He worked at Globex for six years, and then at Initech.",
+        "caller: Impressive. And is he open to contract work?",
+        "agent: Yes. He is open to consulting and contract projects.",
+        "caller: Thanks."
+      ],
+      "fail": {
+        "facts_from_profile": {
+          "agent": "profile",
+          "causes": [
+            "invented_fact"
+          ]
+        }
+      }
+    },
+    {
+      "id": "only_new_details_asked",
+      "about": "No failure. The caller gives the name, the company and the need early. The contact agent asks only for what is missing.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Fatima Noor, from Cedar Dental.",
+        "agent: Thanks, Fatima. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: We want an AI agent for our phone menu. Please have him email me.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Fatima, I have that Cedar Dental wants an AI agent for its phone menu. What is the best email for you?",
+        "caller: fatima at cedar dental dot com.",
+        "agent: And is there a phone number, in case he wants to call?",
+        "caller: No, email only.",
+        "agent: So Fatima Noor from Cedar Dental wants an AI agent for a phone menu, and the reply goes to fatima at cedar dental dot com. Is that right?",
+        "caller: Yes.",
+        "agent: I have sent it. He will follow up."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "honest_no_and_a_handoff",
+      "about": "No failure. The profile agent does not share the education, does not know a price, and the contact agent takes the question.",
+      "visited": [
+        "classifier",
+        "profile",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Ben.",
+        "agent: Thanks, Ben. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Where did he go to school?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. I do not share his education. He shares that directly. I can pass your details to him.",
+        "caller: Fine. Does he do code reviews?",
+        "agent: Yes, Ben. He reviews architecture and code, and gives a clear plan to fix what is found.",
+        "caller: What would a review of a small app cost?",
+        "agent: I do not know his prices. The contact agent can pass that question to him.",
+        "caller: Okay, do that.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Ben, what is the best email for a reply about the price of a code review?",
+        "caller: ben at tidewater apps dot com.",
+        "agent: Thanks. I have sent your question to him."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "second_question_is_new",
+      "about": "No failure. The consultant agent asks for the month, after the caller said only 'by the summer'.",
+      "visited": [
+        "classifier",
+        "consultant",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Ingrid.",
+        "agent: Thanks, Ingrid. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We need our old CRM rebuilt by the summer.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. He has rebuilt a large CRM before. Which month in the summer is the deadline?",
+        "caller: The end of July.",
+        "agent: And how many people use the CRM today?",
+        "caller: About two hundred.",
+        "agent: Thanks, Ingrid. A rebuild for two hundred users by the end of July is work that he can plan with you. Shall I bring in the contact agent?",
+        "caller: Yes, please.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Ingrid, I have the CRM rebuild, the two hundred users, and the end of July. What is the best email for you?",
+        "caller: ingrid at fjord systems dot no."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "phone_number_asked_two_times",
+      "about": "The contact agent asks for the phone number that the caller gave it.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Carla Mendes.",
+        "agent: Thanks, Carla. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'd like him to call me about an advisory role.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Carla, I can pass that on. What is the best phone number for you?",
+        "caller: Five five five, zero one four two.",
+        "agent: Thanks. Which company is the advisory role with?",
+        "caller: Solara Energy.",
+        "agent: Good. What number can he reach you at?",
+        "caller: Five five five, zero one four two. I just gave it to you.",
+        "agent: So Carla Mendes from Solara Energy wants a call about an advisory role, at five five five, zero one four two. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "need_asked_after_two_handoffs",
+      "about": "The caller tells the first agent the need. Two handoffs later, the contact agent asks for it.",
+      "visited": [
+        "classifier",
+        "profile",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Pavel.",
+        "agent: Thanks, Pavel. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We have to move our call center to a new telephony provider. Has he done that?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He has done a telephony migration, and he plans and runs migrations like that.",
+        "caller: Good. Then I want to leave my details.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Pavel, I can take your details. What do you need help with?",
+        "caller: The move to a new telephony provider.",
+        "agent: And what is the best email for you?",
+        "caller: pavel at corvid calls dot com.",
+        "agent: So Pavel wants help to move a call center to a new telephony provider, and the reply goes to pavel at corvid calls dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_after_handoff"
+          ]
+        }
+      }
+    },
+    {
+      "id": "details_said_back_not_asked",
+      "about": "No failure. The contact agent says the caller's details back as statements, and asks only for what is missing.",
+      "visited": [
+        "classifier",
+        "consultant",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Yuki Tanaka.",
+        "agent: Thanks, Yuki. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We want a dashboard for our sales team by the end of May.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. He has built a customizable dashboard framework. How many people are on the sales team?",
+        "caller: Thirty.",
+        "agent: Thanks. A dashboard for thirty people by the end of May. Shall I bring in the contact agent?",
+        "caller: Yes.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Yuki, you said a dashboard for a sales team of thirty, by the end of May. What is the best email for you?",
+        "caller: yuki at marlow sales dot com.",
+        "agent: Is there something that you want to add to the message?",
+        "caller: No, that's all.",
+        "agent: So Yuki Tanaka wants a dashboard for a sales team of thirty by the end of May, and the reply goes to yuki at marlow sales dot com. Is that right?",
+        "caller: That's right."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_says_it_two_times",
+      "about": "No failure. The caller says the same detail two times without a question. No agent asks for it again.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Omar.",
+        "agent: Thanks, Omar. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'm with Tallgrass Insurance. We need an SMS agent for claims. Can he email me?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Omar, I can pass that on. What is the best email for you?",
+        "caller: omar at tallgrass dot com. That's Tallgrass Insurance, as I said.",
+        "agent: Thanks. How soon do you want to start?",
+        "caller: Next quarter.",
+        "agent: So Omar from Tallgrass Insurance wants an SMS agent for claims, with a start next quarter, and the reply goes to omar at tallgrass dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "team_size_asked_after_a_handoff",
+      "about": "The caller tells the first agent the team size. The consultant agent asks for it. The caller does not complain.",
+      "visited": [
+        "classifier",
+        "consultant"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Anika.",
+        "agent: Thanks, Anika. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We are twelve engineers, and we have no architect. Can he help a team like that?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. Yes. He acts as a part-time or contract architect for a team that does not have one. How many engineers are on the team?",
+        "caller: Twelve.",
+        "agent: Thanks. Which cloud does the team use?",
+        "caller: AWS.",
+        "agent: Good. He sets up cloud infrastructure on AWS. Shall I bring in the contact agent?",
+        "caller: Not today. Thank you."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "consultant",
+          "causes": [
+            "asked_again_after_handoff"
+          ]
+        }
+      }
+    },
+    {
+      "id": "start_date_asked_two_times",
+      "about": "The contact agent asks for the start date two times, in different words. The caller does not complain.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Victor Lang.",
+        "agent: Thanks, Victor. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to leave a message about a contract role.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Victor, I can take that. When does the contract start?",
+        "caller: On the first of June.",
+        "agent: And how long is the contract?",
+        "caller: Six months.",
+        "agent: Thanks. What is the start date of the role?",
+        "caller: The first of June.",
+        "agent: And the best email for you?",
+        "caller: victor at lang partners dot com.",
+        "agent: So Victor Lang has a six-month contract role that starts on the first of June, and the reply goes to victor at lang partners dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "project_asked_after_a_handoff",
+      "about": "The caller describes the project to the first agent. The consultant agent asks what the project is. The caller does not complain.",
+      "visited": [
+        "classifier",
+        "consultant"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Leila.",
+        "agent: Thanks, Leila. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We want to connect our online store to a tax service and to our bank.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. What kind of project do you have?",
+        "caller: An integration of our store with a tax service and our bank.",
+        "agent: He builds integrations with payment, banking, and tax services. Do you have a date in mind?",
+        "caller: Before the end of the year.",
+        "agent: Good. Shall I bring in the contact agent to take your details?",
+        "caller: Yes, later. Thanks."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "consultant",
+          "causes": [
+            "asked_again_after_handoff"
+          ]
+        }
+      }
+    },
+    {
+      "id": "company_asked_two_times",
+      "about": "The contact agent asks for the company two times. The caller does not complain.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Hi, Sam Okoro.",
+        "agent: Thanks, Sam. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Please ask him to email me about consulting.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Sam, I can do that. Which company are you with?",
+        "caller: Redwood Freight.",
+        "agent: What is the best email for you?",
+        "caller: sam at redwood freight dot com.",
+        "agent: Thanks. And what is the name of your company?",
+        "caller: Redwood Freight.",
+        "agent: So Sam Okoro from Redwood Freight wants an email about consulting, at sam at redwood freight dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "nothing_asked_again": {
+          "agent": "contact",
+          "causes": [
+            "asked_again_same_agent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "one_detail_read_back",
+      "about": "No failure. The contact agent reads one detail back to check it, and then reads the whole message back.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Nadia Haddad.",
+        "agent: Thanks, Nadia. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I'd like him to email me about an AI advisor role.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Nadia, what is the best email for you?",
+        "caller: nadia at helix bio dot com.",
+        "agent: I have nadia at helix bio dot com. Did I get that right?",
+        "caller: Yes.",
+        "agent: Which company is the role with?",
+        "caller: Helix Bio.",
+        "agent: So Nadia Haddad from Helix Bio wants an email about an AI advisor role, at nadia at helix bio dot com. Is that right?",
+        "caller: That's right."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "more_exact_detail_asked",
+      "about": "No failure. The caller says 'next month' and 'a small team'. The consultant agent asks for the day and the number.",
+      "visited": [
+        "classifier",
+        "consultant"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Theo.",
+        "agent: Thanks, Theo. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We start next month, with a small team, and we need an API designed.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. He designs new platforms and APIs, from the first plan to production. Which day next month do you start?",
+        "caller: The tenth.",
+        "agent: And how many people are on the team?",
+        "caller: Four.",
+        "agent: Thanks. Is there something else that you want to know?",
+        "caller: No.",
+        "agent: Shall I bring in the contact agent to take your details?",
+        "caller: Not yet. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "all_details_up_front",
+      "about": "No failure. The caller gives each detail in one turn. The contact agent asks only for a phone number, which is new.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Julia Brandt, from Osprey Travel, and my email is julia at osprey travel dot com.",
+        "agent: Thanks, Julia. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We need our booking site moved to a monorepo. Please have him write to me.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Julia, I have Osprey Travel, the move of the booking site to a monorepo, and julia at osprey travel dot com. Is there a phone number too?",
+        "caller: No, email is best.",
+        "agent: So Julia Brandt from Osprey Travel wants a booking site moved to a monorepo, and the reply goes to julia at osprey travel dot com. Is that right?",
+        "caller: Yes.",
+        "agent: I have sent it. He will follow up."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "asked_again_after_an_unclear_turn",
+      "about": "No failure. The caller's answer has no clear words, so the contact agent asks one more time.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Rob.",
+        "agent: Thanks, Rob. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want him to call me back about a staff engineer role.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Rob, what is the best phone number for you?",
+        "caller: [unclear]",
+        "agent: Sorry, I did not catch that. What is the best phone number for you?",
+        "caller: Five five five, zero one nine eight.",
+        "agent: And which company is the role with?",
+        "caller: Meridian Robotics.",
+        "agent: So Rob wants a call about a staff engineer role at Meridian Robotics, at five five five, zero one nine eight. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "start_question_passed_over",
+      "about": "The caller asks when the owner could start. The profile agent talks about his experience. The caller does not ask again.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Hi, this is Camille.",
+        "agent: Thanks, Camille. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A role. Is he open to a software architect role?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He is open to staff engineer and software architect roles.",
+        "caller: Good. When could he start?",
+        "agent: He has more than 12 years of experience with platforms and cloud systems. Would you like to hear about his skills?",
+        "caller: Sure, go on.",
+        "agent: He works with TypeScript, Python, Go, and Rust, and with AWS and Docker.",
+        "caller: Okay, thanks. Bye."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "profile",
+          "causes": [
+            "answered_other_question",
+            "question_ignored"
+          ]
+        }
+      }
+    },
+    {
+      "id": "length_question_then_a_handoff",
+      "about": "The caller asks how long a project takes. The consultant agent does not answer. The handoff that comes later is for the caller's details.",
+      "visited": [
+        "classifier",
+        "consultant",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Henrik.",
+        "agent: Thanks, Henrik. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. We want a multi-agent workflow for insurance claims.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the consultant agent, running on Anthropic Claude. He designs multi-agent workflows that run for a long time and survive failures.",
+        "caller: Roughly how long does a project like that take?",
+        "agent: Those workflows can ask a person to approve key steps. Shall I bring in the contact agent to take your details?",
+        "caller: Okay, yes.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Henrik, what is the best email for you?",
+        "caller: henrik at nordlys insurance dot com.",
+        "agent: So Henrik wants a multi-agent workflow for insurance claims, and the reply goes to henrik at nordlys insurance dot com. Is that right?",
+        "caller: Yes."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "consultant",
+          "causes": [
+            "answered_other_question",
+            "question_ignored"
+          ]
+        }
+      }
+    },
+    {
+      "id": "tour_question_dropped",
+      "about": "The caller asks how many agents the line has. The tour agent talks about call transfers. The caller does not ask again.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Zoe.",
+        "agent: Thanks, Zoe. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to look around.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This phone line routes a caller between AI voice agents. What would you like to hear about first?",
+        "caller: How many agents are there on this line?",
+        "agent: The line can transfer a call to him during business hours. Would you like to hear how a handoff works?",
+        "caller: No, thanks. That's enough for today."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "tour",
+          "causes": [
+            "answered_other_question",
+            "question_ignored"
+          ]
+        }
+      }
+    },
+    {
+      "id": "first_question_dropped_second_answered",
+      "about": "The caller asks if the owner can call tomorrow. The profile agent does not respond to that. It answers the next question.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: My name is Arjun.",
+        "agent: Thanks, Arjun. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. Does he do consulting?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He is open to consulting and contract projects.",
+        "caller: Can he call me tomorrow?",
+        "agent: He also takes advisory roles. What else would you like to know?",
+        "caller: Which databases does he use?",
+        "agent: PostgreSQL, MySQL, SQL Server, and Redis.",
+        "caller: Thanks."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "profile",
+          "causes": [
+            "answered_other_question",
+            "question_ignored"
+          ]
+        }
+      }
+    },
+    {
+      "id": "answer_after_a_handoff",
+      "about": "No failure. The first agent hands each question to the right agent, and that agent answers.",
+      "visited": [
+        "classifier",
+        "profile",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Clara.",
+        "agent: Thanks, Clara. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Does he work with C sharp?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. C sharp and dot NET are in his skills.",
+        "caller: Really?",
+        "agent: Yes. He also works with Vue and React.",
+        "caller: And how do the handoffs on this line work?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. One agent passes the call and its notes to the next agent, and the new agent says which agent it is.",
+        "caller: Got it. Thanks."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "two_honest_refusals",
+      "about": "No failure. The profile agent does not know a price and does not share employers. It says so each time.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Felix.",
+        "agent: Thanks, Felix. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. What is his day rate?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. I do not know his rates. The contact agent can pass that question to him.",
+        "caller: No need. Which companies has he worked for?",
+        "agent: I do not share his employers. He shares them directly.",
+        "caller: Fair enough. Does he know Docker?",
+        "agent: Yes. Docker is in his skills, with AWS and CI/CD.",
+        "caller: Thanks, bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "small_talk_and_a_last_question",
+      "about": "No failure. The agent answers a small-talk question. The caller's last turn holds a question, and the call ends.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: It's Maya. How are you today?",
+        "agent: I am well, thanks, Maya. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A role. Is he open to advisory roles?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He takes advisory roles, such as technical or AI advisor to a company.",
+        "caller: Great. And does he travel for work?"
+      ],
+      "fail": {}
+    },
+    {
+      "id": "answer_one_turn_late",
+      "about": "No failure. The profile agent asks what the caller means, and then answers the question.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Kofi.",
+        "agent: Thanks, Kofi. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. Has he worked with payments?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Do you mean payment services in an online store?",
+        "caller: Yes, that.",
+        "agent: Yes. He has built ecommerce platforms with payment, banking, and tax integrations.",
+        "caller: Does he use PHP?",
+        "agent: Yes. PHP and Laravel are in his skills.",
+        "caller: Perfect, thanks."
+      ],
+      "fail": {}
+    }
+  ]
+}

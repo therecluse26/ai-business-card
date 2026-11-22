@@ -11,6 +11,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 from ai_call_center.agents.specs import LEGS
+from ai_call_center.analytics import AnalyticsStore
+from ai_call_center.caller_voice import voice_sentence, voice_summary
 from ai_call_center.decisions import Decision
 from ai_call_center.graph.state import CallContext, CallState
 from ai_call_center.callers import UNKNOWN_NUMBERS, CallSummary, history_text, recall, transcript_lines
@@ -72,9 +74,12 @@ def forget(ctx: CallContext) -> tuple[str, list[str]]:
     call_ids = [call.call_control_id for call in memory.calls] if memory else []
     if ctx.caller_number not in UNKNOWN_NUMBERS:
         ctx.leads.forget(ctx.caller_number, call_ids=call_ids, leads=leads)
+        # The grader's notes can say what happened on those calls. The call in progress gets no record at all.
+        AnalyticsStore(ctx.leads.connection).drop_notes(call_ids)
     ctx.forgotten = True
     ctx.caller_history, ctx.identity_confirmed, ctx.returning_name = "", False, ""
     ctx.held_message, ctx.refused_transfer = None, None
+    ctx.voice_readings.clear()  # and the voice reader hears no more of this call
     log.info("call %s: the caller asked to be forgotten (%d earlier calls, %d messages)", ctx.call_control_id, len(call_ids), len(leads))
     owner = ctx.owner_name.split()[0] if ctx.owner_name.strip() else "the owner"
     words = f"Done. This line won't remember you. Any message already sent to {owner} stays with {owner}."
@@ -138,6 +143,7 @@ def call_details(ctx: CallContext, *, kind: str, notes: str, visited: list[str],
         line=" ".join(part for part in (info.line_type, f"on {info.carrier}" if info.carrier else "") if part) if info else "",
         area=", ".join(part for part in (info.city.title(), info.state) if part) if info else "",
         registered_name=info.caller_name if info else "",
+        voice=voice_summary(ctx.voice_readings),
     )
 
 
@@ -268,6 +274,7 @@ def describe_call(ctx: CallContext, *, visited: list[str], active_agent: str, le
             f" A decision model, Jev from TypeSafe AI, read the caller's request for a live call: {round(d.probability * 100)} percent yes, in {d.millis} milliseconds."
             for d in ctx.decisions[-1:]
         )
+        + (f" {heard}" if (heard := voice_sentence(ctx.voice_readings)) else "")
     )
 
 

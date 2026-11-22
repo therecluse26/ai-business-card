@@ -337,3 +337,56 @@ def test_a_yes_to_the_read_back_with_no_save_is_caught_once(ctx):
     assert missed_save(ctx, [*lines[:1], "caller: No, the rate is wrong.", answered[-1]]) == 0
     ctx.leads.save(Lead(name="Steve", email="", company="", need="A role.", caller_number=NUMBER, call_control_id=ctx.call_control_id, created_at=now_iso()))
     assert missed_save(ctx, answered) == 0  # saved
+
+
+# --- the summary check, with one more try for the model ---
+
+
+async def test_a_summary_with_a_fault_goes_back_to_the_model_one_time_with_the_fault_named():
+    from ai_call_center.callers import summary_faults
+
+    model = scripted(
+        '{"summary": "Steve wants a call back on 555-555-0123 about a booking platform.", "topic": "a booking platform", "interest": "project"}',
+        '{"summary": "Steve wants a call back about a booking platform.", "topic": "a booking platform", "interest": "project"}',
+    )
+    summary = await summarize_call([{"role": "user", "content": "Hi, this is Steve."}], model)
+    assert summary.tries == 2 and summary.summary == "Steve wants a call back about a booking platform." and not summary_faults(summary)
+    second_request = model.calls[1]
+    assert len(second_request) == 3 and "555-555-0123" in second_request[1].content  # its own first answer
+    assert 'The "summary" holds an email address or a phone number.' in second_request[2].content
+
+
+async def test_a_summary_with_no_fault_is_one_request():
+    model = scripted('{"summary": "Asked how the system works.", "interest": "none"}', "should not be used")
+    summary = await summarize_call([{"role": "user", "content": "How does this work?"}], model)
+    assert summary.tries == 1 and len(model.calls) == 1
+
+
+async def test_code_removes_what_is_still_wrong_after_the_second_try():
+    long_summary = "Steve asked about a platform. " * 12  # 60 words
+    bad = '{"summary": "%s", "topic": "call 555 555 0123", "owner_note": "Write to steve@acme.test or +1 (555) 555-0123.", "interest": "project"}' % long_summary.strip()
+    model = scripted(bad, bad)
+    summary = await summarize_call([{"role": "user", "content": "Hi, this is Steve."}], model)
+    assert summary.tries == 2 and len(model.calls) == 2  # two tries, never a third
+    assert len(summary.summary.split()) <= 40 and summary.summary.endswith("platform.")  # whole sentences
+    assert summary.topic == ""  # a topic is spoken to the caller: a cut one is worse than none
+    assert "steve@acme.test" not in summary.owner_note and "555" not in summary.owner_note and "[removed]" in summary.owner_note
+
+
+async def test_an_answer_that_is_not_json_gets_a_second_try():
+    model = scripted("I cannot do that.", '{"summary": "Asked about a role.", "interest": "role"}')
+    summary = await summarize_call([{"role": "user", "content": "I have a role."}], model)
+    assert (summary.summary, summary.interest, summary.tries) == ("Asked about a role.", "role", 2)
+
+
+async def test_when_the_second_try_fails_the_first_answer_stands_after_the_repair():
+    model = scripted('{"summary": "Steve left 555-555-0123 for a call back.", "interest": "project"}')  # the model has no second answer
+    summary = await summarize_call([{"role": "user", "content": "Hi."}], model)
+    assert summary.summary == "Steve left [removed] for a call back." and summary.interest == "project" and summary.tries == 1
+
+
+def test_contact_details_finds_addresses_and_phone_numbers_and_leaves_dates_and_prices():
+    from ai_call_center.callers import contact_details
+
+    assert contact_details("Mail dana.b+work@acme-roofing.co.uk or ring +1 (555) 555-0123.") == ["dana.b+work@acme-roofing.co.uk", "+1 (555) 555-0123"]
+    assert contact_details("Start on 2026-12-01, at 150 dollars an hour, for 10,000,000 users, about 40 hours.") == []
