@@ -136,6 +136,13 @@ ASKS: dict[str, Asks] = {
     ),
 }
 
+# Feedback is not a rule: the caller says aloud that the line has a fault, or asks for a feature. A yes starts `feedback.py`.
+FEEDBACK = "feedback"
+FEEDBACK_ASKS: dict[str, str] = {
+    "fault": "Did the caller tell the agents that this phone line itself has a fault: that the line or an agent did something wrong, or that something does not work?",
+    "idea": "Did the caller ask for a new feature of this phone line, or suggest a change to how the phone line works?",
+}
+
 Send = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 
@@ -282,10 +289,18 @@ def questions(*, visited: list[str], owner: str, heard: bool, lines: list[AskedL
             asked[rule.key + APPLIES] = _yes_or_no(asks.applies.format(owner=owner))
         about = f"A rule for the AI agents on this call: {rule.title}. {rule.check.format(owner=owner)}"
         asked[rule.key + AGENT] = _choice(f"{about}\nIf an agent broke this rule, which agent did it?", _agent_options(visited))
+    for kind, question in FEEDBACK_ASKS.items():
+        asked[cause_key(FEEDBACK, kind)] = _yes_or_no(question)
     if heard:
         for key, question, options in READINGS:
             asked[key] = _choice(question, {option: meaning[0].upper() + meaning[1:] + "." for option, meaning in options})
     return asked
+
+
+def feedback_chances(answers: dict[str, Any]) -> dict[str, float]:
+    """For each kind of feedback: the probability that the caller gave it. A kind with no usable answer is left out."""
+    found = {kind: _yes(answers.get(cause_key(FEEDBACK, kind))) for kind in FEEDBACK_ASKS}
+    return {kind: chance for kind, chance in found.items() if chance is not None}
 
 
 def _winner(answer: Any, allowed: set[str]) -> tuple[str, float]:
@@ -382,6 +397,9 @@ def describe_answers(answers: dict[str, Any], *, heard: bool, lines: list[AskedL
         top = fail_probability(rule, answers, lines)
         parts.append(f"{rule.key} {top[1]:.2f}" if top is not None else f"{rule.key} (no answer)")
     line = "probability of a failure: " + ", ".join(parts)
+    said = feedback_chances(answers)
+    if said:
+        line += "; feedback from the caller: " + ", ".join(f"{kind} {chance:.2f}" for kind, chance in said.items())
     if heard:
         heard_as = []
         for key, _, options in READINGS:

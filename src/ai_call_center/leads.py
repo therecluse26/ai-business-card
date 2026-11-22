@@ -198,6 +198,9 @@ class LeadStore:
                 (caller_number, call_id),
             )
         self._conn.commit()
+        from ai_call_center.feedback import FeedbackStore  # here, not at the top: feedback.py imports the modules that import this one
+
+        FeedbackStore(self._conn).forget(caller_number)  # the count in a GitHub issue stays; the link to this number goes
 
     def calls_for(self, caller_number: str, *, exclude: str = "", limit: int = 3) -> list[CallRecord]:
         """Finished calls from this number, newest first."""

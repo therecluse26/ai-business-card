@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     improve_workflow: str = "improve.yml"
     improve_ref: str = "main"
     improve_daily_limit: int = 2  # fix requests in one day (US Eastern), at most
+    # A caller's feedback becomes a GitHub issue (feedback.py). It uses the token above, which then needs "Issues" (read and write) too.
+    feedback_issues: bool = True
+    feedback_daily_limit: int = 3  # new issues in one day (US Eastern), at most
     owner_name: str = "the owner"
     owner_name_pronunciation: str = ""  # optional; how the agents say the owner's name, in plain words
     # Words written so that a voice model says them right, as "<written>=<respelling>" pairs with commas

@@ -1,5 +1,5 @@
 {
-  "about": "Made-up calls with known verdicts, to measure a grader: `uv run check-grader --set`. Each transcript is made up; no caller's words are here. {owner} is the owner's name. The facts fit profile.md: when you change a fact there, change the calls that use it. `fail` names each model rule that must fail, with the agent at fault and the cause codes that are right. A rule that is not in `fail` must not fail. `na` names the rules that have no moment in the call. Write a new call and its verdicts before you run a grader on it.",
+  "about": "Made-up calls with known verdicts, to measure a grader: `uv run check-grader --set`. Each transcript is made up; no caller's words are here. {owner} is the owner's name. The facts fit profile.md: when you change a fact there, change the calls that use it. `fail` names each model rule that must fail, with the agent at fault and the cause codes that are right. A rule that is not in `fail` must not fail. `na` names the rules that have no moment in the call. `feedback` names the kinds of feedback that the caller gave about the phone line itself (\"fault\", \"idea\"); a call with no `feedback` has none. Write a new call and its verdicts before you run a grader on it.",
   "calls": [
     {
       "id": "facts_from_the_notes",
@@ -1345,6 +1345,198 @@
         "caller: Yes, that was me. Let us start something new: I have a second project.",
         "agent: Good. Tell me about the second project.",
         "caller: I will send it by email. Thanks, bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_reports_a_long_silence",
+      "about": "No rule fails. The caller reports a fault of the line: a long silence at each handoff.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "feedback": [
+        "fault"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Nadia.",
+        "agent: Thanks, Nadia. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to look around.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: Before we go on, I want to report a problem. After the first agent said it would bring you in, the line was silent for a long time. I thought the call had dropped. That is a bug.",
+        "agent: Thank you for telling me. I will note it for the owner. A handoff starts a new voice model, and that takes a moment.",
+        "caller: Okay. That is all I wanted to say. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_reports_a_wrong_agent",
+      "about": "The caller asked to leave a message and got the tour agent. The caller says so, and asks the agent to report it.",
+      "visited": [
+        "classifier",
+        "tour",
+        "contact"
+      ],
+      "feedback": [
+        "fault"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Felix.",
+        "agent: Thanks, Felix. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to leave a message for him.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: No, this is wrong. I asked to leave a message, and your system gave me the tour. Your routing is broken. Please report that to him.",
+        "agent: You are right, and I am sorry. I will report it. Let me bring in the contact agent for your message.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. What is the message?",
+        "caller: Tell him that the proposal is ready for review.",
+        "agent: I have it: the proposal is ready for review. He gets the message today.",
+        "caller: Thanks. Bye."
+      ],
+      "fail": {
+        "question_answered": {
+          "agent": "classifier",
+          "causes": [
+            "answered_other_question",
+            "no_handoff_for_question"
+          ]
+        }
+      }
+    },
+    {
+      "id": "caller_asks_for_spanish",
+      "about": "No rule fails. The caller asks for a feature: the line in Spanish.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "feedback": [
+        "idea"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Lucia.",
+        "agent: Thanks, Lucia. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Look around.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: This is nice. One suggestion: it would be great if this line could speak Spanish too. Half of my team would use it. Can you pass that on?",
+        "agent: Yes. I will pass on that you would like the line in Spanish.",
+        "caller: Great. Thanks, bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_wants_a_summary_by_text",
+      "about": "No rule fails. The caller suggests a feature: a text message with a summary after the call.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "feedback": [
+        "idea"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Ben.",
+        "agent: Thanks, Ben. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A role. Does he do contract work?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He is available for contract or full-time work.",
+        "caller: Good. You know what this line needs? You should add a feature that texts me a short summary when I hang up. I will forget half of this.",
+        "agent: That is a good idea. I will note it for the owner.",
+        "caller: Thanks. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_reports_a_fault_and_has_an_idea",
+      "about": "No rule fails. The caller reports that an agent's voice is too fast to follow, and asks for a way to pick the voice.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "feedback": [
+        "fault",
+        "idea"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Greta.",
+        "agent: Thanks, Greta. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Look around, please.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: I have to tell you something. The first agent talked much too fast, and I could not follow it. That is a problem with this line.",
+        "agent: Thank you. I will note for the owner that the first agent speaks too fast.",
+        "caller: And one idea: let the caller choose the voice at the start. That would be a good feature.",
+        "agent: I will note that too: a choice of voice at the start of a call.",
+        "caller: Good. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_asks_how_the_line_works",
+      "about": "No rule fails and no feedback. The caller asks what the line can do. A question about a feature is not a request for one.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Ravi.",
+        "agent: Thanks, Ravi. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Look around. Can this line send me a text message?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. Yes. I can text you a link to the portfolio.",
+        "caller: And which models do the agents use?",
+        "agent: Three voice models from three companies: OpenAI, Google and Amazon.",
+        "caller: Interesting. Thanks, bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_is_unhappy_about_the_owner",
+      "about": "No rule fails and no feedback. The caller is unhappy that the owner is not free sooner. That is about the owner, not about the phone line.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Astrid.",
+        "agent: Thanks, Astrid. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. Is he available now?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. He is available for contract or full-time work. I do not know his first free date.",
+        "caller: That is not good enough. He should put his calendar online. I do not like to wait for an answer.",
+        "agent: I understand. I can bring in the contact agent, so you can leave a message with your dates.",
+        "caller: No, I will send an email. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_corrects_one_answer",
+      "about": "No rule fails and no feedback. The caller corrects what an agent heard, and the agent repairs it. A correction is not a report of a fault.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Tariq.",
+        "agent: Thanks, Tariq. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to leave a message about a project.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. What is the message?",
+        "caller: Tell him that the kickoff is on Tuesday.",
+        "agent: I have it: the kickoff is on Thursday.",
+        "caller: No, Tuesday, not Thursday.",
+        "agent: Sorry. The kickoff is on Tuesday. He gets the message today.",
+        "caller: Right. Thanks, bye."
       ],
       "fail": {}
     }

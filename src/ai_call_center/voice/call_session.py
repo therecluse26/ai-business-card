@@ -75,13 +75,14 @@ from ai_call_center.callers import (
     transcript_lines,
 )
 from ai_call_center.config import Settings
-from ai_call_center.decision_grader import default_decision_grader
+from ai_call_center.decision_grader import default_decision_grader, feedback_chances
 from ai_call_center.decisions import default_decider
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.graph.state import CallContext
 from ai_call_center.grading import describe_scores, differences, grade_call, rule_of
 from ai_call_center.fault_report import FaultReport, summary_report, write_report
+from ai_call_center.feedback import report_feedback
 from ai_call_center.improve import FixRequest, request_fixes
 from ai_call_center.publish import publish_report
 from ai_call_center.graph.tools import (
@@ -693,6 +694,20 @@ class CallSession:
 
             # A failed rule starts the job that proposes a fix. A test call can start it too: it shows the loop with no caller.
             await request_fixes(self.settings, self.settings.leads_db, record, report=fault_of)
+            # What the caller said aloud about the line: a fault or a wish for a feature. It becomes a GitHub issue (feedback.py).
+            if decider is not None and decider.last_answers:
+                await report_feedback(
+                    self.settings,
+                    self.settings.leads_db,
+                    lines,
+                    chances=feedback_chances(decider.last_answers),
+                    model=grader,
+                    call_id=self.call_control_id,
+                    caller_number=ctx.caller_number,
+                    version=record.version,
+                    private=[name for name in (ctx.caller_name, ctx.returning_name) if name],
+                    config=tracing.run_config(self.call_control_id, "caller-feedback"),
+                )
         except Exception:
             log.exception("call %s: could not record the analytics", self.call_control_id)
         finally:
