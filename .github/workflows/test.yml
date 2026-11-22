@@ -12,16 +12,24 @@
 # that person made the event, and the checks run then. A draft cannot merge, so the checks run before the merge.
 # For a pull request that the fix job opened as ready, a person starts the run: close it and open it again.
 #
+# A push to main that changes a workflow file runs the same three checks. Such a push has no pull request,
+# and a change to improve.yml alone starts no deploy, so no other workflow tests it. The checks run after
+# the push: they do not stop it. For a push, the scorer compares the last commit with the commit before it.
+#
 # The run has no secret, and its token can only read. No check makes a model request.
-name: Test a pull request
+name: Test a change
 
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
 
-# One run for each pull request. A new commit stops the run of the commit before it.
+# One run for each pull request, and one for main. A new commit stops the run of the commit before it.
 concurrency:
-  group: test-${{ github.event.pull_request.number }}
+  group: test-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -34,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # the merge commit and main before it: the scorer compares the two
+          fetch-depth: 2 # this commit and the one before it (for a pull request: main): the scorer compares the two
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - id: sync
