@@ -105,6 +105,27 @@ jobs:
             echo "schema=$(uv run proposal schema)"
           } >> "$GITHUB_OUTPUT"
 
+      # A secret with a fault gives "Not logged in" much later, with no reason. This step says the fault at once.
+      # It prints the length of the token and never the token.
+      - name: Check the login of the coding agent
+        env:
+          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$TOKEN" ] && [ -z "$KEY" ]; then
+            echo "::error::No login for the coding agent. Add the repository secret CLAUDE_CODE_OAUTH_TOKEN (from 'claude setup-token') or ANTHROPIC_API_KEY."
+            exit 1
+          fi
+          if [ -z "$TOKEN" ]; then echo "The coding agent uses ANTHROPIC_API_KEY."; exit 0; fi
+          clean="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"
+          if [ "${#clean}" -lt 40 ] || [ "${#clean}" != "${#TOKEN}" ]; then
+            echo "::error::The secret CLAUDE_CODE_OAUTH_TOKEN is not a token: ${#TOKEN} characters, ${#clean} of them not white space. Run 'claude setup-token' and set the secret again, with the token on one line."
+            exit 1
+          fi
+          case "$clean" in
+            sk-ant-oat*) echo "The coding agent uses the subscription token (${#clean} characters, the expected start)." ;;
+            *) echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN does not start with sk-ant-oat. A token from 'claude setup-token' does." ;;
+          esac
       - name: The coding agent makes one change
         id: agent
         uses: anthropics/claude-code-action@v1
