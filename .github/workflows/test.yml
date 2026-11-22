@@ -1,14 +1,18 @@
-# A pull request runs the unit tests before a person merges it. A merge to main deploys (fly-deploy.yml).
+# A pull request runs three checks before a person merges it. A merge to main deploys (fly-deploy.yml).
+#   1. The unit tests. One of them is a dry run of the fix job (tests/test_fix_job.py).
+#   2. The scorer: a check that passed on main must not fail on the pull request.
+#   3. actionlint: the workflow files have no fault in their YAML, their expressions, or their shell.
 #
 # The run tests the pull request merged into main as main is now, not the branch alone.
+# The three checks are steps of one job, so a run starts one runner only. A failed check does not stop the next one.
 #
 # The fix job (improve.yml) opens its pull request with the token of its own run. GitHub starts no
 # workflow for an event that such a token made, so "opened" starts no run for that pull request.
 # A fix that the scorer does not show is a draft. When a person marks the draft as ready for review,
-# that person made the event, and the tests run then. A draft cannot merge, so the tests run before the merge.
+# that person made the event, and the checks run then. A draft cannot merge, so the checks run before the merge.
 # For a pull request that the fix job opened as ready, a person starts the run: close it and open it again.
 #
-# The run has no secret, and its token can only read. The tests make no model request.
+# The run has no secret, and its token can only read. No check makes a model request.
 name: Test a pull request
 
 on:
@@ -30,7 +34,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 2 # the merge commit and main before it: the scorer compares the two
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
-      - run: uv sync --frozen
-      - run: uv run pytest -q
+      - id: sync
+        run: uv sync --frozen
+
+      - name: Unit tests
+        run: uv run pytest -q
+
+      # Only the word list part of the scorer runs: it makes no model request and gives the same result each time.
+      # Before: the code of main, with the test set of the pull request. So the two scores have the same checks,
+      # as in the fix job. Some checks fail on main, so the measure is the comparison and not a full pass.
+      - name: The scorer must not get worse
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          git diff --binary HEAD^1 HEAD -- src > "$RUNNER_TEMP/code.patch"
+          if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply -R "$RUNNER_TEMP/code.patch"; fi
+          before=ok
+          uv run score-harness --out "$RUNNER_TEMP/before.json" || before=failed
+          if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply "$RUNNER_TEMP/code.patch"; fi
+          if [ "$before" = failed ]; then
+            # A pull request can change the scorer and the form of the test set together. Then the scorer of main cannot read the new test set.
+            echo "::warning::The scorer of main cannot read the test set of this pull request, so the two scores are not compared."
+            uv run score-harness
+            exit 0
+          fi
+          uv run score-harness --compare "$RUNNER_TEMP/before.json"
+
+      # The fix job starts only when a real call fails a rule, so a fault in its workflow file shows first in production.
+      # The image holds shellcheck, so actionlint also checks each shell script in a `run:` step.
+      - name: Check the workflow files
+        if: ${{ !cancelled() }}
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
