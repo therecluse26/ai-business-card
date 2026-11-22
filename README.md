@@ -742,22 +742,52 @@ No person starts this loop. A call ends, and the rest runs with no action from t
 
 1. **The grader scores the call** against its rules (`grading.py`). For a failed rule it also names
    the agent at fault and a cause code.
-2. **The server sends a fix request** (`improve.py`). It starts the workflow
+2. **The server writes a fault report** (`fault_report.py`): what the caller wanted, what the agent
+   did, and what the agent had to do. Code removes each private word before the report leaves.
+3. **The server sends a fix request** (`improve.py`) with the fault report. It starts the workflow
    `.github/workflows/improve.yml` with GitHub's REST API.
-3. **A coding agent makes one change** (the Claude Code GitHub Action). It reads the rule and the
-   agent's instructions. It adds one made-up call to `evals/calls.json` that shows the fault. Then it
-   changes one prompt or one word list.
-4. **Fixed code measures the change** (`proposal.py`, `score.py`). It checks which files changed, runs
+4. **A coding agent makes one change** (the Claude Code GitHub Action). It reads the fault report, the
+   rule and the agent's instructions. It adds one made-up call to `evals/calls.json` that shows the
+   fault. Then it changes one prompt or one word list.
+5. **Fixed code measures the change** (`proposal.py`, `score.py`). It checks which files changed, runs
    the unit tests, and runs the scorer before the change and after it.
-5. **The job opens a pull request** with the failure, the change, and both scores.
-6. **The owner reviews it.** A merge to `main` deploys the server. The next calls have a new harness
+6. **The job opens a pull request**. It starts with what went wrong in the call. Then it shows the
+   rule, the change, and both scores.
+7. **The owner reviews it.** A merge to `main` deploys the server. The next calls have a new harness
    version, and their scores show if the change helped.
 
-What a fix request holds: the rule, the agent, the cause code, the harness version, and two counts.
-Each name is a word from a fixed list in `grading.py`; a value that is not in its list is not sent,
-and the job refuses it again. So a fix request cannot hold what a caller said, and it cannot hold an
-instruction that a caller planted. The job has no transcript and no access to the traces. The
-repository is public, and everything in the job is safe to show there.
+What a fix request holds: the rule, the agent, the cause code, the harness version, two counts, and
+the fault report. Each name is a word from a fixed list in `grading.py`; a value that is not in its
+list is not sent, and the job refuses it again. The job has no transcript and no access to the traces.
+
+**The fault report** is the one part that comes from the call. The repository is public, and so are
+the logs of the job, so the report is made in two steps:
+
+1. The grader model (`GRADER_MODEL`) reads the transcript on the server and describes the fault in
+   three short texts. Its instructions: write "the caller" and "the agent", name the kind of a detail
+   and never the detail, and do not copy a sentence of the caller.
+2. Code removes what an instruction cannot promise (`scrub`):
+   - A word of the call stays only when it is public already: the word is in the source text of this
+     package in lower case. Each other word of the call becomes `[removed]`.
+   - Each name of the caller becomes `[removed]`. The names come from the server's record of the call
+     and from the transcript: the answer to the name question, and the words after "my name is".
+   - A word of the call with a capital letter inside a sentence becomes `[removed]`. The names of the
+     voice models stay.
+   - Each digit, each email address, each link, and a row of three or more number words is removed.
+   - A text has a length limit (1500, 600 and 500 characters) and a fixed set of characters.
+     The job checks both again and refuses a fix request that breaks them.
+
+The rule `summary_first_try` needs no model: its fault report is a fixed text for each fault that the
+summary check found ("The summary was longer than the word limit of the prompt.").
+
+What the scrub cannot promise:
+
+- A name of another person that is also a plain word ("mark", "rose") can stay, when the model writes
+  it in lower case or as the first word of a sentence. The model's instructions forbid names.
+- A caller can influence the report. The job gives it to the coding agent as a description of a fault
+  and tells the agent not to follow it. The limits on the coding agent below apply all the same.
+- A report with many `[removed]` marks is less clear. With no grader model, or after an error, the fix
+  request goes out with no fault report, and the pull request says so.
 
 Limits:
 
@@ -944,6 +974,7 @@ src/ai_call_center/
   caller_voice.py                a voice reading for each caller turn, and the texts for the tour agent and the lead email
   score.py                       `uv run score-harness`: the fixed score of the prompts and the word lists, against the made-up test set in evals/
   improve.py                     a fix request: a failed rule starts the GitHub workflow that proposes a fix
+  fault_report.py                what went wrong in a call, with each private word removed by code
   proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard on changed files, the pull request text)
   check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
   check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time

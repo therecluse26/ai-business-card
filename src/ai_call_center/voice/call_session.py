@@ -80,8 +80,9 @@ from ai_call_center.decisions import default_decider
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.graph.state import CallContext
-from ai_call_center.grading import describe_scores, differences, grade_call
-from ai_call_center.improve import request_fixes
+from ai_call_center.grading import describe_scores, differences, grade_call, rule_of
+from ai_call_center.fault_report import FaultReport, summary_report, write_report
+from ai_call_center.improve import FixRequest, request_fixes
 from ai_call_center.publish import publish_report
 from ai_call_center.graph.tools import (
     CALL_NOT_ENDED,
@@ -616,7 +617,7 @@ class CallSession:
             log.exception("call %s: could not send the warm lead email", self.call_control_id)
         return summary
 
-    async def _record_analytics(self, ctx: CallContext, stats: CallStats, messages: list, *, visited: list[str], outcome: str, summary_tries: int) -> None:
+    async def _record_analytics(self, ctx: CallContext, stats: CallStats, messages: list, *, visited: list[str], outcome: str, summary_tries: int, summary_faults: tuple[str, ...] = ()) -> None:
         """The grader scores the call, and the figures and the scores go to the analytics store (`analytics.py`).
 
         A caller who asked to be forgotten gets no record. Nothing here can stop the end of a call: a failure is logged.
@@ -678,8 +679,20 @@ class CallSession:
                 log.info("call %s: the grader model against the decision grader: %s", self.call_control_id, "; ".join(differ) if differ else "the same verdict for each rule that both checked")
             if not record.test:  # a test call is not in the report
                 await publish_report(self.settings)
+
+            async def fault_of(request: FixRequest) -> FaultReport:
+                """What went wrong, for the job that proposes a fix. Code removes each private word (fault_report.py)."""
+                rule = rule_of(request.rule)
+                if request.rule == "summary_first_try":
+                    return summary_report(summary_faults)  # fixed texts of the summary check; no model reads the call
+                if grader is None or rule is None:
+                    return FaultReport()
+                note = next((score.note for score in record.scores if score.rule == request.rule), "")
+                names = [name for name in (ctx.caller_name, ctx.returning_name) if name]
+                return await write_report(lines, rule=rule, agent=request.agent, note=note, model=grader, owner=self.settings.owner_name, private=names, config=tracing.run_config(self.call_control_id, "fault-report"))
+
             # A failed rule starts the job that proposes a fix. A test call can start it too: it shows the loop with no caller.
-            await request_fixes(self.settings, self.settings.leads_db, record)
+            await request_fixes(self.settings, self.settings.leads_db, record, report=fault_of)
         except Exception:
             log.exception("call %s: could not record the analytics", self.call_control_id)
         finally:
@@ -1239,6 +1252,7 @@ class CallSession:
 
         await runner.add_workers(worker)
         summary_tries, message_left = 0, False
+        summary_faults: tuple[str, ...] = ()
         try:
             await runner.run()
         finally:
@@ -1281,7 +1295,8 @@ class CallSession:
                 else:
                     # What was said, as each agent heard it. Without it, a call that went wrong cannot be read afterwards.
                     log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(self.respell.written_messages(context.messages))) or "(nothing)")
-                    summary_tries = (await self._finish_call(store, ctx, context.messages, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer")).tries
+                    summary = await self._finish_call(store, ctx, context.messages, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer")
+                    summary_tries, summary_faults = summary.tries, summary.first_faults
             store.close()
         if state.end_reason == "failover":
             call_audio.drop_later(self.call_control_id)  # the next media stream keeps it; with no next stream it is deleted
@@ -1296,7 +1311,7 @@ class CallSession:
             state.transfer_requested,
         )
         outcome = TRANSFER if state.end_reason == "transfer" else MESSAGE if message_left else NO_OUTCOME
-        await self._record_analytics(ctx, stats, context.messages, visited=[ENTRY_AGENT, *state.handoffs], outcome=outcome, summary_tries=summary_tries)
+        await self._record_analytics(ctx, stats, context.messages, visited=[ENTRY_AGENT, *state.handoffs], outcome=outcome, summary_tries=summary_tries, summary_faults=summary_faults)
 
     async def _handoff(
         self,

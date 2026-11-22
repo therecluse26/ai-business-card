@@ -6,9 +6,10 @@ in the repository. There a coding agent changes one prompt or one word list, a f
 the change (`score.py`), and the job opens a pull request with the evidence. Nobody starts the job by hand.
 
 What leaves the server is a fix request: the rule, the agent at fault, the cause code, the harness
-version, and two counts. Each of the three names is a word from a fixed list in `grading.py`, and the
-code here checks that. So a fix request cannot hold what a caller said, and it cannot hold an
-instruction that a caller planted. The repository is public; a fix request is safe to show there.
+version, two counts, and a fault report. Each of the three names is a word from a fixed list in
+`grading.py`, and the code here checks that. The fault report says what went wrong in the call, in
+three short texts. A model writes it and code removes each private word (`fault_report.py`). The
+repository is public; a fix request is made to be shown there. It never holds the transcript.
 
 Limits on the cost:
 
@@ -31,13 +32,14 @@ import logging
 import re
 import sqlite3
 import urllib.request
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from ai_call_center.analytics import AnalyticsStore, CallAnalytics, call_day
 from ai_call_center.config import Settings
+from ai_call_center.fault_report import LIMITS, FaultReport, safe
 from ai_call_center.grading import AGENTS, FAIL, NA, OTHER, rule_of
 
 log = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ COMMIT = re.compile(r"^[0-9a-f]{7,40}$")  # a clean version; "-dirty" and "unkno
 
 @dataclass(frozen=True)
 class FixRequest:
-    """One failed rule, as it leaves the server. Every field is a word from a fixed list, a commit, or a count."""
+    """One failed rule, as it leaves the server. A field is a word from a fixed list, a commit, a count, or a text of the fault report."""
 
     rule: str
     agent: str  # "" = the grader did not name one
@@ -59,6 +61,13 @@ class FixRequest:
     version: str
     failed_calls: int = 1  # graded calls at this version that failed the rule
     graded_calls: int = 1  # graded calls at this version where the rule applied
+    happened: str = ""  # the fault report (fault_report.py): what the caller wanted and what the agent did
+    agent_said: str = ""  # one sentence of an agent that shows the fault
+    expected: str = ""  # what the agent had to do
+
+    def with_report(self, report: FaultReport) -> FixRequest:
+        """This fix request with the fault report. A text with a character that a report cannot hold is left out."""
+        return replace(self, **{key: text if safe(text, LIMITS[key]) else "" for key, text in report.fields().items()})
 
     def inputs(self) -> dict[str, str]:
         """The inputs of the workflow. GitHub wants each one as a string."""
@@ -69,6 +78,9 @@ class FixRequest:
             "version": self.version,
             "failed_calls": str(self.failed_calls),
             "graded_calls": str(self.graded_calls),
+            "happened": self.happened,
+            "agent_said": self.agent_said,
+            "expected": self.expected,
         }
 
 
@@ -188,8 +200,13 @@ async def request_fixes(
     *,
     send: Callable[[urllib.request.Request], int] = _send,
     now: datetime | None = None,
+    report: Callable[[FixRequest], Awaitable[FaultReport]] | None = None,
 ) -> list[FixRequest]:
     """Start one job for each new failure of this call. It gives the fix requests that GitHub accepted.
+
+    `report` makes the fault report of one fix request. It runs only for a request that is sent, so a
+    failure that asked before costs no model request. With no `report`, or when it fails, the fix
+    request goes out with no fault report.
 
     It never raises: the end of a call must not fail because a job did not start. A failure is one log
     line, and the fix request is not stored, so the same failure on a later call asks again."""
@@ -208,6 +225,11 @@ async def request_fixes(
                 if store.asked_on(day) >= settings.improve_daily_limit:
                     log.info("fix request for %s not sent: the limit of %d for one day is reached", request.rule, settings.improve_daily_limit)
                     break
+                if report is not None:
+                    try:
+                        request = request.with_report(await report(request))
+                    except Exception:
+                        log.exception("fix request for %s: no fault report", request.rule)
                 try:
                     status = await asyncio.to_thread(send, dispatch_request(to, request))
                 except Exception as error:
@@ -216,7 +238,10 @@ async def request_fixes(
                     continue
                 store.add(request, day)
                 sent.append(request)
-                log.info("fix request sent to %s (HTTP %s): rule %s, agent %s, cause %s, version %s", to.repository, status, request.rule, request.agent or "-", request.cause, request.version)
+                log.info(
+                    "fix request sent to %s (HTTP %s): rule %s, agent %s, cause %s, version %s, fault report: %s",
+                    *(to.repository, status, request.rule, request.agent or "-", request.cause, request.version, "yes" if request.happened else "no"),
+                )
         finally:
             store.close()
             analytics.close()

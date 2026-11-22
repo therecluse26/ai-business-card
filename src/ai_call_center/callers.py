@@ -206,6 +206,7 @@ class CallSummary:
     timeline: str = ""
     size: str = ""
     tries: int = 0  # the answers the summary model gave: 0 = no summary was asked for, 2 = the check sent the first one back
+    first_faults: tuple[str, ...] = ()  # what the check found in the first answer; fixed texts of `summary_faults`, for the fault report
 
 
 def _short(text: str, words: int) -> str:
@@ -294,6 +295,7 @@ async def summarize_call(messages: list[Any], model: BaseChatModel, config: dict
         return CallSummary()
     asked: list[Any] = [HumanMessage(SUMMARY_PROMPT.format(transcript="\n".join(lines)))]
     best, best_faults, tries = CallSummary(), [""], 0
+    first_faults: tuple[str, ...] = ()
     try:
         while tries < SUMMARY_TRIES:
             reply = await model.ainvoke(asked, config=config)
@@ -301,6 +303,8 @@ async def summarize_call(messages: list[Any], model: BaseChatModel, config: dict
             text = reply.text if isinstance(reply.text, str) else reply.text()
             summary = _parse_summary(text)
             faults = summary_faults(summary)
+            if tries == 1:
+                first_faults = tuple(faults)
             if tries == 1 or len(faults) < len(best_faults):
                 best, best_faults = summary, faults
             if not faults:
@@ -310,4 +314,4 @@ async def summarize_call(messages: list[Any], model: BaseChatModel, config: dict
     except Exception:
         # The answer of an earlier try stands. With no answer at all, the summary is empty.
         log.exception("call summary failed")
-    return replace(_repaired(best), tries=tries)
+    return replace(_repaired(best), tries=tries, first_faults=first_faults)

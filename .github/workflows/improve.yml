@@ -1,8 +1,9 @@
 # A call that fails a rule of the grader starts this job. Nobody starts it by hand.
 #
 # The phone server sends a fix request (src/ai_call_center/improve.py): the rule, the agent at fault,
-# a cause code, the harness version, and two counts. Each name is a word from a fixed list in
-# grading.py. The job has no transcript, so it cannot show what a caller said.
+# a cause code, the harness version, two counts, and a fault report. Each name is a word from a fixed
+# list in grading.py. The fault report says what went wrong in the call, with each private word removed
+# by code on the server (src/ai_call_center/fault_report.py). The job has no transcript.
 #
 # Two jobs, so the coding agent never has a token that can write:
 #   change   the agent changes one prompt or one word list. Its token can only read. The change
@@ -57,6 +58,21 @@ on:
         required: false
         default: "1"
         type: string
+      happened:
+        description: "Fault report: what the caller wanted and what the agent did (no private word)"
+        required: false
+        default: ""
+        type: string
+      agent_said:
+        description: "Fault report: one sentence of an agent that shows the fault"
+        required: false
+        default: ""
+        type: string
+      expected:
+        description: "Fault report: what the agent had to do"
+        required: false
+        default: ""
+        type: string
 
 # One proposal at a time. A second fix request waits; it does not stop the first.
 concurrency:
@@ -74,6 +90,9 @@ env:
   FIX_VERSION: ${{ inputs.version }}
   FIX_FAILED_CALLS: ${{ inputs.failed_calls }}
   FIX_GRADED_CALLS: ${{ inputs.graded_calls }}
+  FIX_HAPPENED: ${{ inputs.happened }}
+  FIX_AGENT_SAID: ${{ inputs.agent_said }}
+  FIX_EXPECTED: ${{ inputs.expected }}
   OWNER_NAME: ${{ vars.OWNER_NAME }}
 
 jobs:
