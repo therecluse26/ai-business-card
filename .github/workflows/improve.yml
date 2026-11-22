@@ -122,6 +122,14 @@ jobs:
             --disallowedTools "WebFetch,WebSearch"
             --json-schema '${{ steps.task.outputs.schema }}'
 
+      # The action hides what the coding agent printed. This step shows only the end result: the error text of a
+      # refused login or a reached usage limit is there. It holds no secret.
+      - name: Why the coding agent failed
+        if: failure() && steps.agent.conclusion == 'failure'
+        run: |
+          file="$RUNNER_TEMP/claude-execution-output.json"
+          if [ ! -f "$file" ]; then echo "The coding agent wrote no output file." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          jq -rs 'flatten | .[] | if .type == "result" then "result: \(.subtype), error: \(.is_error), turns: \(.num_turns)\n\((.result // "") | tostring | .[0:800])" elif (.type == "assistant" and .error != null) then "error of the model request: \(.error)" else empty end' "$file" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Make a patch of the change
         id: patch
         run: |
