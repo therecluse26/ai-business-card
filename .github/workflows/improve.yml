@@ -106,8 +106,10 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # A secret with a fault gives "Not logged in" much later, with no reason. This step says the fault at once.
-      # It prints the length of the token and never the token.
+      # A token that was copied from a terminal can hold a line break or a space. A token has no white space,
+      # so the step removes it. It prints the length of the token and never the token.
       - name: Check the login of the coding agent
+        id: login
         env:
           TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -118,10 +120,15 @@ jobs:
           fi
           if [ -z "$TOKEN" ]; then echo "The coding agent uses ANTHROPIC_API_KEY."; exit 0; fi
           clean="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"
-          if [ "${#clean}" -lt 40 ] || [ "${#clean}" != "${#TOKEN}" ]; then
-            echo "::error::The secret CLAUDE_CODE_OAUTH_TOKEN is not a token: ${#TOKEN} characters, ${#clean} of them not white space. Run 'claude setup-token' and set the secret again, with the token on one line."
+          if [ "${#clean}" -lt 40 ]; then
+            echo "::error::The secret CLAUDE_CODE_OAUTH_TOKEN is not a token: ${#TOKEN} characters, ${#clean} of them not white space. Run 'claude setup-token' and set the secret again."
             exit 1
           fi
+          echo "::add-mask::$clean"
+          if [ "${#clean}" != "${#TOKEN}" ]; then
+            echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN holds $(( ${#TOKEN} - ${#clean} )) white space character(s). The job removed them. Set the secret again, with the token on one line, to end this warning."
+          fi
+          echo "token=$clean" >> "$GITHUB_OUTPUT"
           case "$clean" in
             sk-ant-oat*) echo "The coding agent uses the subscription token (${#clean} characters, the expected start)." ;;
             *) echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN does not start with sk-ant-oat. A token from 'claude setup-token' does." ;;
@@ -130,7 +137,7 @@ jobs:
         id: agent
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ steps.login.outputs.token }}
           # Claude Code uses an API key before a subscription token. So the key is given only when there is no token.
           anthropic_api_key: ${{ !secrets.CLAUDE_CODE_OAUTH_TOKEN && secrets.ANTHROPIC_API_KEY || '' }}
           github_token: ${{ github.token }}
