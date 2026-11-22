@@ -79,6 +79,12 @@ class Snapshot:
     transfer_note_id: int = 0  # see `CallContext.transfer_note_id`
     refused_transfer: dict[str, str] | None = None  # see `CallContext.refused_transfer`
     identity_confirmed: bool = False
+    identity_verified: bool = False  # see `CallContext.identity_verified`
+    open_calls: list[str] = field(default_factory=list)  # see `CallContext.open_calls`
+    phrase_closed: bool = False  # see `CallContext.phrase_closed`
+    phrase_offered: bool = False  # see `CallContext.phrase_offered`
+    phrase_set: bool = False  # see `CallContext.phrase_set`
+    spoken_phrases: list[str] = field(default_factory=list)  # see `CallContext.spoken_phrases`
     caller_name: str = ""
     identified: bool = False  # identify_caller has run; see `CallContext.identified`
     returning_name: str = ""  # see `CallContext.returning_name`

@@ -147,19 +147,6 @@ class LeadStore:
         ).fetchall()
         return [Lead(*row) for row in rows]
 
-    def latest_lead_for(self, caller_number: str, *, with_email: bool = False, first_name: str = "") -> Lead | None:
-        """The newest lead from this number. With `with_email`, the newest one that holds an email address.
-        With `first_name`, the newest one from that person: a phone number can be shared."""
-        from ai_call_center.names import same_person
-
-        for lead in self.leads_for(caller_number):
-            if with_email and not lead.email:
-                continue
-            if first_name.strip() and not same_person(first_name, lead.name):
-                continue
-            return lead
-        return None
-
     # --- calls ---
 
     def start_call(self, call_control_id: str, caller_number: str) -> None:

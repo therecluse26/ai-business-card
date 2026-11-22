@@ -34,8 +34,10 @@ from ai_call_center.graph.tools import (
     forget_caller,
     get_call_stats,
     identify_caller,
+    set_passphrase,
     request_owner_transfer,
     save_lead,
+    verify_passphrase,
     search_writing,
     text_portfolio_link,
 )
@@ -46,7 +48,7 @@ ENTRY_AGENT = "classifier"
 
 
 def all_tools(specs: dict[str, AgentSpec]) -> dict[str, BaseTool]:
-    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, search_writing, text_portfolio_link, identify_caller, forget_caller, end_call]
+    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, search_writing, text_portfolio_link, identify_caller, verify_passphrase, set_passphrase, forget_caller, end_call]
     tools += [make_handoff_tool(spec) for spec in specs.values()]
     return {t.name: t for t in tools}
 

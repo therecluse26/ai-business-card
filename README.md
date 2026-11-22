@@ -331,8 +331,9 @@ How this leg differs from the other two:
   `identify_caller`. Code, never a model, compares it with each name on record for the number
   (`names.same_person`): the same first name after cleanup, a short or long form of it (Bob and Robert),
   or the same sound code and first letter (Steven and Stephen). With any doubt, the caller counts as new.
-- Only on a match do the company, the saved interest, and the last three summaries enter the conversation.
-  With no match, they never do, and no agent will say who called before.
+- A match makes the caller "recognised": the agent says "Welcome back", and gets no notes. The company,
+  the saved interest, and the last three summaries enter the conversation only after the passphrase
+  check (below). With no match, they never do, and no agent will say who called before.
 - After `identify_caller`, who the caller is is settled for the whole call. No agent asks for the name again.
 - The history holds one person's calls and leads only. What Steve left on a number is not released to
   Bill on the same number, and it is not reused for him.
@@ -350,11 +351,70 @@ How this leg differs from the other two:
 - The consultant asks two qualifying questions: "When would you want this to start?" and "Is this a few weeks
   of work, or a longer engagement?". `save_lead` stores the answers as `timeline` and `size`, and the lead email
   shows them first. Existing databases get the new columns at start.
-- A confirmed caller does not give their details again: `save_lead` reuses the email address that the
+- A verified caller does not give their details again: `save_lead` reuses the email address that the
   same person left. The email address and the phone number never enter a prompt or a tool result.
 - `CALLER_LOOKUP` asks Telnyx Number Lookup for a new caller's carrier, line type, area, and registered
   name. Telnyx bills each lookup; the result is cached, so one number is looked up once. The agents are
   told not to open the call with it. The registered name goes to the lead email only, never to a prompt.
+
+### The passphrase check: recognised is not verified
+
+A phone number can be faked, and a name is no secret. Both are on a business card. So a match of
+number and name is not proof of who calls. The line has two levels (`passphrase.py`):
+
+| Level | What the caller gave | What the line does |
+|---|---|---|
+| Recognised | A phone number and a name that match an earlier caller | Says "Welcome back". No agent gets a note of an earlier call. |
+| Verified | The passphrase of that earlier caller too | The agents get the notes, and the first agent names the last topic. |
+
+- **The offer.** After a saved message, the contact agent offers one time: "I can remember your details
+  for next time, if you give me a short word or phrase to identify you. Make it a made-up one, not a
+  password you use anywhere else." The agent says the passphrase back, and keeps it after a yes.
+  `CALLER_PASSPHRASE_OFFER=false` turns the offer off.
+- **The check.** On the next call the first agent says: "Welcome back, <name>. I believe we have talked
+  before. Just to verify, may I have the short passphrase that you gave me?" The answer goes to the tool
+  `verify_passphrase`. Code compares it. The voice model gets a yes or a no, and never the stored passphrase.
+- **Speech is not exact.** The comparison ignores capital letters, spaces and punctuation, and it uses
+  how the words sound (Metaphone). "Purple lanturn" is "purple lantern".
+- **Storage.** The table `caller_phrases` holds a salted scrypt hash, not the passphrase.
+- **Tries.** Two tries in one call. Then the call goes on with no notes. After 5 wrong tries in a row,
+  over any number of calls, the line stops asking: that passphrase is locked for good.
+- **A passphrase opens only the calls made with it:** the call where it was set, and each later call
+  where the caller said it. A call where the caller was only recognised is opened by no passphrase. So a
+  person with a faked number who sets a passphrase gets nothing of the real caller's calls.
+- **A new passphrase takes the place of the old one,** and opens only its own calls. So "I forgot it"
+  never opens the old notes. The owner still has them.
+- **Calls from before this check** have no passphrase. No agent can use their notes.
+- **A caller with no passphrase who asks about an earlier call** hears why: a phone number can be faked,
+  so the line uses those notes only after a passphrase check.
+- **The contact details on file** (`save_lead` with email "on file") are reused only for a verified caller.
+- **The lead email** says which level the caller had: "Verified: they said the passphrase of that caller",
+  or "Not verified: they gave no passphrase, and a phone number can be faked".
+- **"Forget me"** deletes the passphrase row too.
+
+Where the passphrase is, and is not:
+
+- It is in the private records of the call: the transcript in the server log, the traces, and the audio
+  that the grader hears. A person who can read those can read the notes too, so the passphrase adds no
+  risk there. This is why the offer asks for a made-up phrase and not a password that opens other accounts.
+- It is not in the call summary (code changes it to `[passphrase]`), and not in the two public texts:
+  a fault report and a GitHub issue. The scrub removes its words.
+
+What the check cannot promise:
+
+- The words "may I have the passphrase" tell a person with a faked number that this name called before
+  and set a passphrase.
+- A short spoken phrase has few possible values. The limit on tries protects it on the phone. The hash
+  does not protect it from a person who has the database file.
+- A person with a faked number can use up the tries and lock the real caller's passphrase, or set a new
+  one in its place. The notes then stay closed to everyone on the phone, which is the safe result. The
+  real caller can set a new passphrase for later calls.
+
+Measured on 2026-11-22: 4 made-up calls were added to `evals/grader_calls.json` (a right passphrase, two
+wrong tries, a new passphrase after a message, a question about an earlier call with no passphrase).
+No rule fails in them. The decision grader agreed: no false alarm, and "I can't use the notes from your
+earlier calls" is not read as a denial of the memory (the set is now 63 calls: 28 of 30 planted failures
+found, 1 false alarm of 285). Not measured: a phone call with a voice model.
 
 ### Guardrails (M5)
 
@@ -1076,6 +1136,7 @@ src/ai_call_center/
   fault_report.py                what went wrong in a call, with each private word removed by code
   english_words.txt              the plain English words that the scrub keeps (SCOWL; licence in english_words.LICENSE.txt)
   feedback.py                    a caller's fault report or feature idea becomes a GitHub issue, with a count of the callers
+  passphrase.py                  the passphrase check: a match of number and name opens no notes of an earlier call; the caller's passphrase does
   proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard on changed files, the pull request text)
   check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
   check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time

@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cached_property
 
@@ -104,14 +104,17 @@ from ai_call_center.graph.tools import (
     save_lead_record,
     say_goodbye,
     send_warm_lead_at_call_end,
+    set_phrase,
     text_owner_before_transfer,
     text_portfolio_link_to_caller,
     transfer_closed_message,
+    verify,
     transfer_question,
 )
 from ai_call_center.guardrails import HIDDEN_NUMBER, TransferHours
 from ai_call_center.leads import LeadStore
 from ai_call_center.notify import notifier_from_settings
+from ai_call_center.passphrase import masked, private_words
 from ai_call_center.telephony.lookup import CallerLookup
 from ai_call_center.telephony.telnyx_client import TelnyxTelephony
 from ai_call_center.telephony.transfers import (
@@ -597,6 +600,9 @@ class CallSession:
         except Exception:
             log.exception("call %s: the call summary failed", self.call_control_id)
             summary = CallSummary()
+        if ctx.spoken_phrases:
+            # The summary becomes a note for the next call, and the owner's note goes into an email. A passphrase is in neither.
+            summary = replace(summary, **{key: masked(getattr(summary, key), ctx.spoken_phrases) for key in ("summary", "topic", "owner_note")})
         noted = False
         try:
             if await note_refused_transfer_at_call_end(ctx, lead_saved=message_saved(ctx), visited=visited, summary=summary):
@@ -689,7 +695,7 @@ class CallSession:
                 if grader is None or rule is None:
                     return FaultReport()
                 note = next((score.note for score in record.scores if score.rule == request.rule), "")
-                names = [name for name in (ctx.caller_name, ctx.returning_name) if name]
+                names = [*(name for name in (ctx.caller_name, ctx.returning_name) if name), *private_words(ctx.spoken_phrases)]
                 return await write_report(lines, rule=rule, agent=request.agent, note=note, model=grader, owner=self.settings.owner_name, private=names, config=tracing.run_config(self.call_control_id, "fault-report"))
 
             # A failed rule starts the job that proposes a fix. A test call can start it too: it shows the loop with no caller.
@@ -705,7 +711,7 @@ class CallSession:
                     call_id=self.call_control_id,
                     caller_number=ctx.caller_number,
                     version=record.version,
-                    private=[name for name in (ctx.caller_name, ctx.returning_name) if name],
+                    private=[*(name for name in (ctx.caller_name, ctx.returning_name) if name), *private_words(ctx.spoken_phrases)],
                     config=tracing.run_config(self.call_control_id, "caller-feedback"),
                 )
         except Exception:
@@ -766,6 +772,13 @@ class CallSession:
             legs={name: vl.leg for name, vl in legs.items()},
             mode="voice",
             identity_confirmed=bool(resume and resume.identity_confirmed),
+            identity_verified=bool(resume and resume.identity_verified),
+            open_calls=list(resume.open_calls) if resume else [],
+            phrase_closed=bool(resume and resume.phrase_closed),
+            phrase_offered=bool(resume and resume.phrase_offered),
+            phrase_set=bool(resume and resume.phrase_set),
+            spoken_phrases=list(resume.spoken_phrases) if resume else [],
+            phrase_offer=self.settings.caller_passphrase_offer,
             returning_name=resume.returning_name if resume else "",
             identified=bool(resume and resume.identified),
             forgotten=bool(resume and resume.forgotten),
@@ -840,6 +853,12 @@ class CallSession:
                     "transfer_note_id": ctx.transfer_note_id,
                     "refused_transfer": ctx.refused_transfer,
                     "identity_confirmed": ctx.identity_confirmed,
+                    "identity_verified": ctx.identity_verified,
+                    "open_calls": list(ctx.open_calls),
+                    "phrase_closed": ctx.phrase_closed,
+                    "phrase_offered": ctx.phrase_offered,
+                    "phrase_set": ctx.phrase_set,
+                    "spoken_phrases": list(ctx.spoken_phrases),
                     "caller_name": ctx.caller_name,
                     "identified": ctx.identified,
                     "returning_name": ctx.returning_name,
@@ -1096,6 +1115,15 @@ class CallSession:
             log.info("call %s: caller identified (name given: %s, earlier caller: %s)", self.call_control_id, bool(ctx.caller_name), ctx.identity_confirmed)
             await params.result_callback(result)
 
+        async def on_verify_passphrase(params: FunctionCallParams) -> None:
+            # Code compares the passphrase. Only after a match do the notes from earlier calls enter the conversation.
+            result = verify(ctx, str(params.arguments.get("passphrase") or ""))
+            log.info("call %s: passphrase check (try %d, verified: %s)", self.call_control_id, ctx.phrase_tries, ctx.identity_verified)
+            await params.result_callback(result)
+
+        async def on_set_passphrase(params: FunctionCallParams) -> None:
+            await params.result_callback(set_phrase(ctx, str(params.arguments.get("passphrase") or "")))
+
         async def on_forget_caller(params: FunctionCallParams) -> None:
             result, _ = forget(ctx)
             if ctx.forgotten:
@@ -1216,6 +1244,8 @@ class CallSession:
         for vl in legs.values():  # any service can become active, so each one knows every tool
             vl.service.register_function("save_lead", respelled(on_save_lead))
             vl.service.register_function("identify_caller", respelled(on_identify_caller))
+            vl.service.register_function("verify_passphrase", respelled(on_verify_passphrase))
+            vl.service.register_function("set_passphrase", respelled(on_set_passphrase))
             vl.service.register_function("forget_caller", respelled(on_forget_caller))
             vl.service.register_function("get_call_stats", respelled(on_call_stats))
             vl.service.register_function("search_writing", respelled(on_search_writing))

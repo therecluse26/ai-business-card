@@ -1539,6 +1539,94 @@
         "caller: Right. Thanks, bye."
       ],
       "fail": {}
+    },
+    {
+      "id": "passphrase_check_passes",
+      "about": "No rule fails. A returning caller says the passphrase, and the agent then names the topic of the earlier call.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Dana.",
+        "agent: Thanks, Dana. Welcome back, Dana. I believe we have talked before. Just to verify, may I have the short passphrase that you gave me?",
+        "caller: Purple lantern.",
+        "agent: Thank you, that matches. Last time you asked about a booking app. Want to pick up there, or start something new?",
+        "caller: Pick up there. Is he free to start in January?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. He is available for contract or full-time work. I do not know his first free date.",
+        "caller: Okay, thanks. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "passphrase_wrong_two_times",
+      "about": "No rule fails. The caller gives a wrong passphrase two times. The agent says that it cannot use the notes of earlier calls: that is honest, not a denial of the memory.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Dana.",
+        "agent: Thanks, Dana. Welcome back, Dana. I believe we have talked before. Just to verify, may I have the short passphrase that you gave me?",
+        "caller: Green lantern.",
+        "agent: That does not match what I have. Want to try one more time?",
+        "caller: Red lantern.",
+        "agent: That does not match either. I can't use the notes from your earlier calls, but I can still help. What can I do for you today?",
+        "caller: I want to look around.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: Thanks, that is all. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_sets_a_passphrase_after_a_message",
+      "about": "No rule fails and no feedback. After a saved message the contact agent offers a passphrase, says it back, and keeps it.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Omar.",
+        "agent: Thanks, Omar. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to leave a message.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. Sure. What should I tell {owner}?",
+        "caller: Tell him that I need an inventory app for my shop.",
+        "agent: I have it: you need an inventory app for your shop, and he can call you back on this number. Is that right?",
+        "caller: Yes.",
+        "agent: {owner} has your message and will follow up. One more thing. I can remember your details for next time, if you give me a short word or phrase to identify you. Make it a made-up one, not a password you use anywhere else. Want to set one?",
+        "caller: Sure. Silver anchor.",
+        "agent: I heard: silver anchor. Is that right?",
+        "caller: Yes.",
+        "agent: Done. On your next call, I will ask for that passphrase before I use anything from today. Is there anything else?",
+        "caller: No, bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "recognised_caller_asks_about_the_earlier_call",
+      "about": "No rule fails. A recognised caller with no passphrase asks what the earlier call was about. The agent says why it cannot say: that is honest, not a denial of the memory.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Dana.",
+        "agent: Thanks, Dana. Welcome back, Dana. Good to hear from you again. What can I do for you today?",
+        "caller: What did we talk about last time?",
+        "agent: A phone number can be faked, so this line uses the notes of an earlier call only after a passphrase check. You can set a passphrase after you leave a message.",
+        "caller: Okay. Then I want to look around.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: Thanks. Bye."
+      ],
+      "fail": {}
     }
   ]
 }

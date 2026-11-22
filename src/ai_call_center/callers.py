@@ -3,8 +3,11 @@ summary that feeds the next call.
 
 A phone number can be shared, so a number is not a person. Every caller hears the same greeting,
 which asks who they are. The name they give goes to `identify_caller`; code (`names.same_person`)
-compares it with the names on record for the number. Only on a match does the agent get that
-person's notes: company, saved interest, and a short summary and topic of each recent call.
+compares it with the names on record for the number. A match makes the caller "recognised": the
+agent says "Welcome back", and gets no notes. A phone number can be faked and a name is no secret,
+so the notes need a passphrase that the caller set on an earlier call (`passphrase.py`). Only after
+that check does the agent get that person's notes: company, saved interest, and a short summary and
+topic of each recent call that was made with that passphrase.
 Calls and leads that another name left on the same number never reach the agent.
 What never reaches a prompt or a tool result: the email address, the phone number, and the
 name on the phone account from a number lookup.
@@ -51,17 +54,21 @@ class CallerMemory:
         return self.name.split()[0] if self.name.strip() else ""
 
 
-def recall(store: LeadStore, caller_number: str, name: str, *, exclude_call: str = "") -> CallerMemory | None:
+def recall(store: LeadStore, caller_number: str, name: str, *, exclude_call: str = "", only_calls: frozenset[str] | None = None) -> CallerMemory | None:
     """The records of the person called `name` on this number. None when there is no match.
 
     A record matches when `same_person` says its name is this name. A call with no name in the log
-    still belongs to them when their lead came from that call.
+    still belongs to them when their lead came from that call. With `only_calls`, only the records
+    of those calls count: the ones that the caller's passphrase opens.
     """
     if caller_number in UNKNOWN_NUMBERS or not name.strip():
         return None
     # A lead saved on the call in progress is not history yet.
     leads = [lead for lead in store.leads_for(caller_number, limit=HISTORY_ROWS) if lead.call_control_id != exclude_call]
     calls = store.calls_for(caller_number, exclude=exclude_call, limit=HISTORY_ROWS)
+    if only_calls is not None:
+        leads = [lead for lead in leads if lead.call_control_id in only_calls]
+        calls = [call for call in calls if call.call_control_id in only_calls]
     own_leads = [lead for lead in leads if same_person(name, lead.name)]
     lead_calls = {lead.call_control_id for lead in own_leads}
     own_calls = [call for call in calls if same_person(name, call.caller_name) or (not call.caller_name.strip() and call.call_control_id in lead_calls)]
@@ -104,7 +111,7 @@ def _when(iso_utc: str) -> str:
 
 
 def history_text(memory: CallerMemory) -> str:
-    """The notes from earlier calls, for the agents only. `identify_caller` gives them after a name match."""
+    """The notes from earlier calls, for the agents only. `verify_passphrase` gives them after the passphrase check."""
     lines = [f"Notes from {memory.first_name or 'this caller'}'s earlier calls, for you and the other agents only:"]
     if memory.name:
         who = memory.name + (f" from {memory.company}" if memory.company else "")
