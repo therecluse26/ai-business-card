@@ -89,7 +89,7 @@ def test_parse_scores_gives_nothing_for_text_that_is_not_json():
 
 
 async def test_grade_call_joins_the_code_rules_and_the_model_rules():
-    model = scripted('{"name_asked_once": {"verdict": "pass"}, "nothing_asked_again": {"verdict": "pass"}, "question_answered": {"verdict": "fail", "note": "No answer to the price question."}, "facts_from_profile": {"verdict": "na"}}')
+    model = scripted('{"name_asked_once": {"verdict": "pass"}, "nothing_asked_again": {"verdict": "pass"}, "question_answered": {"verdict": "fail", "note": "No answer to the price question."}, "caller_memory_right": {"verdict": "na"}, "facts_from_profile": {"verdict": "na"}}')
     scores = await grade_call(CALL, visited=VISITED, summary_tries=1, profile="notes", owner="Test Owner", model=model)
     assert [score.rule for score in scores] == [rule.key for rule in RULES if not rule.hears]  # a text model cannot check an audio rule
     assert verdicts(scores)["question_answered"] == FAIL

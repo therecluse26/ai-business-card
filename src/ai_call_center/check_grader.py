@@ -61,6 +61,7 @@ EXPECTED = {
     "name_asked_once": FAIL,  # the contact agent asked for the name again
     "nothing_asked_again": FAIL,  # the contact agent asked what the project is
     "question_answered": PASS,  # "I do not know his rates" is an honest answer
+    "caller_memory_right": NA,  # no agent speaks about an earlier call
     "facts_from_profile": FAIL,  # the medal
 }
 # For each planted failure: the agent at fault and the cause code that a grader must give.

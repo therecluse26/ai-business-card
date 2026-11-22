@@ -1116,6 +1116,237 @@
         "caller: Perfect, thanks."
       ],
       "fail": {}
+    },
+    {
+      "id": "welcome_back_for_a_new_caller",
+      "about": "The first agent greets a new caller as a returning caller. The caller says that this is a first call. The agent says that the match can be wrong and goes on.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Hi, it's Jordan.",
+        "agent: Welcome back, Jordan. Last time you asked about a mobile app for a gym chain. Want to pick up there, or start something new?",
+        "caller: That was not me. I have never called this number before.",
+        "agent: I am sorry. The line matched your name with a name on record for this phone number, and that match can be wrong. Let us start new. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: A project. Does he build data pipelines?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He has built data pipelines and integrations for ecommerce platforms.",
+        "caller: Good. Thanks, bye."
+      ],
+      "fail": {
+        "caller_memory_right": {
+          "agent": "classifier",
+          "causes": [
+            "notes_of_another_caller"
+          ]
+        }
+      }
+    },
+    {
+      "id": "notes_used_again_after_the_caller_said_no",
+      "about": "The caller says that the earlier call was not theirs. After a handoff, the contact agent uses the notes of that call again. The agent states it and asks nothing, so no other rule fails.",
+      "visited": [
+        "classifier",
+        "contact"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Priya.",
+        "agent: Welcome back, Priya. Last time you asked about an online store for a bakery. Want to pick up there, or start something new?",
+        "caller: No, that was someone else. I did not call before, and I have no bakery.",
+        "agent: Understood, sorry about that. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to leave a message for him about a contract role.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the contact agent, running on OpenAI. I have your message. It is about the online store for your bakery, as in your last call.",
+        "caller: No! I told the other agent that the bakery was not me. The message is about a contract role.",
+        "agent: Sorry. A contract role. I have that now.",
+        "caller: Thanks. Goodbye."
+      ],
+      "fail": {
+        "caller_memory_right": {
+          "agent": "contact",
+          "causes": [
+            "used_notes_after_denial",
+            "notes_of_another_caller"
+          ]
+        }
+      }
+    },
+    {
+      "id": "the_agent_says_it_keeps_no_notes",
+      "about": "A returning caller takes the welcome and says that the notes are good. The first agent says that it keeps no notes, which is false. The caller asks no question.",
+      "visited": [
+        "classifier"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: It's Tomas.",
+        "agent: Welcome back, Tomas. Last time you asked about a contract for a data migration. Want to pick up there, or start something new?",
+        "caller: Yes, the migration. It is good that you keep notes of my calls.",
+        "agent: I do not keep notes of earlier calls, and I do not look up callers. Each call starts with nothing.",
+        "caller: But you just told me what I asked last time.",
+        "agent: I only use what you say in this call. So, the data migration: what would you like to know?",
+        "caller: Never mind. Bye."
+      ],
+      "fail": {
+        "caller_memory_right": {
+          "agent": "classifier",
+          "causes": [
+            "denied_the_memory"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wrong_welcome_then_the_lookup_is_denied",
+      "about": "The first agent welcomes a new caller back. The caller asks why. The agent will not say, and then says that it does not look up earlier calls. The tour agent later explains the lookup.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: sam",
+        "agent: Welcome back, Sam. Last time you asked how this phone system is built. Want to pick up there, or start something new?",
+        "caller: I never called before. Why did you say that? Did you pull up the record of another Sam?",
+        "agent: I cannot share anything about other calls.",
+        "caller: I do not ask about other calls. I ask why you said that I called before.",
+        "agent: That was a mistake. I do not look up past conversations or caller records.",
+        "caller: Your greeting says that you remember callers. Can I talk to the tour agent?",
+        "agent: Sure. One moment.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. The line keeps notes for each phone number and name. Your name matched a name on record for this number.",
+        "caller: Thank you. That is all."
+      ],
+      "fail": {
+        "caller_memory_right": {
+          "agent": "classifier",
+          "causes": [
+            "notes_of_another_caller",
+            "denied_the_memory"
+          ]
+        }
+      }
+    },
+    {
+      "id": "the_tour_agent_says_nothing_is_stored",
+      "about": "A new caller asks the tour agent if the line remembers callers. The tour agent says that nothing is stored, which is false.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Leila.",
+        "agent: Thanks, Leila. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: I want to look around. How does this work?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job, and a handoff moves you between them.",
+        "caller: If I call again next week, will you know me?",
+        "agent: No. Nothing about a call is stored, and no agent can look up an earlier call.",
+        "caller: Okay. Thanks, bye."
+      ],
+      "fail": {
+        "caller_memory_right": {
+          "agent": "tour",
+          "causes": [
+            "denied_the_memory"
+          ]
+        }
+      }
+    },
+    {
+      "id": "returning_caller_picks_up",
+      "about": "No failure. A returning caller takes the welcome and goes on with the earlier subject.",
+      "visited": [
+        "classifier",
+        "profile"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: It's Hannah.",
+        "agent: Welcome back, Hannah. Last time you asked about an advisory role for your startup. Want to pick up there, or start something new?",
+        "caller: Yes, let us pick up there. Does he take advisory roles for small companies?",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the profile agent, running on Google Gemini. Yes. He takes advisory roles, such as technical or AI advisor to a company.",
+        "caller: Great, thanks. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "new_caller_asks_what_is_remembered",
+      "about": "No failure. A new caller asks if the line remembers callers. The agent says that it keeps notes and that it has none for this caller.",
+      "visited": [
+        "classifier",
+        "tour"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Omar. What do you mean, you remember callers?",
+        "agent: Thanks, Omar. The line keeps short notes of a call for each phone number and name. I have no earlier call for you, so this is your first one. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: Look around, please.",
+        "agent: Let me bring in the right agent for that.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. This line is a graph of AI agents. Each agent has one job. Try asking me how a handoff works.",
+        "caller: And what do you keep about me after this call?",
+        "agent: A short summary and your first name, with this phone number. Say 'forget me' and the line deletes them.",
+        "caller: Fine. Thanks."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_asks_to_be_forgotten",
+      "about": "No failure. A returning caller asks the line to forget them. The agent deletes the notes and says so.",
+      "visited": [
+        "classifier"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Ines.",
+        "agent: Welcome back, Ines. Last time you asked about a quote for a booking site. Want to pick up there, or start something new?",
+        "caller: No. Please forget me. Delete what you have about me.",
+        "agent: Done. I deleted the notes of your earlier calls, and this call is not saved. I have no notes about you now.",
+        "caller: So you will not know me next time?",
+        "agent: Right. Next time I will have no notes for you.",
+        "caller: Good. Goodbye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "question_about_another_persons_call",
+      "about": "No failure. The caller asks what another person asked on an earlier call from the same phone. The agent will not share that, and says why.",
+      "visited": [
+        "classifier"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: This is Dana.",
+        "agent: Thanks, Dana. Do you have a project or a role in mind, or would you like to look around first?",
+        "caller: First a question. My husband called you from this phone last week. What did he ask about?",
+        "agent: I cannot share what another person's call was about. The line keeps notes for each caller by name, and I have none under your name.",
+        "caller: Fair. Then I have a role in mind.",
+        "agent: Good. What kind of role is it?",
+        "caller: A part-time engineering lead. I will call again with details. Bye."
+      ],
+      "fail": {}
+    },
+    {
+      "id": "caller_forgot_the_earlier_call",
+      "about": "No failure. A returning caller does not remember the earlier call at first, then does. The agent says what the notes hold.",
+      "visited": [
+        "classifier"
+      ],
+      "lines": [
+        "agent: This is {owner}'s AI business card. I remember callers, so first: who am I speaking with?",
+        "caller: Marcus here.",
+        "agent: Welcome back, Marcus. Last time you asked about a rebuild of a logistics dashboard. Want to pick up there, or start something new?",
+        "caller: Did I call before? Oh, right, in spring. What did I ask then?",
+        "agent: You asked about a rebuild of a logistics dashboard, and you wanted a call back in the summer.",
+        "caller: Yes, that was me. Let us start something new: I have a second project.",
+        "agent: Good. Tell me about the second project.",
+        "caller: I will send it by email. Thanks, bye."
+      ],
+      "fail": {}
     }
   ]
 }

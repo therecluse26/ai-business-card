@@ -18,7 +18,7 @@ transfer hours. When a voice provider stops answering, the call moves to the oth
 The tour agent can tell the caller how fast the agents answered and what the call has cost so far.
 A small model on the server hears how the caller sounds; see "The server hears how the caller sounds (Pipecat Voice Reader)".
 With LangSmith set up, every call is traced; see "Tracing with LangSmith (M6)".
-After hangup a grader scores each call against ten rules, and the figures and the scores are stored for a public report;
+After hangup a grader scores each call against eleven rules, and the figures and the scores are stored for a public report;
 see "A grader scores each call after hangup" and "Call analytics and the public report".
 A failed rule starts a job on GitHub that opens a pull request with a fix, with no action from the owner;
 see "The improvement loop: a failed rule opens a pull request".
@@ -526,6 +526,7 @@ score shows if a change to a prompt or a tool made the calls better.
 | `name_asked_once`: the agents asked for the caller's name one time at most | A model |
 | `nothing_asked_again`: no agent asked for something the caller had said already | A model |
 | `question_answered`: each question got an answer, an honest "I do not know", or the right agent | A model |
+| `caller_memory_right`: the agents were right and honest about the caller's earlier calls | A model |
 | `facts_from_profile`: each fact about the owner came from the profile notes | A model |
 | `tone_fits_caller`: the agent's tone fitted how the caller sounded | A model that hears the call |
 | `no_talk_over`: no agent talked over the caller | A model that hears the call |
@@ -550,13 +551,15 @@ is one option from a fixed list, with a probability for each option.
    That event is the cause code. A failure starts a paid job that proposes a fix, so the limit is high.
    Under the limit the rule passes, and a note keeps a failure that the model thought likely.
    One more question for each rule gives the agent at fault.
-5. Two rules have questions about single lines too. Each rule needs a search through the call, so code
+5. Three rules have questions about single lines too. Each rule needs a search through the call, so code
    does the search, and the model judges one line at a time.
    - `nothing_asked_again`: code finds each agent line that asks something. For each one, the model answers:
      "Had the caller already given the answer in lines 1 to 8?" Two more small questions take a line out of
      the count: a question for the name, and a read-back.
    - `question_answered`: code finds each question of the caller, but not one in the caller's last turn. For
      each one, the model answers: "Did the agents leave that question without a response?"
+   - `caller_memory_right`: code finds each agent line that speaks about the memory of calls and has a
+     "not". For each one, the model answers: "Does the agent deny that it knows about earlier calls?"
    - Code knows which agent said a line. So for these failures, code names the agent at fault.
 6. The same request asks for three readings: how the caller sounded over the call, how the caller sounded
    at the end, and how the agents' voices sounded. A reading is not a rule. It is stored, and it is private.
@@ -612,6 +615,29 @@ Measured on 2026-11-21:
 - A question of the caller is found by its question mark. Speech recognition can leave the mark out. Such a
   question is left to the questions about the whole call.
 - Each call here is made up, in clean text. A real call has speech recognition errors. So these counts are a start.
+
+Measured on 2026-11-22, after the rule `caller_memory_right` came in:
+
+- A real call showed two faults that no rule covered. The first agent welcomed the caller back after a first
+  name only, and the caller said that the earlier call was not theirs. Then the agent said that it does not
+  look up earlier calls, which is false.
+- 10 made-up calls were added: 5 with a planted failure of the new rule, and 5 with no failure. The 5 with no
+  failure hold what must not fail: a returning caller, an agent that found no earlier call, a caller who asks
+  to be forgotten, and an agent that will not share another person's call.
+- The set is now 51 calls with 29 planted failures and 226 checks that must not fail. The decision grader
+  found 27 of the 29. The new rule: 5 of 5 found (0.96 or more), and no false alarm in the 51 calls. Its
+  highest check that must not fail was 0.60: an agent that says "I have no notes about you now" after it
+  deleted them.
+- 1 false alarm of 226, at 0.81, in the old rule `nothing_asked_again`. It is in a new call: an agent uses
+  the notes of another caller after a handoff, and the caller must say the need again. The agent asked nothing.
+- Two of the 10 calls were changed after the first run. Each had a second fault that was not planted: an
+  agent's question, and a caller's question that got a false answer. The second run counted them as they are now.
+- The first wording of one question missed one planted failure (0.67): "keeps no notes of earlier calls".
+  The agent in that call said "nothing about a call is stored". A wider wording found it (0.96).
+- On the real call, the question about the whole call gave the denial 0.37. The questions about single lines
+  gave four denial lines 0.86 to 0.97, and the true answers of a later agent 0.09 or less.
+  The first wording of the small question gave those four lines 0.38 to 0.52. It named "this phone line";
+  the agent spoke about itself ("I do not look up past callers").
 - The same request two times gave the same probabilities.
 - Two saved recordings of the caller's side of test calls, at 8 kHz: 86 s took 1.1 s and 6,827 input tokens;
   601 s took 6.1 s and 23,299 tokens. At the published price of 0.10 USD for a million input tokens, a

@@ -98,6 +98,14 @@ ASKS: dict[str, Asks] = {
         },
         applies="Did the caller ask at least one clear question during the call?",
     ),
+    "caller_memory_right": Asks(
+        {
+            "notes_of_another_caller": "Did an agent greet the caller as a returning caller or speak about an earlier call, and the caller then said that they had not made that call?",
+            "used_notes_after_denial": "Did the caller say that an earlier call was not theirs, and an agent after that spoke about that earlier call again as the caller's own?",
+            "denied_the_memory": "Did an agent say that this phone line does not remember callers: that it stores nothing about a call, keeps no notes of earlier calls, or cannot look up an earlier call?",
+        },
+        applies="Did an agent speak about an earlier call, or did the caller ask about earlier calls or about what the agents remember?",
+    ),
     "facts_from_profile": Asks(
         {
             "invented_fact": "Did an agent state a fact about {owner} (an employer, a client, a skill, a number, a date, or a price) that appears nowhere in the profile notes? "
@@ -154,13 +162,23 @@ def cause_key(rule_key: str, cause: str) -> str:
     return f"{rule_key}__{cause}"
 
 
-# --- the questions about one line, for the rules `nothing_asked_again` and `question_answered` ---
+# --- the questions about one line, for the rules `nothing_asked_again`, `question_answered` and `caller_memory_right` ---
 
 LINE_RULE = "nothing_asked_again"
 QUESTION_RULE = "question_answered"
+MEMORY_RULE = "caller_memory_right"
 SAME, EARLIER, NAME, READ_BACK = "same", "earlier", "name", "back"  # the questions about one agent line
 OPEN = "open"  # the question about one caller line: did the agents leave the caller's question open?
+DENIED = "denied"  # the question about one agent line: does the agent say that the line has no memory of callers?
+DENIED_CAUSE = "denied_the_memory"
 LINE_CAUSES = {EARLIER: "asked_again_after_handoff", SAME: "asked_again_same_agent"}
+# An agent line gets the DENIED question when it has a word about the memory of calls and a word that says "not".
+_MEMORY = re.compile(
+    r"\b(?:remember\w*|notes?|records?|look(?:s|ed|ing)?[ -]?ups?|look(?:s|ed|ing)? (?:\w+ )?up|stor(?:e|es|ed|ing)|history"
+    r"|(?:earlier|past|previous|prior|other) (?:calls?|conversations?|callers?)|called before)\b",
+    re.IGNORECASE,
+)
+_NOT = re.compile(r"\b(?:not|no|never|nothing|none|cannot)\b|n['’]t\b", re.IGNORECASE)
 MAX_ASKED_LINES = 200  # 4 questions for a line at most, and a request holds 1,000 questions at most
 _INTRO = re.compile(r"\bI(?:['’]m| am) the (\w+) agent\b", re.IGNORECASE)
 
@@ -172,7 +190,7 @@ class AskedLine:
     number: int  # the line's number in the transcript, from 1
     agent: str  # an agent line: the agent that said it. A caller line: the agent that spoke next.
     first: int  # the number of the first line of that agent's part of the call
-    kinds: tuple[str, ...]  # SAME: the caller spoke to this agent before the line. EARLIER: the caller spoke to an earlier agent. OPEN: a caller line.
+    kinds: tuple[str, ...]  # SAME: the caller spoke to this agent before the line. EARLIER: the caller spoke to an earlier agent. OPEN: a caller line. DENIED: see above.
     last: int = 0  # a caller line: the number of the last line of the transcript
 
 
@@ -180,6 +198,8 @@ def asked_lines(lines: list[str], visited: list[str]) -> list[AskedLine]:
     """The lines that get small questions, in the order of the call.
 
     An agent says its name in its first line after a handoff, so code knows which agent said a line.
+    An agent line that speaks about the memory of calls and has a "not" gets one question for the
+    rule `caller_memory_right`: one sentence in a long call is easy to miss in a question about the whole call.
     A caller line counts when it has a question mark and is not the caller's last turn: the rule does
     not check a question in the last turn. A question with no question mark is left to the questions
     about the whole call."""
@@ -193,6 +213,8 @@ def asked_lines(lines: list[str], visited: list[str]) -> list[AskedLine]:
         if intro and intro.group(1).lower() in AGENTS:
             agent, first = intro.group(1).lower(), number
         speakers[number] = agent
+        if _MEMORY.search(line) and _NOT.search(line):
+            found.append(AskedLine(number, agent, first, (DENIED,)))
         if "?" not in line:
             continue
         said = [at for at in range(1, number) if lines[at - 1].startswith("caller:")]
@@ -223,6 +245,9 @@ def line_questions(asked: list[AskedLine]) -> dict[str, dict[str, Any]]:
         n = line.number
         if OPEN in line.kinds:
             made[line_key(n, OPEN)] = _yes_or_no(f"In line {n}, the caller asks a question. Did the agents leave that question without a response in lines {n + 1} to {line.last}?")
+            continue
+        if DENIED in line.kinds:
+            made[line_key(n, DENIED)] = _yes_or_no(f"In line {n}, does the agent deny that it knows about earlier calls: does it say that it does not look up earlier calls or callers, that it keeps no notes of them, or that it knows only what is said in this call?")
             continue
         for kind in line.kinds:
             a, b = (line.first, n - 1) if kind == SAME else (1, line.first - 1)
@@ -305,7 +330,11 @@ def fail_probability(rule: Rule, answers: dict[str, Any], lines: list[AskedLine]
             if chance is not None and chance > top.chance:
                 # The line gives the verdict and the agent. The cause is from the questions about the whole call, when one is likely.
                 top = Top(whole_call.cause if whole_call.chance >= SURE_AT else OTHER, chance, line.agent)
-        elif rule.key == LINE_RULE and OPEN not in line.kinds:
+        elif rule.key == MEMORY_RULE and DENIED in line.kinds:
+            chance = _yes(answers.get(line_key(line.number, DENIED)))
+            if chance is not None and chance > top.chance:
+                top = Top(DENIED_CAUSE, chance, line.agent)  # code knows which agent said the line
+        elif rule.key == LINE_RULE and OPEN not in line.kinds and DENIED not in line.kinds:
             name, read_back = _yes(answers.get(line_key(line.number, NAME))), _yes(answers.get(line_key(line.number, READ_BACK)))
             if name is None or read_back is None or name >= SURE_AT or read_back >= SURE_AT:
                 continue  # a name question, a read-back, or a line with no usable answer
