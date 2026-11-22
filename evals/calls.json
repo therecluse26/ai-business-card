@@ -64,5 +64,17 @@
       "Goodbye."
     ],
     "expect": {"forgotten": true, "outcome": "none"}
+  },
+  {
+    "id": "digits-in-project",
+    "about": "The caller's project is named with digits, which the summary topic must not hold.",
+    "caller": [
+      "This is Tomas Wierzba.",
+      "I need a 3D viewer for a 24/7 kiosk app, version 2 of our 5-store setup. Can I leave him a message?",
+      "Tell him I want a call back in 2 weeks about the 3D kiosk app. This number is fine.",
+      "Yes, that is right.",
+      "No, that is all. Goodbye."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "message"}
   }
 ]
