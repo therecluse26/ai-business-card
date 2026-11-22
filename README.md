@@ -791,7 +791,10 @@ What the pull request shows, and its limits:
 
 To turn the loop on:
 
-1. In the repository, add the secret `ANTHROPIC_API_KEY`: **Settings**, **Secrets and variables**, **Actions**.
+1. Give the repository one secret for the coding agent. For a Claude subscription: run `claude setup-token`
+   on your computer, then `gh secret set CLAUDE_CODE_OAUTH_TOKEN` in this repository. For the API account:
+   `gh secret set ANTHROPIC_API_KEY`. With both, the subscription pays for the coding agent and the API key
+   pays for the scorer. With no `ANTHROPIC_API_KEY`, the scorer runs no made-up call.
 2. In **Settings**, **Actions**, **General**, turn on "Allow GitHub Actions to create and approve pull requests".
 3. Make a fine-grained personal access token: this repository only, with the one repository
    permission **Actions** (read and write). It can start a workflow. It cannot change code.
