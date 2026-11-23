@@ -738,7 +738,8 @@ GOODBYE = re.compile(
     r"|\bend (the|this) call\b",
     flags=re.IGNORECASE,
 )
-ONLY_NO = re.compile(r"^\W*(no|nope|nah)\W*$", flags=re.IGNORECASE)  # the answer to "anything else?"
+# The answer to "anything else?". A plain "No, I don't." missed here, and the agent asked again.
+ONLY_NO = re.compile(r"^\W*(no|nope|nah|not really|nothing)(\W+(i don't|i do not|not really|nothing|there isn't|there's not))?\W*$", flags=re.IGNORECASE)
 GOODBYE_TURNS_CHECKED = 2
 
 

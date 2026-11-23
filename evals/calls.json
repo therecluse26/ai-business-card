@@ -64,5 +64,18 @@
       "Goodbye."
     ],
     "expect": {"forgotten": true, "outcome": "none"}
+  },
+  {
+    "id": "plain-no-after-passphrase",
+    "about": "The caller leaves a message, sets a passphrase, and answers 'anything else?' with a plain no. The agent must not ask it again.",
+    "caller": [
+      "This is Tomas Wexley.",
+      "Please tell him the voice line should ask callers for a passphrase sooner. I would like a call back about it.",
+      "Yes, that is right. This number is fine.",
+      "Copper lantern.",
+      "Yes.",
+      "No, I don't."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "message"}
   }
 ]
