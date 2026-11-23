@@ -432,6 +432,17 @@ def test_each_label_that_a_workflow_sets_is_a_label_of_the_queue():
     assert re.search(r"^      issue:\n", WORKFLOWS["improve.yml"], re.MULTILINE) and re.search(r"^      scope:\n", WORKFLOWS["improve.yml"], re.MULTILINE) and "options: [prompts, code]" in WORKFLOWS["improve.yml"]
 
 
+def test_each_agent_that_the_queue_starts_allows_the_bot_of_the_queue_and_no_other():
+    """On 2026-11-22 each triage run failed: "Workflow initiated by non-human actor: github-actions (type: Bot)".
+    The queue starts a workflow with the token of its own run, and the agent action refuses a bot that is not named."""
+    for name in ("triage.yml", "improve.yml"):
+        text = WORKFLOWS[name]
+        assert f"gh workflow run {name}" in WORKFLOWS["issues.yml"] and text.count("uses: anthropics/claude-code-action@") == 1
+        assert re.findall(r"^\s+allowed_bots: (.*)$", text, re.MULTILINE) == ['"github-actions[bot]"'], name
+        # Only a dispatch starts these workflows, and a dispatch needs the right to write. No event of an outside person does.
+        assert re.search(r"^on:\n  workflow_dispatch:\n", text, re.MULTILINE) and not re.search(r"^  (issues|issue_comment|pull_request|pull_request_target|push|schedule):", text, re.MULTILINE)
+
+
 def test_the_agent_of_the_triage_has_no_tool_that_writes_and_no_token_that_writes():
     text = WORKFLOWS["triage.yml"]
     sort = text[text.index("  sort:") : text.index("  label:")]

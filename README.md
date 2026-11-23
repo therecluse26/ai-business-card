@@ -1086,7 +1086,9 @@ Limits, each for one day (US Eastern). An issue past a limit waits for the next 
 
 The queue runs on each new issue, on each change of a label by a person, and each morning. It reads
 all open issues and does only what is not done, so a lost event loses no work. It needs no new secret:
-the token of its own run sets the labels and starts the two other workflows. Optional repository
+the token of its own run sets the labels and starts the two other workflows. So the actor of those
+runs is the bot of GitHub Actions, and each agent step names it in `allowed_bots`; the agent action
+refuses a run that another bot started. Optional repository
 variables: `TRIAGE_MODEL`, `BUILD_MODEL`, `TRIAGE_DAILY_LIMIT`, `ISSUE_FIX_DAILY_LIMIT`.
 
 What this does not promise:

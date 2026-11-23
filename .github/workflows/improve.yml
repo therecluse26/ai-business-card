@@ -189,6 +189,10 @@ jobs:
           # Claude Code uses an API key before a subscription token. So the key is given only when there is no token.
           anthropic_api_key: ${{ !secrets.CLAUDE_CODE_OAUTH_TOKEN && secrets.ANTHROPIC_API_KEY || '' }}
           github_token: ${{ github.token }}
+          # The queue starts this workflow with the token of its own run, so the actor is the bot of GitHub Actions.
+          # The action refuses a run that a bot started, unless the bot is named here. Only a workflow of this
+          # repository with the permission `actions: write` can start a run as this bot (issues.yml, triage.yml).
+          allowed_bots: "github-actions[bot]"
           prompt: ${{ steps.task.outputs.text }}
           claude_args: |
             --model ${{ env.FIX_SCOPE == 'code' && vars.BUILD_MODEL || vars.IMPROVE_MODEL || 'claude-opus-5-5' }}

@@ -29,14 +29,16 @@
 #   - ISSUE_FIX_DAILY_LIMIT  fix jobs in one day that started by themselves (default 2). `build` has no limit.
 name: Queue of issues
 
+# A new issue with a label gives the events "opened" and "labeled". Only "labeled" is used, so one issue starts one run.
 on:
   issues:
-    types: [opened, reopened, labeled, unlabeled]
+    types: [reopened, labeled, unlabeled]
   schedule:
     - cron: "23 10 * * *" # each morning: 5:23 AM or 6:23 AM US Eastern
   workflow_dispatch:
 
 # One run at a time. A run that waits can be replaced by a newer one; the newer one does the same work.
+# GitHub shows the replaced run as "cancelled". That is not a fault.
 # An issue of another person starts no job below, and it gets a group of its own, so it cannot replace a run that waits.
 concurrency:
   group: ${{ (github.event_name != 'issues' || github.event.issue.user.login == github.repository_owner) && 'issue-queue' || format('issue-queue-not-the-owner-{0}', github.run_id) }}
