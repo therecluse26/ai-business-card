@@ -375,6 +375,8 @@ number and name is not proof of who calls. The line has two levels (`passphrase.
 - **The check.** On the next call the first agent says: "Welcome back, <name>. I believe we have talked
   before. Just to verify, may I have the short passphrase that you gave me?" The answer goes to the tool
   `verify_passphrase`. Code compares it. The voice model gets a yes or a no, and never the stored passphrase.
+  The whole reply is the passphrase, even a full sentence. Only "I don't know" or "I don't remember" counts
+  as no passphrase.
 - **Speech is not exact.** The comparison ignores capital letters, spaces and punctuation, and it uses
   how the words sound (Metaphone). "Purple lanturn" is "purple lantern".
 - **Storage.** The table `caller_phrases` holds a salted scrypt hash, not the passphrase.

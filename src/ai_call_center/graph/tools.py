@@ -54,8 +54,8 @@ NO_NOTES = (
     "only after a passphrase check, and they can set a passphrase after they leave a message."
 )
 PHRASE_ASKED = (
-    "When the caller says the passphrase, call verify_passphrase with it, in silence. "
-    "If they do not know it or do not want to say it, call verify_passphrase with an empty passphrase. Say nothing about an earlier call before its result."
+    "The caller's reply is the passphrase, even a full sentence: call verify_passphrase with all of it, word for word, in silence. "
+    "Only if they say they do not know it, do not remember it, or will not say it, call verify_passphrase with an empty passphrase. Say nothing about an earlier call before its result."
 )
 PHRASE_CLOSED = "You have no notes of the caller's earlier calls. Do not ask for the passphrase again on this call, and say nothing about what an earlier call was about."
 
