@@ -15,7 +15,6 @@ Limits on the cost:
 
 - One fix request for each (rule, agent, cause) at one harness version. The same failure on the next
   call starts no second job. After a fix is deployed the version is new, so the failure can ask again.
-- At most IMPROVE_DAILY_LIMIT fix requests in one day (US Eastern).
 - Only a version that is a clean git commit asks: a laptop with changed files does not.
 
 The start of the job is one POST to GitHub's REST API ("create a workflow dispatch event"), written
@@ -136,9 +135,6 @@ class RequestStore:
         row = self._conn.execute("SELECT 1 FROM fix_requests WHERE rule = ? AND agent = ? AND cause = ? AND version = ?", (request.rule, request.agent, request.cause, request.version)).fetchone()
         return row is not None
 
-    def asked_on(self, day: str) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM fix_requests WHERE day = ?", (day,)).fetchone()[0]
-
     def add(self, request: FixRequest, day: str) -> None:
         self._conn.execute("INSERT OR IGNORE INTO fix_requests (rule, agent, cause, version, day) VALUES (?, ?, ?, ?, ?)", (request.rule, request.agent, request.cause, request.version, day))
         self._conn.commit()
@@ -222,9 +218,6 @@ async def request_fixes(
             for request in fix_requests(record, analytics.calls()):
                 if store.asked(request):
                     continue
-                if store.asked_on(day) >= settings.improve_daily_limit:
-                    log.info("fix request for %s not sent: the limit of %d for one day is reached", request.rule, settings.improve_daily_limit)
-                    break
                 if report is not None:
                     try:
                         request = request.with_report(await report(request))

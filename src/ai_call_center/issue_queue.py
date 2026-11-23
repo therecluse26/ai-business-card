@@ -33,10 +33,10 @@ The commands, for the three workflows (`issues.yml`, `triage.yml`, `improve.yml`
 - `issue-queue comment`, `issue-queue labels`: the fixed comment for a label, and the list of the labels.
 - `issue-queue report`: the comment for an issue whose job opened no pull request.
 
-Limits on the cost, each for one day (US Eastern): `TRIAGE_DAILY_LIMIT` triage runs and
-`ISSUE_FIX_DAILY_LIMIT` jobs for issues. Each job uses the owner's Claude subscription; that is the
-reason for the limits. An issue past a limit waits for the next day. It is never dropped. The owner's
-label `build` always starts its job, and that job counts in the limit of the day.
+No count of jobs for one day is a limit (the owner's rule, 2026-11-23). Each issue that is ready starts
+its run at once. Three things stop a run that starts again and again: the label `fix-started` (one job
+for an issue), a triage run that is not done (no second run beside it), and `TRIAGE_TRIES` failed triage
+runs (then the issue goes to the owner).
 """
 
 from __future__ import annotations
@@ -47,11 +47,9 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ai_call_center.analytics import call_day
 from ai_call_center.fault_report import SAFE
 from ai_call_center.feedback import FAULT, HEADINGS, IDEA, LABELS
 from ai_call_center.feedback import LIMITS as FEEDBACK_LIMITS
@@ -80,7 +78,6 @@ TRIAGE_TRIES = 3  # failed triage runs for one issue; then the issue goes to the
 TRIAGE_FAILED = "triage-failed"  # not a label: the name of the comment for such an issue
 
 TRIAGE_RUN = re.compile(r"^Triage of issue #(\d+)$")  # `run-name` of triage.yml
-FIX_RUN = re.compile(r"^Issue #(\d+) \((auto-fix|build)\)$")  # `run-name` of improve.yml for an issue
 _CALLERS = re.compile(r"\*\*Callers who (?:reported|asked for) this: (\d+)\*\*")
 _VERSION = re.compile(r"^Harness version of the call \(git commit\): `([0-9a-f]{7,40})`$")
 
@@ -317,75 +314,48 @@ class Action:
         return f"{self.verb} {self.number} {self.detail}".strip()
 
 
-def _runs_on(rows: Any, day: str, pattern: re.Pattern[str]) -> list[tuple[int, str]]:
-    """(issue number, second group or "") for each run of this day whose name fits. `rows` is GitHub's list of the runs of one workflow."""
+def _triage_runs(rows: Any) -> tuple[set[int], dict[int, int]]:
+    """(the issues with a triage run that is not done, for each issue its failed triage runs). `rows` is GitHub's list of the runs of triage.yml."""
     runs = rows.get("workflow_runs") if isinstance(rows, dict) else rows
-    found = []
+    running: set[int] = set()
+    failed: dict[int, int] = {}
     for run in runs if isinstance(runs, list) else []:
-        if not isinstance(run, dict):
+        name = TRIAGE_RUN.match(str(run.get("display_title") or "")) if isinstance(run, dict) else None
+        if not name:
             continue
-        name = pattern.match(str(run.get("display_title") or ""))
-        try:
-            made = call_day(datetime.fromisoformat(str(run.get("created_at") or "").replace("Z", "+00:00")))
-        except ValueError:
-            continue
-        if name and made == day:
-            found.append((int(name.group(1)), name.group(2) if name.lastindex and name.lastindex > 1 else ""))
-    return found
+        number = int(name.group(1))
+        if run.get("status") in ("queued", "in_progress", "requested", "waiting", "pending"):
+            running.add(number)
+        elif run.get("conclusion") in ("failure", "timed_out"):
+            failed[number] = failed.get(number, 0) + 1
+    return running, failed
 
 
-def _failed(rows: Any, pattern: re.Pattern[str]) -> dict[int, int]:
-    """For each issue number, the runs in the list that failed, on any day."""
-    runs = rows.get("workflow_runs") if isinstance(rows, dict) else rows
-    count: dict[int, int] = {}
-    for run in runs if isinstance(runs, list) else []:
-        name = pattern.match(str(run.get("display_title") or "")) if isinstance(run, dict) else None
-        if name and run.get("conclusion") in ("failure", "timed_out"):
-            count[int(name.group(1))] = count.get(int(name.group(1)), 0) + 1
-    return count
-
-
-def plan(issues: list[QueueIssue], *, owner: str, day: str, triage_runs: Any = None, fix_runs: Any = None, triage_limit: int = 10, fix_limit: int = 2) -> list[Action]:
+def plan(issues: list[QueueIssue], *, owner: str, triage_runs: Any = None) -> list[Action]:
     """What to do for each open issue of the owner, oldest first. An issue with nothing to do gives no action.
 
-    The label `fix-started` stops a second job for an issue. A triage run of today, or a job of today for
-    an issue, also counts as "done for today": a fault in a label step cannot start a second run on the
-    same day. The owner's label `build` has no such wait and always starts; its job counts in the limit."""
-    triaged = _runs_on(triage_runs, day, TRIAGE_RUN)
-    fixes = _runs_on(fix_runs, day, FIX_RUN)
-    triage_left = triage_limit - len(triaged)
-    fix_left = fix_limit - len(fixes)
-    done_triage, done_fix = {number for number, _ in triaged}, {number for number, _ in fixes}
-    failed_triage = _failed(triage_runs, TRIAGE_RUN)
+    No count of runs for one day is a limit: each issue that is ready starts its run now. The label
+    `fix-started` stops a second job for an issue. A triage run that is not done stops a second triage
+    run beside it, and `TRIAGE_TRIES` failed triage runs send the issue to the owner."""
+    running, failed = _triage_runs(triage_runs)
     actions: list[Action] = []
     for issue in sorted(issues, key=lambda issue: issue.number):
         if not issue.open or not _is_owner(issue, owner) or STARTED in issue.labels:
             continue
-        if BUILD in issue.labels:
-            fix_left -= 1
-            actions.append(Action("start", issue.number, CODE))  # the owner's word always starts, with no wait
-        elif issue.labels & set(AUTO):
-            scope = CODE if AUTO_BUILD in issue.labels else PROMPTS  # with both labels, the wider job
-            if issue.number in done_fix:
-                actions.append(Action("wait", issue.number, "a job for this issue started today"))
-            elif fix_left > 0:
-                fix_left -= 1
-                actions.append(Action("start", issue.number, scope))
-            else:
-                actions.append(Action("wait", issue.number, f"the limit of {fix_limit} jobs for one day is reached"))
+        if BUILD in issue.labels or AUTO_BUILD in issue.labels:
+            actions.append(Action("start", issue.number, CODE))  # with `auto-fix` too, the wider job
+        elif AUTO_FIX in issue.labels:
+            actions.append(Action("start", issue.number, PROMPTS))
         elif issue.labels & set(TRIAGE) or not issue.kind:
             continue  # sorted already, or an issue that the owner wrote and did not label
         elif issue.kind == IDEA:
             actions.append(Action("label", issue.number, NEEDS_OWNER))  # a feature is the owner's decision: no agent is asked
-        elif failed_triage.get(issue.number, 0) >= TRIAGE_TRIES:
+        elif issue.number in running:
+            actions.append(Action("wait", issue.number, "a triage run for this issue is not done yet"))
+        elif failed.get(issue.number, 0) >= TRIAGE_TRIES:
             actions.append(Action("giveup", issue.number))  # the owner sorts it: no endless tries
-        elif issue.number in done_triage:
-            actions.append(Action("wait", issue.number, "a triage run for this issue started today"))
-        elif triage_left > 0:
-            triage_left -= 1
-            actions.append(Action("triage", issue.number))
         else:
-            actions.append(Action("wait", issue.number, f"the limit of {triage_limit} triage runs for one day is reached"))
+            actions.append(Action("triage", issue.number))
     return actions
 
 
@@ -435,11 +405,6 @@ def _load(path: str) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _limit(name: str, default: int) -> int:
-    text = os.environ.get(name, "").strip()
-    return int(text) if re.fullmatch(r"[0-9]{1,4}", text) else default
-
-
 def issue_from_file(path: str, number: str) -> QueueIssue:
     """The issue that a step of the workflow read from GitHub into a file. `number` is the input of the workflow."""
     if not re.fullmatch(r"[0-9]{1,9}", number.strip()):
@@ -459,7 +424,6 @@ def main() -> None:
     plan_cmd = commands.add_parser("plan", help="print what the queue must do now, one action on a line")
     plan_cmd.add_argument("--issues", required=True, metavar="FILE", help="the open issues, as GitHub's REST API gives them")
     plan_cmd.add_argument("--triage-runs", required=True, metavar="FILE", help="the runs of triage.yml")
-    plan_cmd.add_argument("--fix-runs", required=True, metavar="FILE", help="the runs of improve.yml")
     for name, text in (("task", "check one issue and write the task for the triage agent"), ("decide", "give the label and the comment for the triage agent's answer")):
         command = commands.add_parser(name, help=text)
         command.add_argument("--issue-file", required=True, metavar="FILE")
@@ -503,11 +467,7 @@ def main() -> None:
             actions = plan(
                 read_issues(_load(args.issues)),
                 owner=owner,
-                day=call_day(datetime.now(UTC)),
                 triage_runs=_load(args.triage_runs),
-                fix_runs=_load(args.fix_runs),
-                triage_limit=_limit("TRIAGE_DAILY_LIMIT", 10),
-                fix_limit=_limit("ISSUE_FIX_DAILY_LIMIT", 2),
             )
             if actions:
                 print("\n".join(action.line() for action in actions))

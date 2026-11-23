@@ -192,13 +192,14 @@ async def test_a_new_version_can_ask_again_for_the_same_failure(db):
     assert len(again) == 1 and len(send.requests) == 2
 
 
-async def test_the_limit_for_one_day_stops_more_fix_requests(db):
+async def test_no_count_for_one_day_stops_a_fix_request(db):
+    """The owner on 2026-11-23: no limit on job execution. Before, the third fix request of one day was not sent."""
     scores = [Score("name_asked_once", FAIL, cause=OTHER), Score("nothing_asked_again", FAIL, cause=OTHER), Score("question_answered", FAIL, cause=OTHER)]
     send = Sender()
-    sent = await request_fixes(settings(improve_daily_limit=2), db, record(scores=scores), send=send, now=NOW)
-    assert len(sent) == 2 and len(send.requests) == 2
-    next_day = await request_fixes(settings(improve_daily_limit=2), db, record(scores=scores), send=send, now=datetime(2026, 11, 22, 15, 0, tzinfo=UTC))
-    assert [request.rule for request in next_day] == ["question_answered"]
+    sent = await request_fixes(settings(), db, record(scores=scores), send=send, now=NOW)
+    assert len(sent) == 3 and len(send.requests) == 3
+    # The same failures at the same version ask no second time: that stop stays.
+    assert await request_fixes(settings(), db, record("call-2", scores=scores), send=send, now=NOW) == [] and len(send.requests) == 3
 
 
 async def test_a_job_that_did_not_start_is_not_stored_so_a_later_call_asks_again(db):

@@ -71,7 +71,6 @@ class Settings(BaseSettings):
     improve_repo: str = ""  # "owner/name"
     improve_workflow: str = "improve.yml"
     improve_ref: str = "main"
-    improve_daily_limit: int = 2  # fix requests in one day (US Eastern), at most
     # A caller's feedback becomes a GitHub issue (feedback.py). It uses the token above, which then needs "Issues" (read and write) too.
     feedback_issues: bool = True
     # At the start of a call and after a saved message, the agent offers a passphrase. With it, the agents may use the notes of that call on the caller's next call (passphrase.py).

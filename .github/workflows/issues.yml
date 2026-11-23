@@ -24,10 +24,8 @@
 #   - Only a person with rights on the repository can set a label. A comment on an issue is never read.
 #   - This workflow runs no agent and no line from an issue. It reads labels and starts workflows.
 #
-# The limits are where the cost is, each for one day (US Eastern). An issue past a limit waits for the next day.
-# Optional repository variables:
-#   - TRIAGE_DAILY_LIMIT     triage runs in one day (default 10)
-#   - ISSUE_FIX_DAILY_LIMIT  fix jobs in one day that started by themselves (default 2). `build` has no limit.
+# No count of runs for one day is a limit: each issue that is ready starts its run at once. The label
+# `fix-started` stops a second job for an issue, and 3 failed triage runs send an issue to the owner.
 name: Queue of issues
 
 # A new issue with a label gives the events "opened" and "labeled". Only "labeled" is used, so one issue starts one run.
@@ -75,16 +73,12 @@ jobs:
           done < "$RUNNER_TEMP/labels.tsv"
 
       - name: Plan what to do
-        env:
-          TRIAGE_DAILY_LIMIT: ${{ vars.TRIAGE_DAILY_LIMIT }}
-          ISSUE_FIX_DAILY_LIMIT: ${{ vars.ISSUE_FIX_DAILY_LIMIT }}
         run: |
           set -euo pipefail
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues?state=open&creator=${GITHUB_REPOSITORY_OWNER}&per_page=100" > "$RUNNER_TEMP/issues.json"
-          # The newest 100 runs of each workflow: many more than the limits of one day.
+          # The newest 100 triage runs: a run that is not done, and the failed runs of each issue.
           gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/triage.yml/runs?per_page=100" > "$RUNNER_TEMP/triage-runs.json"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/improve.yml/runs?per_page=100" > "$RUNNER_TEMP/fix-runs.json"
-          uv run issue-queue plan --issues "$RUNNER_TEMP/issues.json" --triage-runs "$RUNNER_TEMP/triage-runs.json" --fix-runs "$RUNNER_TEMP/fix-runs.json" > "$RUNNER_TEMP/plan.txt"
+          uv run issue-queue plan --issues "$RUNNER_TEMP/issues.json" --triage-runs "$RUNNER_TEMP/triage-runs.json" > "$RUNNER_TEMP/plan.txt"
           if [ -s "$RUNNER_TEMP/plan.txt" ]; then cat "$RUNNER_TEMP/plan.txt"; else echo "Nothing to do."; fi | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Do it

@@ -895,7 +895,8 @@ Limits:
 
 - One fix request for each (rule, agent, cause) at one harness version. The same failure on the next
   call starts no second job. After a deploy the version is new, so the failure can ask again.
-- At most `IMPROVE_DAILY_LIMIT` fix requests in one day (default 2).
+- No count of fix requests for one day is a limit. Before 2026-11-23 the third request of a day was
+  not sent, and that failure got no job.
 - Only a server whose version is a clean git commit sends a fix request. `uv run chat` sends none.
 - A call from the owner's phone can send one. That shows the loop with no real caller.
 - A caller who asked to be forgotten is not graded, so that call sends nothing.
@@ -999,8 +1000,8 @@ own caller. "Forget me" deletes the caller's rows from that table; the count in 
 Limits:
 
 - The number of new issues in one day has no limit. An issue costs nothing. Before 2026-11-22 a limit
-  of 3 new issues in one day dropped each later report, and such a report was lost. The cost limits
-  are now on the jobs that an issue can start (the next section).
+  of 3 new issues in one day dropped each later report, and such a report was lost. The jobs
+  that an issue can start have no limit for one day either (the next section).
 - At most 3 items from one call.
 - A caller who asked to be forgotten gets no issue: that call is not graded.
 - The two models must agree on the kind: the grader model's item is dropped when the decision grader
@@ -1092,21 +1093,24 @@ Who can start a job:
 - The text of a caller's issue is data for both agents. Each task says so, and the guard of the files
   and the owner's review hold the result.
 
-Limits, each for one day (US Eastern). An issue past a limit waits for the next day; it is never dropped.
+No count of runs for one day is a limit. Each issue that is ready starts its run at once. Before
+2026-11-23 the queue started 10 triage runs and 2 jobs in one day, and a later issue waited. What
+stops a run that starts again and again:
 
-- `TRIAGE_DAILY_LIMIT` triage runs (default 10).
-- `ISSUE_FIX_DAILY_LIMIT` jobs for issues, in both scopes (default 2). Each job uses the owner's Claude
-  subscription, and a build job can run for 60 minutes; that is the reason for the limit. The owner's
-  `build` always starts its job, and that job counts in the limit of the day.
-- The triage agent gets 3 tries for one issue, one in a day. After 3 failed runs the issue gets
-  `needs-owner`, with a comment.
+- The label `fix-started`: one job for an issue. A job that opens no pull request removes the label
+  that started it, so nothing starts that job again by itself.
+- A triage run that is not done: the queue starts no second run beside it.
+- 3 failed triage runs for one issue: the issue gets `needs-owner`, with a comment.
+
+Each run uses the owner's Claude subscription. The limits of that subscription are the only limit on
+the cost: one call can give 3 issues, and each new fault starts a triage run and maybe a job.
 
 The queue runs on each new issue, on each change of a label by a person, and each morning. It reads
 all open issues and does only what is not done, so a lost event loses no work. It needs no new secret:
 the token of its own run sets the labels and starts the two other workflows. So the actor of those
 runs is the bot of GitHub Actions, and each agent step names it in `allowed_bots`; the agent action
 refuses a run that another bot started. Optional repository
-variables: `TRIAGE_MODEL`, `BUILD_MODEL`, `TRIAGE_DAILY_LIMIT`, `ISSUE_FIX_DAILY_LIMIT`.
+variables: `TRIAGE_MODEL`, `BUILD_MODEL`.
 
 What this does not promise:
 

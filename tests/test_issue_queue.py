@@ -23,7 +23,6 @@ from ai_call_center.issue_queue import (
     BUILD,
     CODE,
     COMMENTS,
-    FIX_RUN,
     NEEDS_OWNER,
     NOT_ACTIONABLE,
     PROMPTS,
@@ -87,7 +86,7 @@ def own(number: int, *labels: str, title: str = "Add a goodbye line", body: str 
 
 def runs(*found: tuple[str, str, str]) -> dict:
     """GitHub's list of the runs of one workflow: (name of the run, time of the start, conclusion)."""
-    return {"workflow_runs": [{"display_title": name, "created_at": made, "conclusion": conclusion} for name, made, conclusion in found]}
+    return {"workflow_runs": [{"display_title": name, "created_at": made, "conclusion": conclusion, "status": "completed" if conclusion else "in_progress"} for name, made, conclusion in found]}
 
 
 def lines(actions: list[Action]) -> list[str]:
@@ -204,43 +203,40 @@ def test_each_open_issue_of_the_owner_gets_the_next_step():
         issue(11, SLOW, BUILD, author="someone-else"),
         issue(12, state="closed"),
     ]
-    assert lines(plan(issues, owner=OWNER, day=DAY)) == ["triage 1", "label 2 needs-owner", "start 3 prompts", "start 4 code", "start 5 code"]
-    assert plan(issues, owner="", day=DAY) == []  # no owner is known: nothing starts
+    assert lines(plan(issues, owner=OWNER)) == ["triage 1", "label 2 needs-owner", "start 3 prompts", "start 4 code", "start 5 code"]
+    assert plan(issues, owner="") == []  # no owner is known: nothing starts
 
 
-def test_the_limits_of_one_day_make_an_issue_wait_and_never_drop_it():
-    faults = [issue(number) for number in (1, 2, 3)]
-    done = runs(("Triage of issue #9", NOON, "success"), ("Triage of issue #8", LATE, "success"))  # one of today, one of the day before
-    assert lines(plan(faults, owner=OWNER, day=DAY, triage_runs=done, triage_limit=2)) == ["triage 1", "wait 2 the limit of 2 triage runs for one day is reached", "wait 3 the limit of 2 triage runs for one day is reached"]
-    assert lines(plan(faults, owner=OWNER, day="2026-11-23", triage_runs=done, triage_limit=2)) == ["triage 1", "triage 2", "wait 3 the limit of 2 triage runs for one day is reached"]
-
-    fixes = [issue(1, SLOW, AUTO_FIX), issue(2, SLOW, AUTO_BUILD), issue(3, SLOW, AUTO_BUILD), issue(4, SLOW, NEEDS_OWNER, BUILD), own(5, BUILD)]
-    started = runs(("Issue #9 (auto-fix)", NOON, None), ("Issue #7 (build)", LATE, "success"), ("Rule name_asked_once", NOON, "success"), ("Propose a fix for a failed rule", NOON, "success"))
-    # One job of today for an issue counts. A job of the day before and a job for a failed rule do not.
-    # A job that starts by itself waits past the limit, in each scope. The owner's `build` always starts.
-    assert lines(plan(fixes, owner=OWNER, day=DAY, fix_runs=started, fix_limit=3)) == ["start 1 prompts", "start 2 code", "wait 3 the limit of 3 jobs for one day is reached", "start 4 code", "start 5 code"]
-    assert lines(plan(fixes, owner=OWNER, day=DAY, fix_runs=started, fix_limit=0)) == [*(f"wait {n} the limit of 0 jobs for one day is reached" for n in (1, 2, 3)), "start 4 code", "start 5 code"]
-    # The owner's job counts in the limit of the day: it comes first here, so the two others wait.
-    first = [own(1, BUILD), issue(2, SLOW, AUTO_FIX), issue(3, SLOW, AUTO_BUILD)]
-    assert lines(plan(first, owner=OWNER, day=DAY, fix_limit=1)) == ["start 1 code", "wait 2 the limit of 1 jobs for one day is reached", "wait 3 the limit of 1 jobs for one day is reached"]
+def test_no_count_of_runs_for_one_day_makes_an_issue_wait():
+    """The owner on 2026-11-23: "There should be no limit on job execution". Before, 10 triage runs and 2 jobs were the limits of one day."""
+    faults = [issue(number) for number in range(1, 41)]
+    done = runs(*((f"Triage of issue #{number}", NOON, "success") for number in range(100, 160)))  # 60 runs of today for other issues
+    assert lines(plan(faults, owner=OWNER, triage_runs=done)) == [f"triage {number}" for number in range(1, 41)]
+    ready = [issue(1, SLOW, AUTO_FIX), issue(2, SLOW, AUTO_BUILD), issue(3, SLOW, AUTO_BUILD), issue(4, SLOW, NEEDS_OWNER, BUILD), own(5, BUILD), issue(6, SLOW, AUTO_FIX, AUTO_BUILD)]
+    assert lines(plan(ready, owner=OWNER)) == ["start 1 prompts", "start 2 code", "start 3 code", "start 4 code", "start 5 code", "start 6 code"]
+    assert "DAILY_LIMIT" not in WORKFLOWS["issues.yml"] and "limit" not in " ".join(plan.__code__.co_varnames)
 
 
-def test_a_run_of_today_for_the_same_issue_starts_no_second_run():
-    assert lines(plan([issue(1)], owner=OWNER, day=DAY, triage_runs=runs(("Triage of issue #1", NOON, None)))) == ["wait 1 a triage run for this issue started today"]
-    assert lines(plan([issue(1, SLOW, AUTO_FIX)], owner=OWNER, day=DAY, fix_runs=runs(("Issue #1 (auto-fix)", NOON, "failure")))) == ["wait 1 a job for this issue started today"]
-    assert lines(plan([issue(1, SLOW, AUTO_BUILD)], owner=OWNER, day=DAY, fix_runs=runs(("Issue #1 (build)", NOON, "failure")))) == ["wait 1 a job for this issue started today"]
-    # The owner put `build` on the issue again after a build job that opened no pull request: it starts at once.
-    assert lines(plan([issue(1, SLOW, NEEDS_OWNER, BUILD)], owner=OWNER, day=DAY, fix_runs=runs(("Issue #1 (build)", NOON, "success")))) == ["start 1 code"]
+def test_what_stops_a_run_that_starts_again_and_again():
+    # A triage run that is not done: no second run beside it. A run that is done and set no label: the next run of the queue tries again.
+    assert lines(plan([issue(1)], owner=OWNER, triage_runs=runs(("Triage of issue #1", NOON, None)))) == ["wait 1 a triage run for this issue is not done yet"]
+    assert lines(plan([issue(1)], owner=OWNER, triage_runs=runs(("Triage of issue #1", NOON, "failure")))) == ["triage 1"]
+    assert lines(plan([issue(1)], owner=OWNER, triage_runs=runs(("Triage of issue #1", NOON, "cancelled")))) == ["triage 1"]
+    # An issue that the owner sorts again (the triage label is gone) starts a triage run on the same day.
+    assert lines(plan([issue(1)], owner=OWNER, triage_runs=runs(("Triage of issue #1", NOON, "success")))) == ["triage 1"]
+    # A job for an issue: the label `fix-started` is the stop. With it, nothing starts; a job that fails removes the label that started it.
+    assert plan([issue(1, SLOW, AUTO_FIX, STARTED), issue(2, SLOW, AUTO_BUILD, STARTED), own(3, BUILD, STARTED)], owner=OWNER) == []
+    assert 'for label in $started; do gh api "$labels/$label" --method DELETE' in WORKFLOWS["improve.yml"]
 
 
 def test_a_triage_that_fails_again_and_again_goes_to_the_owner():
     failed = runs(*[("Triage of issue #1", f"2026-11-{day}T17:00:00Z", "failure") for day in (19, 20, 21)], ("Triage of issue #2", "2026-11-21T17:00:00Z", "failure"), ("Triage of issue #2", "2026-11-20T17:00:00Z", "timed_out"))
-    assert lines(plan([issue(1), issue(2)], owner=OWNER, day=DAY, triage_runs=failed)) == ["giveup 1", "triage 2"]
+    assert lines(plan([issue(1), issue(2)], owner=OWNER, triage_runs=failed)) == ["giveup 1", "triage 2"]
 
 
 def test_a_run_list_that_is_not_as_expected_counts_nothing():
     for rows in (None, {"message": "Not Found"}, {"workflow_runs": [None, {"display_title": "Triage of issue #1"}, {"display_title": "Triage of issue #1", "created_at": "yesterday"}]}, "text"):
-        assert lines(plan([issue(1)], owner=OWNER, day=DAY, triage_runs=rows, fix_runs=rows)) == ["triage 1"]
+        assert lines(plan([issue(1)], owner=OWNER, triage_runs=rows)) == ["triage 1"]
 
 
 # --- a job that opened no pull request ---
@@ -365,9 +361,6 @@ def test_each_command_of_the_queue_runs_as_the_workflow_calls_it(tmp_path, monke
 
     (tmp_path / "issues.json").write_text(json.dumps([[row(1), row(2, SPANISH), row(3, SLOW, AUTO_FIX), row(4, SLOW, BUILD)]]), encoding="utf-8")
     (tmp_path / "triage-runs.json").write_text(json.dumps(runs()), encoding="utf-8")
-    (tmp_path / "fix-runs.json").write_text(json.dumps(runs()), encoding="utf-8")
-    monkeypatch.setenv("TRIAGE_DAILY_LIMIT", "")  # a variable that is not set arrives as an empty text
-    monkeypatch.setenv("ISSUE_FIX_DAILY_LIMIT", "1")
     run(plan_cmd, monkeypatch, tmp_path / "outputs")
     planned = capsys.readouterr().out.splitlines()
     assert planned == ["triage 1", "label 2 needs-owner", "start 3 prompts", "start 4 code"]
@@ -426,13 +419,12 @@ def test_the_report_command_of_the_fix_job_runs_as_the_workflow_calls_it(tmp_pat
 
 
 def test_the_names_of_the_runs_are_the_names_that_the_queue_counts():
-    """The queue counts the runs of one day by their names. A new `run-name` in a workflow must fit the pattern here."""
+    """The queue finds the triage runs of an issue by their names. A new `run-name` in a workflow must fit the pattern here."""
     triage = re.search(r'^run-name: "(.*)"$', WORKFLOWS["triage.yml"], re.MULTILINE).group(1)
     assert TRIAGE_RUN.match(triage.replace("${{ inputs.issue }}", "12")).group(1) == "12"
     fix = re.search(r'^run-name: "(.*)"$', WORKFLOWS["improve.yml"], re.MULTILINE).group(1)
     assert "format('Issue #{0} ({1})', inputs.issue, inputs.scope == 'code' && 'build' || 'auto-fix')" in fix
-    assert FIX_RUN.match("Issue #12 (auto-fix)").groups() == ("12", "auto-fix") and FIX_RUN.match("Issue #12 (build)").groups() == ("12", "build")
-    assert not FIX_RUN.match("Rule name_asked_once") and not TRIAGE_RUN.match("Triage of issue #12 and more")
+    assert not TRIAGE_RUN.match("Triage of issue #12 and more") and not TRIAGE_RUN.match("Issue #12 (build)")
 
 
 def test_each_label_that_a_workflow_sets_is_a_label_of_the_queue():
@@ -471,7 +463,7 @@ def test_a_clear_fault_that_needs_code_starts_the_build_job_with_no_word_of_the_
     assert decide({"label": "auto-build", "reason": "The cause is in voice/cutoff.py."}, fault)[0] == AUTO_BUILD
     assert "auto-build" in TRIAGE_SCHEMA["properties"]["label"]["enum"] and AUTO_BUILD in QUEUE_LABELS
     labelled = issue(1, SLOW, AUTO_BUILD)
-    assert lines(plan([labelled], owner=OWNER, day=DAY)) == ["start 1 code"]
+    assert lines(plan([labelled], owner=OWNER)) == ["start 1 code"]
     assert issue_request(labelled, owner=OWNER, scope="code").scope == "code"
     with pytest.raises(Refused):
         issue_request(labelled, owner=OWNER, scope="prompts")  # each scope has its own label
@@ -479,7 +471,7 @@ def test_a_clear_fault_that_needs_code_starts_the_build_job_with_no_word_of_the_
         issue_request(issue(1, SLOW, AUTO_FIX), owner=OWNER, scope="code")
     # A feature is still the owner's decision: the triage agent's label starts no job for it.
     assert decide({"label": "auto-build", "reason": "x"}, issue(2, SPANISH))[0] == NEEDS_OWNER
-    assert lines(plan([issue(2, SPANISH)], owner=OWNER, day=DAY)) == ["label 2 needs-owner"]
+    assert lines(plan([issue(2, SPANISH)], owner=OWNER)) == ["label 2 needs-owner"]
     # The rules of the triage: the owner is for a large change or a report that is not clear, not for each change of code.
     task = triage_task(triage_issue(fault, owner=OWNER))
     assert "A fault is not a case\nfor the owner only because its repair needs code" in task and "Use it only for these cases" in task
