@@ -77,5 +77,16 @@
       "No, I don't."
     ],
     "expect": {"visits": ["contact"], "outcome": "message"}
+  },
+  {
+    "id": "why-welcome-back",
+    "about": "The caller says they never called before, and asks why the agent said so and if another caller's record was used.",
+    "caller": [
+      "This is Marisol.",
+      "I have never called this line before. Why did you say I called before? Did you pull up someone else's record with my first name?",
+      "So how does this line decide who has called before?",
+      "Okay, thanks. Goodbye."
+    ],
+    "expect": {"outcome": "none"}
   }
 ]
