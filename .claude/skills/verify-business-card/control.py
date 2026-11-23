@@ -214,10 +214,19 @@ def chat(run: Path, name: str, number: str, lines: list[str], model: str) -> int
     return 0 if done else 1
 
 
+def _tls():
+    """The uv-managed Python on this computer finds no system certificates, so an HTTPS request uses the list of `certifi`."""
+    import ssl
+
+    import certifi
+
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def http(method: str, url: str, body: str) -> int:
     request = urllib.request.Request(url, method=method.upper(), data=body.encode() if body else None, headers={"content-type": "application/json"} if body else {})
     try:
-        with urllib.request.urlopen(request, timeout=10) as answer:
+        with urllib.request.urlopen(request, timeout=10, context=_tls()) as answer:
             status, kind, data = answer.status, answer.headers.get("content-type", ""), answer.read()
     except urllib.error.HTTPError as refused:
         status, kind, data = refused.code, refused.headers.get("content-type", ""), refused.read()
