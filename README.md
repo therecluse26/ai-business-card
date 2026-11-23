@@ -370,10 +370,15 @@ number and name is not proof of who calls. The line has two levels (`passphrase.
 | Recognised | A phone number and a name that match an earlier caller | Says "Welcome back". No agent gets a note of an earlier call. |
 | Verified | The passphrase of that earlier caller too | The agents get the notes, and the first agent names the last topic. |
 
-- **The offer.** After a saved message, the contact agent offers one time: "I can remember your details
+- **The ask at the start.** Every named caller with no passphrase to check (a new caller, or a recognised
+  one with none or a locked one) hears, in place of the welcome's last question: "First, so I can verify
+  you next time: give me a short made-up word or phrase, not a password you use anywhere else. Or say
+  skip." The greeting agent passes the answer to `set_passphrase`. A caller who skips it, or asks for
+  something, gets an answer. No ask for a caller with no name or a hidden number.
+- **The offer.** After a saved message, the contact agent offers one time, unless a passphrase was set on the call: "I can remember your details
   for next time, if you give me a short word or phrase to identify you. Make it a made-up one, not a
   password you use anywhere else." The agent says the passphrase back, and keeps it after a yes.
-  `CALLER_PASSPHRASE_OFFER=false` turns the offer off.
+  `CALLER_PASSPHRASE_OFFER=false` turns the offer and the ask at the start off.
 - **The check.** On the next call the first agent says: "Welcome back, <name>. I believe we have talked
   before. Just to verify, may I have the short passphrase that you gave me?" The answer goes to the tool
   `verify_passphrase`. Code compares it. The voice model gets a yes or a no, and never the stored passphrase.

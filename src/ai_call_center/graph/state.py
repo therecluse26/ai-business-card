@@ -45,7 +45,7 @@ class CallContext:
     open_calls: list[str] = field(default_factory=list)  # the ids of the earlier calls that the caller's passphrase opens
     phrase_tries: int = 0  # passphrase tries on this call
     phrase_closed: bool = False  # the caller gave no passphrase, or a wrong one two times: no more check on this call
-    phrase_offer: bool = True  # the agent may offer a passphrase after a saved message (CALLER_PASSPHRASE_OFFER)
+    phrase_offer: bool = True  # the agent may offer a passphrase at the start and after a saved message (CALLER_PASSPHRASE_OFFER)
     phrase_offered: bool = False  # the offer was made on this call
     phrase_set: bool = False  # the caller set a passphrase on this call
     held_phrase: str = ""  # the sound key of a new passphrase that waits for the caller's yes

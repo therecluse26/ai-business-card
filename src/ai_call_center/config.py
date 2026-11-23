@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     improve_daily_limit: int = 2  # fix requests in one day (US Eastern), at most
     # A caller's feedback becomes a GitHub issue (feedback.py). It uses the token above, which then needs "Issues" (read and write) too.
     feedback_issues: bool = True
-    # After a saved message, the agent offers a passphrase. With it, the agents may use the notes of that call on the caller's next call (passphrase.py).
+    # At the start of a call and after a saved message, the agent offers a passphrase. With it, the agents may use the notes of that call on the caller's next call (passphrase.py).
     caller_passphrase_offer: bool = True
     owner_name: str = "the owner"
     owner_name_pronunciation: str = ""  # optional; how the agents say the owner's name, in plain words
