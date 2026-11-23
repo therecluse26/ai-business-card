@@ -16,7 +16,10 @@ from ai_call_center.agents.specs import (
     PASSPHRASE_OFFER,
     PASSPHRASE_SET,
     PASSPHRASE_SKIPPED,
+    PASSPHRASE_START,
     PASSPHRASE_WRONG,
+    RETURNING_QUESTION,
+    WELCOME_QUESTION,
     feedback_filed,
     passphrase_question,
     passphrase_read_back,
@@ -57,6 +60,12 @@ PHRASE_ASKED = (
     "When the caller says the passphrase, call verify_passphrase with it, in silence. "
     "If they do not know it or do not want to say it, call verify_passphrase with an empty passphrase. Say nothing about an earlier call before its result."
 )
+
+
+def _start_asked(ask: str) -> str:
+    return f'If the caller says a word or phrase, call set_passphrase with it, in silence. If they skip it or ask for something, answer them, or ask: "{ask}"\n'
+
+
 PHRASE_CLOSED = "You have no notes of the caller's earlier calls. Do not ask for the passphrase again on this call, and say nothing about what an earlier call was about."
 
 
@@ -78,10 +87,15 @@ def identify(ctx: CallContext, name: str) -> str:
         )
         return follow + (_say(words) if words else "ask what they would like to do.")
     memory = recall(ctx.leads, ctx.caller_number, name, exclude_call=ctx.call_control_id)
+    # A caller with no passphrase to check is asked to set one at the start, so the next call can verify them.
+    offer = ctx.phrase_offer and ctx.caller_number not in UNKNOWN_NUMBERS and not ctx.forgotten
     if memory is None:
         ctx.caller_name = name
-        words = welcome.new_caller(name) if welcome else ""
-        return f"{_say(words) if words else f'Greet {name} by name, and ask what they would like to do.'}\n{SETTLED}"
+        if welcome:
+            say = _say(welcome.new_caller(name, PASSPHRASE_START if offer else WELCOME_QUESTION))
+        else:
+            say = f"Greet {name} by name. {_say(PASSPHRASE_START)}" if offer else f"Greet {name} by name, and ask what they would like to do."
+        return f"{say}\n{_start_asked(WELCOME_QUESTION) if offer else ''}{SETTLED}"
     ctx.identity_confirmed = True
     ctx.returning_name = memory.name
     # The agents get the name that the caller said on this call. The name on record is a detail of an earlier
@@ -91,8 +105,11 @@ def identify(ctx: CallContext, name: str) -> str:
     if on_file is not None and not on_file.locked:
         return f"{_say(passphrase_question(name))}\n{PHRASE_ASKED}\n{SETTLED}"
     ctx.phrase_closed = True
-    words = welcome.returning_caller(name) if welcome else ""
-    return f"{_say(words) if words else f'Welcome {name} back, and ask what they would like to do.'}\n{NO_NOTES}\n{SETTLED}"
+    if welcome:
+        say = _say(welcome.returning_caller(name, PASSPHRASE_START if offer else RETURNING_QUESTION))
+    else:
+        say = f"Welcome {name} back. {_say(PASSPHRASE_START)}" if offer else f"Welcome {name} back, and ask what they would like to do."
+    return f"{say}\n{_start_asked(RETURNING_QUESTION) if offer else ''}{NO_NOTES}\n{SETTLED}"
 
 
 def verify(ctx: CallContext, phrase: str) -> str:
@@ -154,7 +171,8 @@ def set_phrase(ctx: CallContext, phrase: str) -> str:
     store.set(ctx.caller_number, name, phrase, calls=[ctx.call_control_id, *(ctx.open_calls if ctx.identity_verified else [])])
     ctx.held_phrase, ctx.phrase_set = "", True
     log.info("call %s: the caller set a passphrase", ctx.call_control_id)
-    return f"{_say(PASSPHRASE_SET)} Then ask if there is anything else. Never say the passphrase again."
+    then = "Then ask if there is anything else." if message_saved(ctx) else "Then ask what you can do for them."
+    return f"{_say(PASSPHRASE_SET)} {then} Never say the passphrase again."
 
 
 def forget(ctx: CallContext) -> tuple[str, list[str]]:

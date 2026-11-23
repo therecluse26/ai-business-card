@@ -141,6 +141,7 @@ LEG_COMPANIES: dict[str, str] = {
 
 NAME_QUESTION = "I remember callers, so first: who am I speaking with?"
 WELCOME_QUESTION = "So, do you have a project or a role in mind, or would you like to look around first?"
+RETURNING_QUESTION = "What can I do for you today?"
 
 # A new caller hears one of these, picked at random per call, as "Try asking me <tip>."
 # Each one starts a real feature, so the caller sees the system work in the first minute.
@@ -196,7 +197,7 @@ class Welcome:
     tip: str
     rag: bool = False
 
-    def new_caller(self, name: str = "") -> str:
+    def new_caller(self, name: str = "", ask: str = WELCOME_QUESTION) -> str:
         first = owner_first_name(self.owner)
         hello = f"Nice to meet you, {name.split()[0]}." if name.strip() else "No problem."
         rag = f" and RAG search over {first}'s writing" if self.rag else ""
@@ -204,13 +205,13 @@ class Welcome:
             f"{hello} {first} is a software engineer and architect, available for contract work or a full-time role. "
             f"{first}'s work covers new platforms and APIs, cloud systems, modernizing old code, and AI agents like the ones on this call. "
             f"Right now you're talking to a graph of AI agents {self.companies}, with caller memory{rag}. "
-            f"Interrupt me any time. Try asking me {self.tip}. {WELCOME_QUESTION}"
+            f"Interrupt me any time. Try asking me {self.tip}. {ask}"
         )
 
-    def returning_caller(self, name: str) -> str:
+    def returning_caller(self, name: str, ask: str = RETURNING_QUESTION) -> str:
         """A recognised caller with no passphrase. No detail of an earlier call: a phone number can be faked."""
         first_name = name.split()[0] if name.strip() else name
-        return f"Welcome back, {first_name}. Good to hear from you again. What can I do for you today?"
+        return f"Welcome back, {first_name}. Good to hear from you again. {ask}"
 
 
 # The words of the passphrase check (passphrase.py). The tools give them to the agent word for word.
@@ -232,7 +233,9 @@ PASSPHRASE_OFFER = (
     "One more thing. I can remember your details for next time, if you give me a short word or phrase to identify you. "
     "Make it a made-up one, not a password you use anywhere else. Want to set one?"
 )
-PASSPHRASE_SET = "Done. On your next call, I will ask for that passphrase before I use anything from today."
+# At the start of a call, in place of the welcome's last question, for a caller with no passphrase to check.
+PASSPHRASE_START = "First, so I can verify you next time: give me a short made-up word or phrase, not a password you use anywhere else. Or say skip."
+PASSPHRASE_SET ="Done. On your next call, I will ask for that passphrase before I use anything from today."
 
 
 def passphrase_read_back(phrase: str) -> str:
@@ -375,7 +378,7 @@ At the start of the call:
 - If the caller asks how you knew them: identify_caller matched the name they gave with a name on record for this phone number. If they say they never called, say the match may be wrong, and offer the tour agent, which explains caller memory.
 - Never share who else called, or what another person's call was about.
 - Never say an email address or a phone number aloud.
-- When the identify_caller result tells you to ask for a passphrase, the caller's answer goes to verify_passphrase, in silence. Its result gives you the exact words to say next. Never say a passphrase yourself, and never give a hint about one.
+- When the identify_caller result asks for a passphrase, the caller's answer goes to the tool that it names, in silence. Its result gives you the exact words to say next. Never say a passphrase yourself, and never give a hint about one.
 
 Routing:
 - Questions about {o}: who they are, their experience, skills, past work, or their views on software engineering. Hand off to the profile agent.
@@ -390,7 +393,7 @@ Routing:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("identify_caller", "verify_passphrase", "forget_caller", "end_call"),
+        tools=("identify_caller", "verify_passphrase", "set_passphrase", "forget_caller", "end_call"),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
         voice=voices["classifier"],
@@ -465,7 +468,7 @@ What you know about the system:
 - LangGraph holds the state of the call, decides which agent is active, runs the tools, and routes handoffs.
 - Each agent can run on a different voice provider. A handoff can change the voice and the provider in the middle of the call.
 - The contact agent can save a lead for {o} and transfer the live call to {o}'s phone.
-- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. A match gives a welcome back and nothing more: a phone number can be faked, so a match is not proof. The notes of an earlier call need a passphrase that the caller set on that call. Code checks the passphrase, and the server keeps a salted hash of it, not the passphrase. A caller can set one after they leave a message. With any doubt the caller counts as new, so nobody hears another person's details.
+- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. A match gives a welcome back and nothing more: a phone number can be faked, so a match is not proof. The notes of an earlier call need a passphrase that the caller set on that call. Code checks the passphrase, and the server keeps a salted hash of it, not the passphrase. A caller can set one at the start of a call, or after they leave a message. With any doubt the caller counts as new, so nobody hears another person's details.
 - A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
 - When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
 - The feedback agent takes a caller's bug report or feature idea about this line. After the call, a report becomes a GitHub issue, a triage agent sorts it, and a coding agent can open a pull request.

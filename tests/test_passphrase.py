@@ -215,3 +215,49 @@ async def test_no_offer_for_a_verified_caller_a_hidden_number_or_with_the_settin
 def test_a_passphrase_is_masked_in_the_summary_and_its_words_are_private_in_a_public_text():
     assert masked("The caller set the passphrase Purple  lantern and left.", ["purple lantern"]) == "The caller set the passphrase [passphrase] and left."
     assert private_words(["The Purple Lantern", "of my garden"]) == ["garden", "lantern", "purple"]
+
+
+# --- the ask at the start of each call ---
+
+
+def test_a_new_caller_is_asked_for_a_passphrase_at_the_start_and_the_next_call_verifies_it(ctx, leads):
+    from ai_call_center.agents.specs import PASSPHRASE_START, WELCOME_QUESTION, Welcome
+
+    ctx.welcome = Welcome(owner="Ada Lovelace", companies="on OpenAI models", tip="to forget you")
+    leads.start_call(ctx.call_control_id, ctx.caller_number)
+    result = identify(ctx, "Noor Halvorsen")
+    assert result.startswith('Say exactly these words to the caller, and nothing else: "Nice to meet you, Noor.')
+    assert f'Try asking me to forget you. {PASSPHRASE_START}"' in result  # in place of the welcome's last question
+    assert "call set_passphrase" in result and f'or ask: "{WELCOME_QUESTION}"' in result
+    assert "Then ask what you can do for them." in _set(ctx, "amber kettle")  # no message yet, so not "anything else"
+    leads.finish_call(ctx.call_control_id, agents=["classifier"], summary="Asked about a ferry booking app.", caller_name="Noor Halvorsen", topic="a ferry booking app")
+    later = _next_call(ctx, "call-later")
+    assert "may I have the short passphrase" in identify(later, "Noor")
+    assert "ferry booking app" in verify(later, "amber kettle")
+
+
+def test_a_recognised_caller_with_no_passphrase_is_asked_to_set_one_and_one_with_a_passphrase_is_checked(dana, ctx, leads):
+    from ai_call_center.agents.specs import PASSPHRASE_START
+
+    assert PASSPHRASE_START not in identify(dana, "Dana")  # a passphrase on file: the check, as before
+    leads.start_call("call-sam", ctx.caller_number)
+    leads.finish_call("call-sam", agents=["classifier"], summary="Asked about rates.", caller_name="Sam Lee", topic="rates")
+    sam = _next_call(ctx, "call-sam-2")
+    result = identify(sam, "Sam")
+    assert "Welcome Sam back." in result and PASSPHRASE_START in result and "rates" not in result
+    assert "no passphrase to check" in verify(sam, "amber kettle")  # setting one opens nothing of the calls before
+
+
+async def test_no_ask_at_the_start_without_a_name_from_a_hidden_number_or_with_the_setting_off(ctx):
+    from ai_call_center.agents.specs import PASSPHRASE_START
+
+    assert PASSPHRASE_START not in identify(ctx, "")
+    hidden = replace(_next_call(ctx, "call-hidden"), caller_number="anonymous")
+    assert PASSPHRASE_START not in identify(hidden, "Sam Lee")
+    off = _next_call(ctx, "call-off")
+    off.phrase_offer = False
+    assert PASSPHRASE_START not in identify(off, "Sam Lee")
+    skipped = _next_call(ctx, "call-skipped")
+    assert PASSPHRASE_START in identify(skipped, "Sam Lee")
+    result, _ = await save_lead_record(skipped, name="Sam Lee", need="A question.")
+    assert "remember your details" in result  # a caller who skipped it at the start hears the offer again after a message
