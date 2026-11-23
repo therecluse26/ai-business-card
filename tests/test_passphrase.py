@@ -65,6 +65,23 @@ def test_the_right_passphrase_opens_the_notes_from_the_call_where_it_was_set(dan
     assert PhraseStore(dana.leads.connection).find(dana.caller_number, "Dana").calls == {"call-first", dana.call_control_id}
 
 
+def test_a_recognised_caller_keeps_the_name_they_said_on_this_call(dana):
+    """A second person on the same phone, with the same first name. The surname on record is a detail of the earlier caller."""
+    result = identify(dana, "Dana Whitfield")
+    assert dana.caller_name == "Dana Whitfield" and "Reyes" not in result
+    assert "already identified as Dana Whitfield" in identify(dana, "Dana Whitfield")
+    verify(dana, "green lantern")
+    verify(dana, "red lantern")
+    assert dana.caller_name == "Dana Whitfield" and dana.caller_history == ""
+
+
+def test_a_verified_caller_gets_the_name_from_their_earlier_call(dana):
+    identify(dana, "Dana")
+    assert dana.caller_name == "Dana"
+    verify(dana, "purple lantern")
+    assert dana.caller_name == "Dana Reyes"  # the name as the call with the passphrase stored it
+
+
 def test_two_wrong_tries_close_the_check_for_the_call(dana):
     identify(dana, "Dana")
     first = verify(dana, "green lantern")

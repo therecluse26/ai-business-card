@@ -140,7 +140,8 @@ def test_a_matching_name_gets_a_welcome_back_and_no_notes(ctx, leads):
     for detail in ("Acme Roofing", "after-hours", "Last time"):
         assert detail not in result
     assert ctx.identity_confirmed and not ctx.identity_verified and ctx.caller_history == ""
-    assert ctx.returning_name == "Steve Park" and ctx.caller_name == "Steve Park"
+    # The agents get the name that the caller said on this call. The stored name waits for the passphrase check.
+    assert ctx.returning_name == "Steve Park" and ctx.caller_name == "Stephen"
 
 
 def test_another_name_on_the_same_number_hears_nothing_about_the_earlier_caller(ctx, leads):
