@@ -28,10 +28,10 @@ The coverage record. The check runs these, and nothing else of the product:
 | `src/ai_call_center/graph/state.py` | the fields of `CallContext` in `CTX_FIELDS` of `check.py` |
 | `src/ai_call_center/agents/specs.py` | `Welcome.returning_caller`, `Welcome.new_caller`, `passphrase_question`, `passphrase_right`, `passphrase_read_back` |
 
-**Sync commit: `a523d25`.** At this commit the check was confirmed to describe the code above. `crm.py` is newer than this commit: the check was extended for it on 2026-11-23, before its first commit. Move the sync commit to the commit that adds `crm.py`.
+**Sync commit: `fd680b5`.** At this commit the check was confirmed to describe the code above. It is the commit that adds `crm.py`; the search and `--mutants` passed on its code on 2026-11-23.
 
 ```sh
-git diff --stat a523d25 -- src/ai_call_center/graph/tools.py src/ai_call_center/crm.py src/ai_call_center/passphrase.py src/ai_call_center/callers.py src/ai_call_center/leads.py src/ai_call_center/names.py src/ai_call_center/graph/state.py src/ai_call_center/agents/specs.py
+git diff --stat fd680b5 -- src/ai_call_center/graph/tools.py src/ai_call_center/crm.py src/ai_call_center/passphrase.py src/ai_call_center/callers.py src/ai_call_center/leads.py src/ai_call_center/names.py src/ai_call_center/graph/state.py src/ai_call_center/agents/specs.py
 ```
 
 No output: the verified code is the same, and the last result still holds. Any output: run the check, then read "When a change is intended" below. Move the sync commit forward only after you confirmed that `check.py` still describes the code at the new commit: its actions, its `CTX_FIELDS`, its `TABLES`, its `PLACES` and its `MUTANTS`.
