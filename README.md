@@ -104,8 +104,8 @@ So the server handles the recovery (`voice/cutoff.py`):
 
 - When a caller's sound starts, the server puts a note into the active agent's session. The note says what to do if the turn has no clear words.
 - A sound that cut the agent off: the agent says the cut sentence again and goes on.
-- A sound in silence: the agent asks its last question again.
-- A turn with clear words: the agent forgets the note and answers the words.
+- A sound in silence: the agent says "I didn't catch that. Could you say it again?" It does not ask its last question again: a greeting agent asked it after each "um", and a feedback agent asked "anything else?" again after the caller said no.
+- A turn with clear words: the agent forgets the note and answers the words. A short "yes" or "no" is clear words.
 - A note lives for one answer. The server deletes it when the agent next starts to speak.
 
 Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova Sonic do not report the start of a caller's turn. The results come from simulated calls with recorded coughs, not from a tuned production system.

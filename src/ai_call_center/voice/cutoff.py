@@ -5,9 +5,10 @@ stops at once, and the provider then answers the sound. The model hears that the
 words, but it does not know that it was cut off, or in which sentence. On 2026-11-17 an agent
 answered four coughs with "Sorry, I didn't catch that", and a prompt rule alone gave "Go ahead?"
 in place of the greeting. So this code tells the agent the one fact it cannot see: the sentence
-that was cut. A cough while the agent is silent got a new greeting ("Hi, I'm glad you called"),
-so in that case the agent is told its last question. The agent still decides if the caller's
-turn has words: it hears the audio.
+that was cut. A cough while the agent is silent got a new greeting ("Hi, I'm glad you called").
+Its last question in that place was worse: an agent asked it again after each "um", and again
+after the caller's "no" had answered it. So in that case the agent says that it did not catch
+the words. The agent still decides if the caller's turn has words: it hears the audio.
 
 No voice detection mode tells a cough from a word (measured 2026-11-17: OpenAI server VAD at
 threshold 0.8, OpenAI semantic VAD, and the local Silero detector all took coughs for speech).
@@ -60,21 +61,16 @@ def cut_sentence(text: str, heard_secs: float) -> str:
     return rest
 
 
-def last_question(text: str) -> str:
-    """The question that ends the agent's answer `text`. "" when it does not end with one."""
-    parts = _SENTENCE_END.split(" ".join(text.split()))
-    return parts[-1] if parts and parts[-1].endswith("?") else ""
-
-
 _NOTE_START = "This is a note from the phone system, not from the caller. It replaces any earlier note from the phone system about a sound. "
 _DECIDE = (
     "Listen to the caller's turn that comes now, and decide which of two cases it is. "
-    "Case 1: the caller said clear words. A request, a question, an answer to what you asked, or words that ask you to stop "
+    'Case 1: the caller said clear words. A request, a question, an answer to what you asked (also a short "yes" or "no"), or words that ask you to stop '
     '("wait", "stop", "hold on", "excuse me") are clear words. Then forget this note: {words} '
     'Case 2: a cough or a noise. The turn has no clear words, or only an "um", or a word or two that do not fit what you just said '
     '(a cough often sounds like "bye", "thank you", "hi" or "you"). Then it is not a request: '
-    "do not answer it, do not apologise, do not comment on it, and do not greet again. {noise}"
+    "do not answer it, and do not greet again. {noise}"
 )
+NOT_CAUGHT = "I didn't catch that. Could you say it again?"
 
 
 def cut_off_note(said: str) -> str:
@@ -83,14 +79,13 @@ def cut_off_note(said: str) -> str:
     return (
         _NOTE_START
         + "A sound on the caller's line cut you off in the middle of a sentence. "
-        + _DECIDE.format(words="answer the caller's words, and do not say again what you were saying.", noise=again)
+        + _DECIDE.format(words="answer the caller's words, and do not say again what you were saying.", noise="Do not apologise, and do not comment on it. " + again)
     )
 
 
-def quiet_sound_note(question: str) -> str:
+def quiet_sound_note() -> str:
     """What the agent is told when a caller's turn starts while the agent is silent."""
-    say = f'Say only this: "{question}"' if question else 'Say only this: "Go ahead."'
-    return _NOTE_START + _DECIDE.format(words="answer the caller's words as usual.", noise=say)
+    return _NOTE_START + _DECIDE.format(words="answer the caller's words as usual.", noise=f'Do not ask your last question again. Say only this: "{NOT_CAUGHT}"')
 
 
 class CallerSoundWatch(FrameProcessor):
@@ -141,7 +136,7 @@ class CallerSoundWatch(FrameProcessor):
                 return cut_off_note(cut_sentence(self._text, now - self._started_at)), True
             if not cut:
                 self._note_out = True
-                return quiet_sound_note(last_question(self._text)), False
+                return quiet_sound_note(), False
         return None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
