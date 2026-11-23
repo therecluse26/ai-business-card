@@ -105,7 +105,7 @@ OpenAI's voice detection decides when a caller's turn starts, and a start cuts t
 So the server handles the recovery (`voice/cutoff.py`):
 
 - When a caller's sound starts, the server puts a note into the active agent's session. The note says what to do if the turn has no clear words.
-- A sound that cut the agent off: the agent says the cut sentence again and goes on.
+- A sound that cut the agent off: the agent says the cut sentence again and goes on. A "yes", "okay", "right" or "mm-hm" in the middle of the agent's sentence counts as such a sound: it says that the caller listens. Read as an answer, it leaves the sentence unfinished: a likely cause of a caller's report of an agent that stops in the middle of a sentence.
 - A sound in silence: the agent says "I didn't catch that. Could you say it again?" It does not ask its last question again: a greeting agent asked it after each "um", and a feedback agent asked "anything else?" again after the caller said no.
 - A turn with clear words: the agent forgets the note and answers the words. A short "yes" or "no" is clear words.
 - A note lives for one answer. The server deletes it when the agent next starts to speak.

@@ -66,11 +66,15 @@ _DECIDE = (
     "Listen to the caller's turn that comes now, and decide which of two cases it is. "
     'Case 1: the caller said clear words. A request, a question, an answer to what you asked (also a short "yes" or "no"), or words that ask you to stop '
     '("wait", "stop", "hold on", "excuse me") are clear words. Then forget this note: {words} '
-    'Case 2: a cough or a noise. The turn has no clear words, or only an "um", or a word or two that do not fit what you just said '
+    'Case 2: a cough or a noise. The turn has no clear words, or only an "um"{listening}, or a word or two that do not fit what you just said '
     '(a cough often sounds like "bye", "thank you", "hi" or "you"). Then it is not a request: '
     "do not answer it, and do not greet again. {noise}"
 )
 NOT_CAUGHT = "I didn't catch that. Could you say it again?"
+# A caller on the phone says "mm-hm" while the agent speaks, to show they listen. The voice provider takes it
+# for a turn and cuts the agent off. Read as an answer, it leaves the sentence unfinished: a likely cause of
+# an agent that stops in the middle of a sentence (issue #13). Read as a sound, the agent says the sentence again.
+LISTENING = ', or a "yes", "okay", "right" or "mm-hm" in the middle of your sentence, which only says that the caller listens'
 
 
 def cut_off_note(said: str) -> str:
@@ -79,13 +83,13 @@ def cut_off_note(said: str) -> str:
     return (
         _NOTE_START
         + "A sound on the caller's line cut you off in the middle of a sentence. "
-        + _DECIDE.format(words="answer the caller's words, and do not say again what you were saying.", noise="Do not apologise, and do not comment on it. " + again)
+        + _DECIDE.format(words="answer the caller's words, and do not say again what you were saying.", listening=LISTENING, noise="Do not apologise, and do not comment on it. " + again)
     )
 
 
 def quiet_sound_note() -> str:
     """What the agent is told when a caller's turn starts while the agent is silent."""
-    return _NOTE_START + _DECIDE.format(words="answer the caller's words as usual.", noise=f'Do not ask your last question again. Say only this: "{NOT_CAUGHT}"')
+    return _NOTE_START + _DECIDE.format(words="answer the caller's words as usual.", listening="", noise=f'Do not ask your last question again. Say only this: "{NOT_CAUGHT}"')
 
 
 class CallerSoundWatch(FrameProcessor):
