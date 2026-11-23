@@ -9,7 +9,7 @@
 #    it. The label `auto-fix` gives the scope `prompts`: the job is the same as for a failed rule. The
 #    label `auto-build` (the triage agent) or `build` (the owner) gives the scope `code`: the agent can change the code of the phone line, but not
 #    the code that measures or judges a change (CODE_REFUSED in proposal.py), no workflow, and no
-#    dependency. The pull request of the scope `code` is always a draft.
+#    dependency.
 #    The job reads the issue itself, and code checks it: the owner of the repository is its author, and it
 #    has the label for the scope. So a person who dispatches this workflow with a number gets no more than
 #    the labels allow.
@@ -376,13 +376,11 @@ jobs:
           VERDICT: ${{ needs.measure.outputs.verdict }}
         run: |
           set -euo pipefail
-          # A change that the scorer does not show is a draft: a person must judge it with no measure.
-          # A change of code is always a draft: the scorer measures the agents' words, not new code.
-          draft=false
-          if [ "$VERDICT" != "better" ] || [ "$FIX_SCOPE" = code ]; then draft=true; fi
+          # No pull request is a draft (the owner's rule, 2026-11-23): each one is ready for review, and its
+          # checks run at once. The text of the pull request says what the scorer shows and what it does not.
           open_as() {
             GH_TOKEN="$1" gh api "repos/${GITHUB_REPOSITORY}/pulls" --method POST \
-              -f title="$TITLE" -f head="$BRANCH" -f base="$GITHUB_REF_NAME" -F body=@"$RUNNER_TEMP/body.md" -F draft="$draft" --jq .html_url
+              -f title="$TITLE" -f head="$BRANCH" -f base="$GITHUB_REF_NAME" -F body=@"$RUNNER_TEMP/body.md" -F draft=false --jq .html_url
           }
           # The owner's token first: GitHub starts the checks of such a pull request with no approval.
           if [ -n "${OWNER_TOKEN:-}" ]; then

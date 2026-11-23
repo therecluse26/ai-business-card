@@ -234,7 +234,7 @@ Choose one label:
   (src/ai_call_center/callers.py). A job with no person then makes that change.
 - `auto-build`: the report says clearly what went wrong, and the repair needs a change of the code of
   the phone line (src/ai_call_center/, tests/). A job with no person then finds the cause, changes the
-  code, and opens a draft pull request. The owner reads each pull request before it is merged.
+  code, and opens a pull request. The owner reads each pull request before it is merged.
 - `needs-owner`: the owner must decide before a job starts. Use it only for these cases:
   - A large change. The repair changes what the line does by design, not how well it does it: it makes
     the passphrase check weaker or removes it, changes what the line keeps of a caller, changes when the
@@ -269,7 +269,7 @@ TRIAGE_SCHEMA: dict[str, Any] = {
 
 COMMENTS = {
     AUTO_FIX: "Triage: `auto-fix`. A change of a prompt or a word list can repair this fault. The fix job starts by itself and opens a pull request for the owner.",
-    AUTO_BUILD: "Triage: `auto-build`. The fault is clear, and its repair needs a change of code. The build job starts by itself and opens a draft pull request for the owner.",
+    AUTO_BUILD: "Triage: `auto-build`. The fault is clear, and its repair needs a change of code. The build job starts by itself and opens a pull request for the owner.",
     NEEDS_OWNER: "Triage: `needs-owner`. The owner decides before a job starts: this is a feature, a large change, a report that is not clear, or a fault that no change in this repository can repair. The label `build` starts a job that can change the code of the phone line.",
     NOT_ACTIONABLE: "Triage: `not-actionable`. No job can act on this text as it is. The issue stays open for the owner.",
     TRIAGE_FAILED: f"Triage: `needs-owner`. The triage agent failed {TRIAGE_TRIES} times on this issue, so no agent sorted it. The owner decides: the label `auto-fix` starts the fix job, and the label `build` starts a job that can change the code of the phone line.",

@@ -25,8 +25,7 @@ A job has a scope, which is what the agent can change:
 - `prompts`: the prompts, the word lists, the tests and the made-up test set. A failed rule and the
   label `auto-fix` give this scope.
 - `code`: the code of the phone line and its tests, but not the code that measures or judges a change.
-  The triage agent's label `auto-build` and the owner's label `build` give this scope, and its pull
-  request is always a draft.
+  The triage agent's label `auto-build` and the owner's label `build` give this scope.
 
 The measure is `score.py`. The agent cannot change it, and it cannot change the grader's rules.
 """
@@ -435,12 +434,12 @@ def pr_body(request: Request, answer: dict[str, Any], before: dict[str, Any], af
     measured = {
         "better": "The scorer shows the change: at least one check that failed now passes, and no check got worse.",
         "same": "**The scorer does not show the change.** No check changed. The made-up call did not make the fault happen, or the scorer cannot make it happen: "
-        "it runs the agents in the text mode, and some faults come only from a voice model. This pull request is a draft for that reason.",
+        "it runs the agents in the text mode, and some faults come only from a voice model. Judge this change by its diff and by a real call.",
         "worse": "**The score got worse.** A check that passed before now fails.",
     }[kind]
     paid = "the word list and the made-up calls" if after.get("calls") else "the word list only; the made-up calls did not run"
     if kind == "same" and not after.get("calls"):
-        measured = "**The scorer does not show the change.** The made-up calls did not run in this job, and the word list did not change its result. This pull request is a draft for that reason."
+        measured = "**The scorer does not show the change.** The made-up calls did not run in this job, and the word list did not change its result. Judge this change by its diff and by a real call."
     why = "How the coding agent reads the issue" if is_build else "Why the line had the fault, as the coding agent reads it" if is_issue else "Why the agents failed, as the coding agent reads it"
     lines = [
         *_head(request),
@@ -478,7 +477,7 @@ def pr_body(request: Request, answer: dict[str, Any], before: dict[str, Any], af
         "- A change in `graph/tools.py` can change when a call is transferred to your phone.",
     ]
     if is_build:
-        lines.append("- **This job could change the code of the phone line, not only a prompt.** It is a draft for that reason. Read each changed file, and make a real call before you merge.")
+        lines.append("- **This job could change the code of the phone line, not only a prompt.** The scorer measures the agents' words, not new code. Read each changed file, and make a real call before you merge.")
     if any(path.startswith("tests/") for path in guarded.files):
         lines.append("- **The agent changed a test.** Check that the test still tests the same thing.")
     if run_url:

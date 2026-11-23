@@ -179,8 +179,8 @@ def test_the_build_job_for_an_issue_runs_the_same_commands_with_the_scope_code(r
     assert run(body, monkeypatch, temp / "outputs") == {"verdict": "same", "title": "Each agent says goodbye"}
     text = (temp / "body.md").read_text(encoding="utf-8")
     assert text.startswith("Closes #12.") and "`src/ai_call_center/goodbye.py`" in text and "This job could change the code of the phone line" in text
-    # A change of code is always a draft, also when the scorer shows it as better.
-    assert 'if [ "$VERDICT" != "better" ] || [ "$FIX_SCOPE" = code ]; then draft=true; fi' in WORKFLOW
+    # No pull request is a draft, in each scope and with each verdict: its checks run when it opens.
+    assert "-F draft=false --jq .html_url" in WORKFLOW and "draft=true" not in WORKFLOW and "$draft" not in WORKFLOW
 
 
 def test_the_request_of_the_job_that_runs_the_tests_does_not_reach_a_test():

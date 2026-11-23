@@ -908,8 +908,7 @@ What the coding agent can and cannot do:
 What the pull request shows, and its limits:
 
 - **Better:** a check that failed now passes, and no check got worse. The pull request is ready for review.
-- **Same:** no check changed. The pull request is a draft, and it says that the scorer does not show
-  the change. The scorer runs the agents in the text mode. A fault that only a voice model makes,
+- **Same:** no check changed. The pull request says that the scorer does not show the change. The scorer runs the agents in the text mode. A fault that only a voice model makes,
   for example a tool name said aloud, does not happen there.
 - **Worse:** a check that passed now fails. The job opens no pull request; its summary shows the scores.
 - The agents' answers change from run to run, so one check of a made-up call can change with no cause.
@@ -1061,8 +1060,8 @@ it has no tool that changes a file or runs a command.
   tests and this file. It cannot change the code that measures or judges a change: the scorer, the
   guard, the queue, the grader and its rules, the scrub of the fault report, and the step that makes an
   issue from a caller's words (`CODE_REFUSED` in `proposal.py`). It cannot change a workflow, a script,
-  or a dependency. The job also runs the formal check of caller memory. Its pull request is always a
-  draft, because the scorer measures the agents' words and not new code.
+  or a dependency. The job also runs the formal check of caller memory. Its pull request says
+  that the scorer measures the agents' words and not new code.
 
 The pull request says `Closes #N`, so a merge closes the issue. A job that opens no pull request
 writes the reason as a comment on the issue, removes `fix-started` and the label that started it, and

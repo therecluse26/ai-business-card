@@ -9,8 +9,7 @@
 # The fix job (improve.yml) opens its pull request with the owner's token (IMPROVE_PR_TOKEN), so "opened"
 # starts this run at once. With no such token, the fix job uses the token of its own run. GitHub then makes
 # the run, and holds it until a person approves it ("Approve workflows to run" on the pull request).
-# A fix that the scorer does not show is a draft. When a person marks the draft as ready for review,
-# the checks run one more time. A draft cannot merge, so the checks run before the merge.
+# The fix job opens no draft: each pull request is ready for review, so the checks run when it opens.
 #
 # A push to main that changes a workflow file runs the same three checks. Such a push has no pull request,
 # and a change to improve.yml alone starts no deploy, so no other workflow tests it. The checks run after
