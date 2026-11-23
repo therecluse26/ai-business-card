@@ -359,7 +359,8 @@ async def save_lead_record(
         result += f" The owner can reach the caller {reach}."
         # The next step comes from here, not from the model's memory of its instructions.
         # A caller who left a message did not ask for a live call, so no transfer follows from a save.
-        result += " Next, in this same turn: tell the caller, in one sentence, that the owner has their message and will follow up. Use the owner's name. "
+        owner = ctx.owner_name.split()[0] if ctx.owner_name.strip() else "the owner"
+        result += f" Next, in this same turn: tell the caller, in one sentence, that {owner} has their message and will follow up. "
         offer = kind == "message" and ctx.phrase_offer and not (ctx.phrase_offered or ctx.phrase_set or ctx.identity_verified or ctx.forgotten or hidden)
         if offer:
             # The caller has left something to remember. Without a passphrase, no agent gets it on the next call.
