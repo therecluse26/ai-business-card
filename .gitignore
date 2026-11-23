@@ -12,3 +12,4 @@ data/caller_audio/
 data/writing.json
 data/writing_vectors.npz
 data/models/
+data/verify/

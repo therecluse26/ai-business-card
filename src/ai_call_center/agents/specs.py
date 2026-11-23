@@ -202,11 +202,36 @@ class Welcome:
             f"Interrupt me any time. Try asking me {self.tip}. {WELCOME_QUESTION}"
         )
 
-    def returning_caller(self, name: str, topic: str = "") -> str:
+    def returning_caller(self, name: str) -> str:
+        """A recognised caller with no passphrase. No detail of an earlier call: a phone number can be faked."""
         first_name = name.split()[0] if name.strip() else name
-        if topic.strip():
-            return f"Welcome back, {first_name}. Last time you asked about {topic.strip()}. Want to pick up there, or start something new?"
         return f"Welcome back, {first_name}. Good to hear from you again. What can I do for you today?"
+
+
+# The words of the passphrase check (passphrase.py). The tools give them to the agent word for word.
+def passphrase_question(name: str) -> str:
+    first_name = name.split()[0] if name.strip() else name
+    return f"Welcome back, {first_name}. I believe we have talked before. Just to verify, may I have the short passphrase that you gave me?"
+
+
+def passphrase_right(topic: str = "") -> str:
+    if topic.strip():
+        return f"Thank you, that matches. Last time you asked about {topic.strip()}. Want to pick up there, or start something new?"
+    return "Thank you, that matches. What can I do for you today?"
+
+
+PASSPHRASE_AGAIN = "That does not match what I have. Want to try one more time?"
+PASSPHRASE_WRONG = "That does not match either. I can't use the notes from your earlier calls, but I can still help. What can I do for you today?"
+PASSPHRASE_SKIPPED = "No problem. I can't use the notes from your earlier calls without it, but I can still help. What can I do for you today?"
+PASSPHRASE_OFFER = (
+    "One more thing. I can remember your details for next time, if you give me a short word or phrase to identify you. "
+    "Make it a made-up one, not a password you use anywhere else. Want to set one?"
+)
+PASSPHRASE_SET = "Done. On your next call, I will ask for that passphrase before I use anything from today."
+
+
+def passphrase_read_back(phrase: str) -> str:
+    return f"I heard: {phrase}. Is that right?"
 
 
 @dataclass(frozen=True)
@@ -335,6 +360,7 @@ At the start of the call:
 - If the caller asks how you knew them: identify_caller matched the name they gave with a name on record for this phone number. If they say they never called, say the match may be wrong, and offer the tour agent, which explains caller memory.
 - Never share who else called, or what another person's call was about.
 - Never say an email address or a phone number aloud.
+- When the identify_caller result tells you to ask for a passphrase, the caller's answer goes to verify_passphrase, in silence. Its result gives you the exact words to say next. Never say a passphrase yourself, and never give a hint about one.
 
 Routing:
 - Questions about {o}: who they are, their experience, skills, past work, or their views on software engineering. Hand off to the profile agent.
@@ -348,7 +374,7 @@ Routing:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("identify_caller", "forget_caller", "end_call"),
+        tools=("identify_caller", "verify_passphrase", "forget_caller", "end_call"),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
         voice=voices["classifier"],
@@ -422,7 +448,7 @@ What you know about the system:
 - LangGraph holds the state of the call, decides which agent is active, runs the tools, and routes handoffs.
 - Each agent can run on a different voice provider. A handoff can change the voice and the provider in the middle of the call.
 - The contact agent can save a lead for {o} and transfer the live call to {o}'s phone.
-- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. Only on a match does an agent get that person's notes. With any doubt the caller counts as new, so nobody hears another person's details.
+- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. A match gives a welcome back and nothing more: a phone number can be faked, so a match is not proof. The notes of an earlier call need a passphrase that the caller set on that call. Code checks the passphrase, and the server keeps a salted hash of it, not the passphrase. A caller can set one after they leave a message. With any doubt the caller counts as new, so nobody hears another person's details.
 - A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
 - When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
 - The same agents also run as plain text, for testing.{rag_fact}{trace_fact}
@@ -495,6 +521,7 @@ To take a message:
 - In save_lead, "timeline" is when the work would start and "size" is how big it is, in the caller's words. Fill them only when the caller said them on this call, to you or to another agent.
 - In save_lead, "need" is the message with every detail the caller gave on this call, to you or to another agent, and nothing they did not say. "call_notes" is one sentence on what they asked other agents earlier on this call; leave it empty if there was nothing.
 - The save_lead result tells you the next step. Do what it says. A saved message never leads to a transfer.
+- When the save_lead result tells you to offer a passphrase, make the offer in its words, one time. A word or phrase that the caller then says goes to set_passphrase, in silence. Its result tells you what to say.
 - A caller who is leaving a message stays with you. A message about a quote, a price, a project, or a job is still a message: take it. Hand off to another agent only when the caller asks a question that the other agent answers.
 
 To connect the caller to {o}, only when they asked to speak to {o} now:
@@ -516,7 +543,7 @@ Keep it short:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "request_owner_transfer", *text_tools, "forget_caller", "end_call"),
+        tools=("save_lead", "set_passphrase", "request_owner_transfer", *text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "tour", "consultant"),
         leg=legs["contact"],
         voice=voices["contact"],

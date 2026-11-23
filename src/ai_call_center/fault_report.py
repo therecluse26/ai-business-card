@@ -11,16 +11,20 @@ The repository and the logs of its jobs are public. So the report is made in two
    "the caller" and "the agent", name the kind of a detail and never the detail, and do not copy the
    caller's sentences.
 2. Code removes what an instruction cannot promise (`scrub`). A word of the call stays in the report
-   only when the word is public already: it is in the source text of this package, in lower case.
+   only when the word says nothing about a person: it is in the source text of this package in lower
+   case, or it is a plain English word (`english_words.txt`: the lower-case words of a spelling
+   dictionary, without each word that the dictionary also has with a capital letter: "John",
+   "Bill" and "Rose" are such words). A first name in the table of name forms (`names.py`) is
+   not a word of the source text.
    Each other word of the call becomes "[removed]". So do a name that the server knows for this
    caller, a word with a capital letter in the middle of a sentence, each digit, each email address,
    and a row of number words. The words that the model adds itself are not words of the call, so
-   they stay. The names of the voice models stay too (`KNOWN_NAMES`).
+   they stay. Names that are no secret stay too: voice models, languages, and well-known products (`KNOWN_NAMES`).
 
 The names of the caller come from two places: the names that the server keeps for the call, and the
 transcript itself (`said_names`: the short answer to the name question, and the words after "my name is").
 
-What can still pass: a name of another person that is also a plain word ("mark", "rose"), when the
+What can still pass: a name of another person that is also a plain word ("Mark", "Will"), when the
 model writes it in lower case or as the first word of a sentence. The instructions forbid names, so
 this needs two faults at one time.
 
@@ -43,6 +47,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from ai_call_center.grading import Rule
+from ai_call_center.names import NAME_GROUPS
 
 log = logging.getLogger(__name__)
 
@@ -59,9 +64,18 @@ _SENTENCE_END = re.compile(r"[.?!:\"(\[]\s*$")
 NUMBER_WORDS = frozenset("zero oh one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand double triple".split())
 NUMBER_ROW = 3  # this many number words in a row can be a phone number that was said aloud
 
-# Names that are no secret: the companies and the models of the voice legs. An agent says them after a handoff.
-# They stay with their capital letter. A name that the server knows for the caller is removed even when it is in this list.
-KNOWN_NAMES = frozenset("AI OpenAI Google Amazon Anthropic Gemini Nova Sonic Claude Realtime Live".split())
+# Names that are no secret. They stay with their capital letter. A name that the server knows for the caller is
+# removed even when it is in this list. Do not add a word that is a usual first name or family name.
+KNOWN_NAMES = frozenset(
+    # The companies and the models of the voice legs. An agent says them after a handoff.
+    "AI OpenAI Google Amazon Anthropic Gemini Nova Sonic Claude Realtime Live "
+    # Languages: a caller can ask for one.
+    "English Spanish French German Italian Portuguese Dutch Polish Russian Ukrainian Turkish Arabic Hebrew Hindi Urdu Bengali "
+    "Mandarin Cantonese Chinese Japanese Korean Vietnamese Thai Tagalog Indonesian Swahili Greek Swedish Norwegian Danish Finnish "
+    # Products and short forms that a feature request can name.
+    "WhatsApp Slack Telegram Zoom Teams Discord Gmail Outlook Calendly LinkedIn GitHub Twilio Telnyx iPhone Android "
+    "ChatGPT Bluetooth CarPlay SMS MMS PDF API FAQ CRM URL QR TTY".split()
+)
 
 # Plain words that stay even when the source text does not hold them: parts of short forms ("don't"), and the most used words.
 BASE_WORDS = frozenset(
@@ -93,16 +107,29 @@ class FaultReport:
 
 @cache
 def public_words() -> frozenset[str]:
-    """The words that are public already: each word in lower case in the source text of this package.
+    """The words that say nothing about a person: each word in lower case in the source text of this package,
+    and each plain English word of `english_words.txt`.
 
-    The repository is public, so such a word shows nothing new. A name in the source text has a capital
-    letter ("Dana"), so it is not in this list unless it is also a plain word."""
-    found: set[str] = set(BASE_WORDS)
+    The repository is public, so a word of its source shows nothing new. A name has a capital letter in the
+    source text ("Dana"), so it is not in this list unless the source text also has it as a plain word.
+    Two lists of names do not count as plain words: the table of name forms in `names.py`, and each word
+    that the dictionary also has with a capital letter (it is not in `english_words.txt`). A first name stays
+    only when the source text uses it as a plain word outside that table ("will"). A rare name that the
+    dictionary has only as a plain word stays too: see the README."""
+    first_names = frozenset().union(*NAME_GROUPS)
+    found: set[str] = set()
+    try:
+        found.update(Path(__file__).with_name("english_words.txt").read_text(encoding="utf-8").split())
+    except OSError:
+        log.warning("english_words.txt is missing; a fault report keeps only the words of the source text")
+    found -= first_names
+    found.update(BASE_WORDS)
     for path in Path(__file__).parent.rglob("*.py"):
         try:
-            found.update(_LOWER_WORD.findall(path.read_text(encoding="utf-8")))
+            words = set(_LOWER_WORD.findall(path.read_text(encoding="utf-8")))
         except OSError:
             continue
+        found.update(words - first_names if path.name == "names.py" else words)
     return frozenset(found)
 
 

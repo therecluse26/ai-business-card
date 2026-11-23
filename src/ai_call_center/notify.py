@@ -41,6 +41,7 @@ class CallDetails:
     seconds: int = 0  # how long the call had run when the lead was saved
     earlier_calls: int = 0  # finished calls from this number before this one
     confirmed_returning: bool = False  # the name the caller gave matched an earlier caller on this number
+    verified: bool = False  # the caller also said that earlier caller's passphrase
     line: str = ""  # from the number lookup, for example "mobile on Verizon"
     area: str = ""  # from the number lookup, for example "Akron, OH"
     registered_name: str = ""  # from the number lookup: the account holder, not always the caller
@@ -111,7 +112,8 @@ def _rows(lead: Lead, row_id: int, details: CallDetails) -> tuple[list[tuple[str
     if _has(details.voice):
         call.append(("Caller's voice", _one_line(details.voice), ""))
     if details.confirmed_returning:
-        call.append(("Returning caller", "Yes. The name they gave matched an earlier caller on this number.", ""))
+        how = "Verified: they said the passphrase of that caller." if details.verified else "Not verified: they gave no passphrase, and a phone number can be faked."
+        call.append(("Returning caller", f"The name they gave matched an earlier caller on this number. {how}", ""))
     if details.earlier_calls:
         call.append(("Earlier calls from this number", str(details.earlier_calls), ""))
     line = ", ".join(part for part in (details.line, details.area) if _has(part))

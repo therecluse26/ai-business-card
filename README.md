@@ -18,7 +18,7 @@ transfer hours. When a voice provider stops answering, the call moves to the oth
 The tour agent can tell the caller how fast the agents answered and what the call has cost so far.
 A small model on the server hears how the caller sounds; see "The server hears how the caller sounds (Pipecat Voice Reader)".
 With LangSmith set up, every call is traced; see "Tracing with LangSmith (M6)".
-After hangup a grader scores each call against ten rules, and the figures and the scores are stored for a public report;
+After hangup a grader scores each call against eleven rules, and the figures and the scores are stored for a public report;
 see "A grader scores each call after hangup" and "Call analytics and the public report".
 A failed rule starts a job on GitHub that opens a pull request with a fix, with no action from the owner;
 see "The improvement loop: a failed rule opens a pull request".
@@ -331,8 +331,9 @@ How this leg differs from the other two:
   `identify_caller`. Code, never a model, compares it with each name on record for the number
   (`names.same_person`): the same first name after cleanup, a short or long form of it (Bob and Robert),
   or the same sound code and first letter (Steven and Stephen). With any doubt, the caller counts as new.
-- Only on a match do the company, the saved interest, and the last three summaries enter the conversation.
-  With no match, they never do, and no agent will say who called before.
+- A match makes the caller "recognised": the agent says "Welcome back", and gets no notes. The company,
+  the saved interest, and the last three summaries enter the conversation only after the passphrase
+  check (below). With no match, they never do, and no agent will say who called before.
 - After `identify_caller`, who the caller is is settled for the whole call. No agent asks for the name again.
 - The history holds one person's calls and leads only. What Steve left on a number is not released to
   Bill on the same number, and it is not reused for him.
@@ -350,11 +351,70 @@ How this leg differs from the other two:
 - The consultant asks two qualifying questions: "When would you want this to start?" and "Is this a few weeks
   of work, or a longer engagement?". `save_lead` stores the answers as `timeline` and `size`, and the lead email
   shows them first. Existing databases get the new columns at start.
-- A confirmed caller does not give their details again: `save_lead` reuses the email address that the
+- A verified caller does not give their details again: `save_lead` reuses the email address that the
   same person left. The email address and the phone number never enter a prompt or a tool result.
 - `CALLER_LOOKUP` asks Telnyx Number Lookup for a new caller's carrier, line type, area, and registered
   name. Telnyx bills each lookup; the result is cached, so one number is looked up once. The agents are
   told not to open the call with it. The registered name goes to the lead email only, never to a prompt.
+
+### The passphrase check: recognised is not verified
+
+A phone number can be faked, and a name is no secret. Both are on a business card. So a match of
+number and name is not proof of who calls. The line has two levels (`passphrase.py`):
+
+| Level | What the caller gave | What the line does |
+|---|---|---|
+| Recognised | A phone number and a name that match an earlier caller | Says "Welcome back". No agent gets a note of an earlier call. |
+| Verified | The passphrase of that earlier caller too | The agents get the notes, and the first agent names the last topic. |
+
+- **The offer.** After a saved message, the contact agent offers one time: "I can remember your details
+  for next time, if you give me a short word or phrase to identify you. Make it a made-up one, not a
+  password you use anywhere else." The agent says the passphrase back, and keeps it after a yes.
+  `CALLER_PASSPHRASE_OFFER=false` turns the offer off.
+- **The check.** On the next call the first agent says: "Welcome back, <name>. I believe we have talked
+  before. Just to verify, may I have the short passphrase that you gave me?" The answer goes to the tool
+  `verify_passphrase`. Code compares it. The voice model gets a yes or a no, and never the stored passphrase.
+- **Speech is not exact.** The comparison ignores capital letters, spaces and punctuation, and it uses
+  how the words sound (Metaphone). "Purple lanturn" is "purple lantern".
+- **Storage.** The table `caller_phrases` holds a salted scrypt hash, not the passphrase.
+- **Tries.** Two tries in one call. Then the call goes on with no notes. After 5 wrong tries in a row,
+  over any number of calls, the line stops asking: that passphrase is locked for good.
+- **A passphrase opens only the calls made with it:** the call where it was set, and each later call
+  where the caller said it. A call where the caller was only recognised is opened by no passphrase. So a
+  person with a faked number who sets a passphrase gets nothing of the real caller's calls.
+- **A new passphrase takes the place of the old one,** and opens only its own calls. So "I forgot it"
+  never opens the old notes. The owner still has them.
+- **Calls from before this check** have no passphrase. No agent can use their notes.
+- **A caller with no passphrase who asks about an earlier call** hears why: a phone number can be faked,
+  so the line uses those notes only after a passphrase check.
+- **The contact details on file** (`save_lead` with email "on file") are reused only for a verified caller.
+- **The lead email** says which level the caller had: "Verified: they said the passphrase of that caller",
+  or "Not verified: they gave no passphrase, and a phone number can be faked".
+- **"Forget me"** deletes the passphrase row too.
+
+Where the passphrase is, and is not:
+
+- It is in the private records of the call: the transcript in the server log, the traces, and the audio
+  that the grader hears. A person who can read those can read the notes too, so the passphrase adds no
+  risk there. This is why the offer asks for a made-up phrase and not a password that opens other accounts.
+- It is not in the call summary (code changes it to `[passphrase]`), and not in the two public texts:
+  a fault report and a GitHub issue. The scrub removes its words.
+
+What the check cannot promise:
+
+- The words "may I have the passphrase" tell a person with a faked number that this name called before
+  and set a passphrase.
+- A short spoken phrase has few possible values. The limit on tries protects it on the phone. The hash
+  does not protect it from a person who has the database file.
+- A person with a faked number can use up the tries and lock the real caller's passphrase, or set a new
+  one in its place. The notes then stay closed to everyone on the phone, which is the safe result. The
+  real caller can set a new passphrase for later calls.
+
+Measured on 2026-11-22: 4 made-up calls were added to `evals/grader_calls.json` (a right passphrase, two
+wrong tries, a new passphrase after a message, a question about an earlier call with no passphrase).
+No rule fails in them. The decision grader agreed: no false alarm, and "I can't use the notes from your
+earlier calls" is not read as a denial of the memory (the set is now 63 calls: 28 of 30 planted failures
+found, 1 false alarm of 285). Not measured: a phone call with a voice model.
 
 ### Guardrails (M5)
 
@@ -526,6 +586,7 @@ score shows if a change to a prompt or a tool made the calls better.
 | `name_asked_once`: the agents asked for the caller's name one time at most | A model |
 | `nothing_asked_again`: no agent asked for something the caller had said already | A model |
 | `question_answered`: each question got an answer, an honest "I do not know", or the right agent | A model |
+| `caller_memory_right`: the agents were right and honest about the caller's earlier calls | A model |
 | `facts_from_profile`: each fact about the owner came from the profile notes | A model |
 | `tone_fits_caller`: the agent's tone fitted how the caller sounded | A model that hears the call |
 | `no_talk_over`: no agent talked over the caller | A model that hears the call |
@@ -550,13 +611,15 @@ is one option from a fixed list, with a probability for each option.
    That event is the cause code. A failure starts a paid job that proposes a fix, so the limit is high.
    Under the limit the rule passes, and a note keeps a failure that the model thought likely.
    One more question for each rule gives the agent at fault.
-5. Two rules have questions about single lines too. Each rule needs a search through the call, so code
+5. Three rules have questions about single lines too. Each rule needs a search through the call, so code
    does the search, and the model judges one line at a time.
    - `nothing_asked_again`: code finds each agent line that asks something. For each one, the model answers:
      "Had the caller already given the answer in lines 1 to 8?" Two more small questions take a line out of
      the count: a question for the name, and a read-back.
    - `question_answered`: code finds each question of the caller, but not one in the caller's last turn. For
      each one, the model answers: "Did the agents leave that question without a response?"
+   - `caller_memory_right`: code finds each agent line that speaks about the memory of calls and has a
+     "not". For each one, the model answers: "Does the agent deny that it knows about earlier calls?"
    - Code knows which agent said a line. So for these failures, code names the agent at fault.
 6. The same request asks for three readings: how the caller sounded over the call, how the caller sounded
    at the end, and how the agents' voices sounded. A reading is not a rule. It is stored, and it is private.
@@ -612,6 +675,29 @@ Measured on 2026-11-21:
 - A question of the caller is found by its question mark. Speech recognition can leave the mark out. Such a
   question is left to the questions about the whole call.
 - Each call here is made up, in clean text. A real call has speech recognition errors. So these counts are a start.
+
+Measured on 2026-11-22, after the rule `caller_memory_right` came in:
+
+- A real call showed two faults that no rule covered. The first agent welcomed the caller back after a first
+  name only, and the caller said that the earlier call was not theirs. Then the agent said that it does not
+  look up earlier calls, which is false.
+- 10 made-up calls were added: 5 with a planted failure of the new rule, and 5 with no failure. The 5 with no
+  failure hold what must not fail: a returning caller, an agent that found no earlier call, a caller who asks
+  to be forgotten, and an agent that will not share another person's call.
+- The set is now 51 calls with 29 planted failures and 226 checks that must not fail. The decision grader
+  found 27 of the 29. The new rule: 5 of 5 found (0.96 or more), and no false alarm in the 51 calls. Its
+  highest check that must not fail was 0.60: an agent that says "I have no notes about you now" after it
+  deleted them.
+- 1 false alarm of 226, at 0.81, in the old rule `nothing_asked_again`. It is in a new call: an agent uses
+  the notes of another caller after a handoff, and the caller must say the need again. The agent asked nothing.
+- Two of the 10 calls were changed after the first run. Each had a second fault that was not planted: an
+  agent's question, and a caller's question that got a false answer. The second run counted them as they are now.
+- The first wording of one question missed one planted failure (0.67): "keeps no notes of earlier calls".
+  The agent in that call said "nothing about a call is stored". A wider wording found it (0.96).
+- On the real call, the question about the whole call gave the denial 0.37. The questions about single lines
+  gave four denial lines 0.86 to 0.97, and the true answers of a later agent 0.09 or less.
+  The first wording of the small question gave those four lines 0.38 to 0.52. It named "this phone line";
+  the agent spoke about itself ("I do not look up past callers").
 - The same request two times gave the same probabilities.
 - Two saved recordings of the caller's side of test calls, at 8 kHz: 86 s took 1.1 s and 6,827 input tokens;
   601 s took 6.1 s and 23,299 tokens. At the published price of 0.10 USD for a million input tokens, a
@@ -767,12 +853,15 @@ the logs of the job, so the report is made in two steps:
    three short texts. Its instructions: write "the caller" and "the agent", name the kind of a detail
    and never the detail, and do not copy a sentence of the caller.
 2. Code removes what an instruction cannot promise (`scrub`):
-   - A word of the call stays only when it is public already: the word is in the source text of this
-     package in lower case. Each other word of the call becomes `[removed]`.
+   - A word of the call stays only when it says nothing about a person: the word is in the source text
+     of this package in lower case, or it is a plain English word (`english_words.txt`, from the SCOWL
+     spelling dictionary). A word that the dictionary also has with a capital letter ("John", "Rose")
+     is not in that list, and the table of name forms in `names.py` does not count as source text.
+     Each other word of the call becomes `[removed]`.
    - Each name of the caller becomes `[removed]`. The names come from the server's record of the call
      and from the transcript: the answer to the name question, and the words after "my name is".
-   - A word of the call with a capital letter inside a sentence becomes `[removed]`. The names of the
-     voice models stay.
+   - A word of the call with a capital letter inside a sentence becomes `[removed]`. Names that are no
+     secret stay: the voice models, languages ("Spanish"), and well-known products (`KNOWN_NAMES`).
    - Each digit, each email address, each link, and a row of three or more number words is removed.
    - A text has a length limit (1500, 600 and 500 characters) and a fixed set of characters.
      The job checks both again and refuses a fix request that breaks them.
@@ -782,8 +871,11 @@ summary check found ("The summary was longer than the word limit of the prompt."
 
 What the scrub cannot promise:
 
-- A name of another person that is also a plain word ("mark", "rose") can stay, when the model writes
-  it in lower case or as the first word of a sentence. The model's instructions forbid names.
+- A name of another person that the source text also uses as a plain word ("Mark", "Will") can stay,
+  when the model writes it in lower case or as the first word of a sentence. So can a rare name that
+  the dictionary has only as a plain word ("Sky"). The model's instructions forbid names.
+- A plain word can say what the call was about ("dental", "clinic"). Before 2026-11-22 such a word
+  became `[removed]`; that made a caller's feature request unreadable ("the line speaks [removed]").
 - A caller can influence the report. The job gives it to the coding agent as a description of a fault
   and tells the agent not to follow it. The limits on the coding agent below apply all the same.
 - A report with many `[removed]` marks is less clear. With no grader model, or after an error, the fix
@@ -826,14 +918,88 @@ To turn the loop on:
    `gh secret set ANTHROPIC_API_KEY`. With both, the subscription pays for the coding agent and the API key
    pays for the scorer. With no `ANTHROPIC_API_KEY`, the scorer runs no made-up call.
 2. In **Settings**, **Actions**, **General**, turn on "Allow GitHub Actions to create and approve pull requests".
-3. Make a fine-grained personal access token: this repository only, with the one repository
+3. Make a fine-grained personal access token: this repository only, with the repository
    permission **Actions** (read and write). It can start a workflow. It cannot change code.
+   For issues from a caller's feedback (above), add the permission **Issues** (read and write).
 4. Put `IMPROVE_GITHUB_TOKEN` and `IMPROVE_REPO` (as `owner/name`) in `.env`. Then run
    `bash scripts/fly-secrets.sh` to copy them to Fly.
+5. Make a second fine-grained personal access token: this repository only, with the repository
+   permission **Pull requests** (read and write) and nothing else. Then run `gh secret set IMPROVE_PR_TOKEN`
+   in this repository. The fix job opens its pull request with this token, so the checks of the pull request
+   (`test.yml`) start at once. GitHub holds each run of a pull request that a job's own token opened, until
+   a person selects "Approve workflows to run". With no `IMPROVE_PR_TOKEN`, or with one that is not valid
+   any more, the job's own token opens the pull request, and that approval is necessary again.
+   Only the last job of the workflow gets this token. That job runs no line of the coding agent's change.
 
 Optional repository variables: `IMPROVE_MODEL` (the coding agent's model), `IMPROVE_SCORE_CALLS`
 (`all`, `new` or `none`: which made-up calls the scorer runs; these cost money), and `OWNER_NAME`.
 The workflow runs on a public repository, where the standard runners use no paid minutes.
+
+### Feedback from a caller: a GitHub issue with a count
+
+A caller can say a fault aloud ("the line was silent for a long time, that is a bug"), or ask for a
+feature ("this line should speak Spanish"). No rule of the grader fails for such a sentence. This step
+keeps it (`feedback.py`):
+
+1. **The decision grader answers two more questions** in its one request after hangup: did the caller
+   report a fault of the phone line, and did the caller ask for a feature. With no yes at
+   `GRADER_FAIL_AT`, nothing more happens.
+2. **The grader model writes each item** in three short texts: a title, what the caller reported or
+   asked for, and what the line did at that moment. At most 3 items for one call.
+3. **Code removes each private word** with the scrub of the fault report (below). The transcript
+   stays on the server.
+4. **The duplicate check.** Before the model writes, the server reads the issues that callers opened
+   before (the labels `caller-fault` and `caller-idea`). The model gets their titles and names the
+   issue that is about the same thing, also when the words are different.
+   - No such issue: a new issue opens, with its label.
+   - An open issue is about the same thing: no new issue. The count in the issue text goes up by one,
+     and a comment keeps the new caller's words.
+   - The owner closed that issue as "not planned": the count goes up, with no comment and no new issue.
+   - The owner closed that issue as completed: a new issue opens, because the fault is back after a fix.
+
+An issue starts with two lines that code keeps current:
+
+```
+**Callers who asked for this: 10**
+Last report: 2026-11-22
+```
+
+The count is a count of callers, not of calls. A table on the server keeps a hash of the phone number
+for each issue, so one caller counts one time for one issue. A call with a hidden number counts as its
+own caller. "Forget me" deletes the caller's rows from that table; the count in the issue stays.
+
+Limits:
+
+- At most `FEEDBACK_DAILY_LIMIT` new issues in one day (default 3, US Eastern). A count has no limit.
+- A caller who asked to be forgotten gets no issue: that call is not graded.
+- An issue starts no fix job. A caller's words are not an instruction; the owner decides what becomes work.
+- The two models must agree on the kind: the grader model's item is dropped when the decision grader
+  did not say yes for that kind.
+- `FEEDBACK_ISSUES=false` turns the step off. With no token or no repository, nothing is sent.
+- When the decision grader gives no answer for a call, no feedback is read from that call.
+
+What this step cannot promise:
+
+- The issue text is public, and a model wrote it from a caller's words. The scrub removes names and
+  numbers; it cannot judge whether a sentence is polite or true. Read an issue before you act on it.
+- A caller can say the same thing from two phone numbers, and that counts two times.
+- Two calls that end in the same minute with the same new feedback can open two issues. Close one, and
+  the count goes on in the other.
+
+Measured on 2026-11-22: the set is now 59 calls (28 of 30 planted failures found, 1 false alarm of 265).
+8 made-up calls were added to `evals/grader_calls.json` (5 with feedback, 3 that
+must give none: a question about a feature, a complaint about the owner, a correction of one answer).
+The decision grader found 6 of 6 kinds of feedback (0.97 or more), with no false alarm in 112 checks
+(the highest was 0.46). The whole step ran one time with the grader model and a GitHub in memory:
+the 5 calls opened 6 issues; two more calls said an old thing in new words ("dead air when you switch
+agents", "offer this in her language") and each raised the right count; one new idea opened a new issue.
+One label was corrected after the first run: in `caller_reports_a_wrong_agent` the caller asks for the
+contact agent and gets the tour agent. The grader failed `question_answered` there (0.87), and it was right.
+
+Set up: add the repository permission **Issues** (read and write) to the token `IMPROVE_GITHUB_TOKEN`,
+and make the two labels one time: `gh label create caller-fault` and `gh label create caller-idea`.
+Without the permission, the server log says "the caller's feedback did not get into GitHub: HTTPError:
+HTTP Error 403".
 
 ### A message is saved only after the caller's yes
 
@@ -975,6 +1141,9 @@ src/ai_call_center/
   score.py                       `uv run score-harness`: the fixed score of the prompts and the word lists, against the made-up test set in evals/
   improve.py                     a fix request: a failed rule starts the GitHub workflow that proposes a fix
   fault_report.py                what went wrong in a call, with each private word removed by code
+  english_words.txt              the plain English words that the scrub keeps (SCOWL; licence in english_words.LICENSE.txt)
+  feedback.py                    a caller's fault report or feature idea becomes a GitHub issue, with a count of the callers
+  passphrase.py                  the passphrase check: a match of number and name opens no notes of an earlier call; the caller's passphrase does
   proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard on changed files, the pull request text)
   check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
   check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time

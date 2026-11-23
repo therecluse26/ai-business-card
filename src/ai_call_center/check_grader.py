@@ -27,7 +27,7 @@ from langchain.chat_models import init_chat_model
 
 from ai_call_center.agents.specs import load_profile
 from ai_call_center.config import get_settings
-from ai_call_center.decision_grader import default_decision_grader, fail_probability
+from ai_call_center.decision_grader import default_decision_grader, fail_probability, feedback_chances
 from ai_call_center.grading import FAIL, NA, PASS, READINGS, RULES, Score, grade, model_rules
 from ai_call_center.voice.call_audio import read_wav
 
@@ -61,6 +61,7 @@ EXPECTED = {
     "name_asked_once": FAIL,  # the contact agent asked for the name again
     "nothing_asked_again": FAIL,  # the contact agent asked what the project is
     "question_answered": PASS,  # "I do not know his rates" is an honest answer
+    "caller_memory_right": NA,  # no agent speaks about an earlier call
     "facts_from_profile": FAIL,  # the medal
 }
 # For each planted failure: the agent at fault and the cause code that a grader must give.
@@ -165,6 +166,7 @@ async def run_set(args: argparse.Namespace) -> int:
     for title, decides in graders:
         results = await asyncio.gather(*(one(call, decides) for call in calls))
         found = alarms = planted = clean = agents = causes = no_moment = no_moment_right = missing = 0
+        said = said_found = quiet = quiet_alarms = 0  # the caller's feedback: kinds that a call holds, and kinds that it does not
         rows = []
         chances: list[tuple[bool, float]] = []  # for each check: must it fail, and the probability of a failure
         for call, (got, (answers, asked)) in zip(calls, results, strict=True):
@@ -195,11 +197,19 @@ async def run_set(args: argparse.Namespace) -> int:
                     rows.append(f"  {'FALSE ALARM':<12}{call['id'] + ' / ' + rule.key:<58}{verdict:<6}{shown:<6}{score.agent or '?'} / {score.cause}")
                 elif chance and chance[1] >= 0.3:
                     rows.append(f"  {'near':<12}{call['id'] + ' / ' + rule.key:<58}{verdict:<6}{shown:<6}")
+            for kind, chance in feedback_chances(answers).items():
+                must, hit = kind in call.get("feedback", []), chance >= settings.grader_fail_at
+                said, said_found, quiet, quiet_alarms = said + must, said_found + (must and hit), quiet + (not must), quiet_alarms + (hit and not must)
+                if must or chance >= 0.3:
+                    mark = ("found" if hit else "MISSED") if must else ("FALSE ALARM" if hit else "near")
+                    rows.append(f"  {mark:<12}{call['id'] + ' / feedback: ' + kind:<58}{'':<6}{chance:.2f}")
         print(f"{title}, on {len(calls)} made-up calls:")
         print(f"  failures found: {found} of {planted}")
         print(f"  false alarms: {alarms} of {clean} checks that must not fail")
         print(f"  of the failures found: the right agent {agents}, a right cause {causes}")
         print(f"  'na' for a rule with no moment in the call: {no_moment_right} of {no_moment}")
+        if said or quiet:
+            print(f"  feedback from the caller: {said_found} of {said} found, {quiet_alarms} false alarm(s) of {quiet}")
         if missing:
             print(f"  {missing} check(s) got no verdict: read the log lines above")
         if chances:
@@ -207,7 +217,7 @@ async def run_set(args: argparse.Namespace) -> int:
             print(f"  the lowest probability of a planted failure: {lowest:.2f}; the highest of a check that must not fail: {highest:.2f}")
             print("  at another limit:  " + "   ".join(f"{limit:.1f}: {sum(must and chance >= limit for must, chance in chances)} found, {sum(not must and chance >= limit for must, chance in chances)} false" for limit in (0.5, 0.6, 0.7, 0.8, 0.9)))
         print("\n".join(rows) + "\n")
-        bad += (planted - found) + alarms + missing
+        bad += (planted - found) + alarms + missing + (said - said_found) + quiet_alarms
     return 1 if bad else 0
 
 

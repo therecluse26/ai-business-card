@@ -18,8 +18,8 @@ def test_every_graph_tool_has_a_voice_schema(specs):
 def test_agent_tool_sets_match_text_mode(specs):
     schemas = voice_tool_schemas(specs)
     names = {name: [t.name for t in tools_for_agent(spec, schemas).standard_tools] for name, spec in specs.items()}
-    assert names["classifier"] == ["identify_caller", "forget_caller", "end_call", "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact"]
-    assert names["contact"][:2] == ["save_lead", "request_owner_transfer"]
+    assert names["classifier"] == ["identify_caller", "verify_passphrase", "forget_caller", "end_call", "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact"]
+    assert names["contact"][:3] == ["save_lead", "set_passphrase", "request_owner_transfer"]
     assert "transfer_to_contact" not in names["contact"]
     assert all("end_call" in tools for tools in names.values())  # any agent can hang up after a goodbye
 

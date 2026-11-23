@@ -102,3 +102,12 @@ def test_the_summary_rule_gets_a_report_from_fixed_texts():
     assert "longer than the word limit" in report.happened and "The topic held a number." in report.happened
     assert safe(report.happened, LIMITS["happened"]) and safe(report.expected, LIMITS["expected"])
     assert not summary_report([]) and not summary_report(["- something new"]) and not FaultReport()
+
+
+def test_a_plain_english_word_of_the_call_stays_and_a_name_that_is_also_a_word_goes():
+    lines = ["caller: Tell John that the dental clinic wants voicemail in Spanish.", "agent: I will tell him."]
+    text = scrub("John asked for voicemail. The dental clinic of the caller wants Spanish. Rose and Bill agree.", call_words=words_of(lines + ["caller: rose bill"]))
+    assert text == "[removed] asked for voicemail. The dental clinic of the caller wants Spanish. [removed] and [removed] agree."
+    assert not {"john", "johnny", "bob", "liz", "rose", "grace"} & public_words()  # the table of name forms in names.py is not source text
+    assert {"will", "caller", "voicemail"} <= public_words()  # "will" is a first name too, but the source text uses it as a plain word
+

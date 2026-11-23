@@ -130,14 +130,18 @@ def test_a_new_caller_hears_the_offer_and_a_tip(ctx):
     assert ctx.caller_name == "Sam Lee" and not ctx.identity_confirmed and ctx.identified
 
 
-def test_a_matching_name_gets_a_welcome_back_with_the_topic(ctx, leads):
+def test_a_matching_name_gets_a_welcome_back_and_no_notes(ctx, leads):
     _lead(leads)
     _call(leads, "call-1", "Steve", "Asked about an after-hours agent.", topic="an after-hours phone agent")
     ctx.welcome = _welcome()
     result = identify(ctx, "Stephen")
-    assert '"Welcome back, Stephen. Last time you asked about an after-hours phone agent. Want to pick up there, or start something new?"' in result
-    assert "Acme Roofing" in result  # the notes come with the match
-    assert ctx.identity_confirmed and ctx.returning_name == "Steve Park" and ctx.caller_name == "Steve Park"
+    assert '"Welcome back, Stephen. Good to hear from you again. What can I do for you today?"' in result
+    # A phone number can be faked: a match of number and name opens no notes. They need the passphrase (test_passphrase.py).
+    for detail in ("Acme Roofing", "after-hours", "Last time"):
+        assert detail not in result
+    assert ctx.identity_confirmed and not ctx.identity_verified and ctx.caller_history == ""
+    # The agents get the name that the caller said on this call. The stored name waits for the passphrase check.
+    assert ctx.returning_name == "Steve Park" and ctx.caller_name == "Stephen"
 
 
 def test_another_name_on_the_same_number_hears_nothing_about_the_earlier_caller(ctx, leads):
@@ -184,7 +188,7 @@ async def test_identify_caller_runs_in_the_graph(make_graph, ctx, config, leads)
     model = scripted(tool_call("identify_caller", name="Steve"), "Welcome back, Steve.")
     result = await make_graph(model).ainvoke({"messages": [HumanMessage("It's Steve.")]}, config=config, context=ctx)
     tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
-    assert "Acme Roofing" in tool_msg.content and ctx.identity_confirmed
+    assert "Welcome" in tool_msg.content and "Acme Roofing" not in tool_msg.content and ctx.identity_confirmed
 
 
 # --- forget me ---

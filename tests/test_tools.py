@@ -236,7 +236,7 @@ async def test_a_hidden_number_needs_an_email_or_a_callback_number(make_graph, c
     assert "555-0142" in lead.need and "on the callback number they gave" in second.content
 
 
-async def test_email_on_file_is_reused_only_after_the_caller_confirms_who_they_are(make_graph, ctx, config, leads):
+async def test_email_on_file_is_reused_only_after_the_passphrase_check(make_graph, ctx, config, leads):
     from ai_call_center.leads import Lead, now_iso
 
     leads.save(Lead(name="Steve Park", email="steve@acme.test", company="Acme Roofing", need="Old.", caller_number=ctx.caller_number, call_control_id="old", created_at=now_iso()))
@@ -247,8 +247,14 @@ async def test_email_on_file_is_reused_only_after_the_caller_confirms_who_they_a
     assert leads.all()[-1].email == "" and leads.all()[-1].company == ""
     assert "steve@acme.test" not in str(result["messages"])
 
-    # Confirmed: the address goes from the store to the new row, and never into a message.
+    # Recognised by number and name only: a phone number can be faked, so still no address.
     ctx.identity_confirmed, ctx.returning_name = True, "Steve Park"
+    model = scripted(tool_call("save_lead", name="Steve Park", need="A first project.", email="on file"), "Done.")
+    await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config={"configurable": {"thread_id": "t1"}}, context=ctx)
+    assert leads.all()[-1].email == ""
+
+    # Verified by passphrase: the address goes from the store to the new row, and never into a message.
+    ctx.identity_verified, ctx.open_calls = True, ["old"]  # "old" is a call that the passphrase opens
     model = scripted(tool_call("save_lead", name="Steve Park", need="A shared project.", email="on file"), "Done.")
     result = await make_graph(model).ainvoke({"messages": [HumanMessage("Yes.")], "active_agent": "contact"}, config={"configurable": {"thread_id": "t2"}}, context=ctx)
     assert leads.all()[-1].email == "steve@acme.test" and leads.all()[-1].company == "Acme Roofing"
@@ -296,7 +302,7 @@ async def test_end_call_does_not_hang_up_on_a_caller_who_is_still_talking(make_g
 def test_only_the_callers_own_goodbye_ends_the_call():
     from ai_call_center.graph.tools import said_goodbye
 
-    for said in ("Bye.", "Okay, goodbye!", "No, that's all.", "That is everything, thanks.", "No thanks.", "Nope.", "I'm good.", "Have a great day.", "I have to go.", "You can hang up now."):
+    for said in ("Bye.", "Okay, goodbye!", "No, that's all.", "That is everything, thanks.", "No thanks.", "Nope.", "No, I don't.", "Not really.", "I'm good.", "Have a great day.", "I have to go.", "You can hang up now."):
         assert said_goodbye([f"caller: {said}"]), said
     for said in ("Thanks. What else can you do?", "No, this is Bill.", "Tell me about his background.", "Yes.", "I would like to leave a message."):
         assert not said_goodbye([f"caller: {said}"]), said

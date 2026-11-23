@@ -11,7 +11,7 @@ import pytest
 
 from ai_call_center.analytics import AnalyticsStore, CallAnalytics, public_report, record_call
 from ai_call_center.config import Settings
-from ai_call_center.decision_grader import AGENT, APPLIES, ASKS, EARLIER, NONE, OPEN, SAME, DecisionGrader, asked_lines, call_text, cause_key, default_decision_grader, describe_answers, fail_probability, questions, read_answers
+from ai_call_center.decision_grader import AGENT, APPLIES, ASKS, DENIED, EARLIER, NONE, OPEN, SAME, DecisionGrader, asked_lines, call_text, cause_key, default_decision_grader, describe_answers, fail_probability, questions, read_answers
 from ai_call_center.grading import FAIL, NA, OTHER, PASS, READINGS, RULES, Score, differences, grade, model_rules, rule_of
 from ai_call_center.improve import fix_requests
 from ai_call_center.proposal import Refused, request_from
@@ -142,9 +142,9 @@ def test_a_rule_with_a_cause_answer_that_is_missing_or_not_usable_gets_no_score(
         question_answered__question_ignored=yes(2.0),
     )
     rules = {score.rule for score in read_answers(reply, heard=False, fail_at=0.8).scores}
-    assert rules == {"facts_from_profile"}  # the text mode has no audio rule
+    assert rules == {"caller_memory_right", "facts_from_profile"}  # the text mode has no audio rule
     assert "name_asked_once (no answer)" in describe_answers(reply, heard=False)
-    del reply[cause_key("facts_from_profile", "wrong_fact")]
+    del reply[cause_key("facts_from_profile", "wrong_fact")], reply[cause_key("caller_memory_right", "denied_the_memory")]
     assert read_answers(reply, heard=False, fail_at=0.8).scores == []
 
 
@@ -283,7 +283,7 @@ async def test_when_the_decision_grader_gives_no_answer_the_grader_model_reads_t
         async def grade(self, *args, **kwargs):
             raise RuntimeError("down")
 
-    text = '{"name_asked_once": {"verdict": "fail", "cause": "asked_again_after_handoff"}, "nothing_asked_again": "pass", "question_answered": "na", "facts_from_profile": "pass"}'
+    text = '{"name_asked_once": {"verdict": "fail", "cause": "asked_again_after_handoff"}, "nothing_asked_again": "pass", "question_answered": "na", "caller_memory_right": "na", "facts_from_profile": "pass"}'
     for decider in (grader(RuntimeError("HTTP 500"))[0], Broken()):
         model = scripted(text)
         made = await grade(CALL, visited=VISITED, summary_tries=1, model=model, decider=decider, audio=AUDIO)
@@ -413,3 +413,31 @@ async def test_in_a_real_pipeline_the_recorder_has_both_sides_in_the_store_when_
     samples = {int.from_bytes(audio.pcm[at : at + 2], "little", signed=True) for at in range(0, len(audio.pcm), 2)}
     assert 1000 in samples and -2000 in samples  # the caller's sound and the agent's sound
     assert 0.9 <= audio.seconds <= 1.1  # 25 frames of 20 ms for each side, one after the other
+
+
+def test_an_agent_line_that_denies_the_memory_gets_its_own_question_and_names_the_agent():
+    lines = [
+        "agent: I remember callers, so first: who am I speaking with?",  # no "not": no question
+        "caller: Sam.",
+        "agent: Welcome back, Sam. Last time you asked about a store.",
+        "caller: I never called before.",
+        "agent: I do not look up earlier calls.",
+        "agent: Hi, I'm the tour agent, running on Amazon Nova. The line keeps notes for each phone number. It is not a secret.",
+    ]
+    asked = [line for line in asked_lines(lines, ["classifier", "tour"]) if DENIED in line.kinds]
+    assert [(line.number, line.agent) for line in asked] == [(5, "classifier"), (6, "tour")]
+    made = questions(visited=["classifier", "tour"], owner="Ann", heard=False, lines=asked)
+    assert "In line 5, does the agent deny" in made["line_5__denied"]["instructions"]
+    reply = answers(heard=False, line_5__denied=yes(0.93), line_6__denied=yes(0.04))
+    top = fail_probability(rule_of("caller_memory_right"), reply, asked)
+    assert (top.cause, top.agent, round(top.chance, 2)) == ("denied_the_memory", "classifier", 0.93)
+    assert fail_probability(rule_of("nothing_asked_again"), reply, asked).chance < 0.1  # the line is not a question of that rule
+
+
+def test_the_memory_rule_fails_with_its_cause_and_is_na_when_no_one_spoke_about_an_earlier_call():
+    wrong = answers(heard=False, **{cause_key("caller_memory_right", "notes_of_another_caller"): yes(0.93), "caller_memory_right" + AGENT: choice("classifier")})
+    got = {score.rule: score for score in read_answers(wrong, heard=False, fail_at=0.8).scores}["caller_memory_right"]
+    assert (got.verdict, got.agent, got.cause) == (FAIL, "classifier", "notes_of_another_caller")
+    quiet = answers(heard=False, **{"caller_memory_right" + APPLIES: yes(0.04)})
+    assert {score.rule: score.verdict for score in read_answers(quiet, heard=False, fail_at=0.8).scores}["caller_memory_right"] == NA
+    assert rule_of("caller_memory_right").fix_request and set(ASKS["caller_memory_right"].causes) == {code for code, _ in rule_of("caller_memory_right").causes}

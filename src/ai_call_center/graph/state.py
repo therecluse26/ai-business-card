@@ -38,8 +38,17 @@ class CallContext:
     legs: dict[str, str] = field(default_factory=dict)  # agent name -> leg id
     mode: Literal["text", "voice"] = "text"
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    caller_history: str = ""  # notes from earlier calls; set by identify_caller after a name match
-    identity_confirmed: bool = False  # the name the caller gave matched an earlier caller on this number
+    caller_history: str = ""  # notes from earlier calls; set by verify_passphrase after the passphrase check
+    identity_confirmed: bool = False  # recognised: the name the caller gave matched an earlier caller on this number
+    identity_verified: bool = False  # the caller also said the passphrase of that earlier caller (passphrase.py)
+    open_calls: list[str] = field(default_factory=list)  # the ids of the earlier calls that the caller's passphrase opens
+    phrase_tries: int = 0  # passphrase tries on this call
+    phrase_closed: bool = False  # the caller gave no passphrase, or a wrong one two times: no more check on this call
+    phrase_offer: bool = True  # the agent may offer a passphrase after a saved message (CALLER_PASSPHRASE_OFFER)
+    phrase_offered: bool = False  # the offer was made on this call
+    phrase_set: bool = False  # the caller set a passphrase on this call
+    held_phrase: str = ""  # the sound key of a new passphrase that waits for the caller's yes
+    spoken_phrases: list[str] = field(default_factory=list)  # each passphrase said on this call; removed from a public text
     returning_name: str = ""  # the matched earlier caller's name; only this person's details are reused
     identified: bool = False  # identify_caller has run on this call (with a name or without one)
     welcome: Welcome | None = None  # the words after the caller says who they are; None = no fixed words
