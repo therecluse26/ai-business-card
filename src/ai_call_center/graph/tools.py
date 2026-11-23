@@ -24,6 +24,7 @@ from ai_call_center.agents.specs import (
 )
 from ai_call_center.analytics import AnalyticsStore
 from ai_call_center.caller_voice import voice_sentence, voice_summary
+from ai_call_center.crm import CrmStore, request_status
 from ai_call_center.decisions import Decision
 from ai_call_center.feedback import FAULT, IDEA, MAX_ITEMS
 from ai_call_center.graph.state import CallContext, CallState
@@ -172,6 +173,8 @@ def forget(ctx: CallContext) -> tuple[str, list[str]]:
             PhraseStore(ctx.leads.connection).forget(ctx.caller_number, name)
         # The grader's notes can say what happened on those calls. The call in progress gets no record at all.
         AnalyticsStore(ctx.leads.connection).drop_notes(call_ids)
+    # The links to the caller's CRM records go, and so does an entry that still waits. What the CRM has stays with the owner, as the email does.
+    CrmStore(ctx.leads.connection).forget([*call_ids, ctx.call_control_id])
     ctx.forgotten = True
     ctx.caller_history, ctx.identity_confirmed, ctx.returning_name = "", False, ""
     ctx.identity_verified, ctx.open_calls, ctx.phrase_closed, ctx.held_phrase, ctx.phrase_set = False, [], True, "", False
@@ -871,6 +874,13 @@ def get_call_stats(runtime: ToolRuntime[CallContext, CallState]) -> str:
         lead_saved=bool(state.get("lead")),
         transfer_requested=bool(state.get("transfer_requested")),
     )
+
+
+@tool
+async def crm_lookup(runtime: ToolRuntime[CallContext, CallState]) -> str:
+    """Look up where the caller's own earlier request stands in the owner's CRM, over MCP. Call it when a returning caller asks if the owner got their message, or where their project or role stands.
+    It reads a record only after the passphrase check of this call. The result gives you what to say."""
+    return await request_status(runtime.context)
 
 
 @tool

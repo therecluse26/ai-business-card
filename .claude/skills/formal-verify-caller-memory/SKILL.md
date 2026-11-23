@@ -1,13 +1,13 @@
 ---
 name: formal-verify-caller-memory
-description: Check, over every order of caller actions, that caller memory never gives one person's data to another person. Covers the passphrase check and the reuse of earlier-call data - `passphrase.py`, `recall` in `callers.py`, and `identify`, `verify`, `set_phrase`, `save_lead_record`, `forget` in `graph/tools.py`. Use it before a commit that changes one of those, the fields of `CallContext` they use, or the tables `leads`, `calls`, `caller_phrases`, `phrase_calls`; and when someone asks "can a faked number get the notes?".
+description: Check, over every order of caller actions, that caller memory never gives one person's data to another person. Covers the passphrase check, the reuse of earlier-call data and the CRM lookup - `passphrase.py`, `recall` in `callers.py`, `identify`, `verify`, `set_phrase`, `save_lead_record`, `forget` in `graph/tools.py`, and `request_status`, `sync_call` in `crm.py`. Use it before a commit that changes one of those, the fields of `CallContext` they use, or the tables `leads`, `calls`, `caller_phrases`, `phrase_calls`, `crm_calls`; and when someone asks "can a faked number get the notes?".
 ---
 
 # Formal check of caller memory
 
 **The property.** On a call, the agents and a new lead get no data that another person left on an earlier call.
 
-**The harm when it breaks.** A person who fakes a phone number, or who shares a phone with the real caller, hears or reuses the real caller's project notes, email address or company.
+**The harm when it breaks.** A person who fakes a phone number, or who shares a phone with the real caller, hears or reuses the real caller's project notes, email address or company, or hears where the real caller's request stands in the owner's CRM.
 
 **The check.** `check.py`, next to this file, is a bounded exhaustive search. It runs the real functions on a real SQLite store, for every order of caller actions over three calls, and looks for a secret word of one person in what the code gives the agents on a call of the other person. No test framework and no extra tool is needed: Python and the project's own packages.
 
@@ -23,14 +23,15 @@ The coverage record. The check runs these, and nothing else of the product:
 | `src/ai_call_center/passphrase.py` | `PhraseStore` (`find`, `check`, `add_call`, `set`, `forget`), `sound_key`, `usable`, `_hash`, `TRIES`, `LOCK_AT` |
 | `src/ai_call_center/callers.py` | `recall`, `history_text`, `UNKNOWN_NUMBERS` |
 | `src/ai_call_center/leads.py` | `LeadStore`: `save`, `leads_for`, `lead_for_call`, `start_call`, `finish_call`, `calls_for`, `forget` |
+| `src/ai_call_center/crm.py` | `request_status` (the CRM lookup), `sync_call`, `entry_for_call`, `write_waiting` and the write steps under it, `same_crm_person`, `CrmStore` |
 | `src/ai_call_center/names.py` | `same_person` |
 | `src/ai_call_center/graph/state.py` | the fields of `CallContext` in `CTX_FIELDS` of `check.py` |
 | `src/ai_call_center/agents/specs.py` | `Welcome.returning_caller`, `Welcome.new_caller`, `passphrase_question`, `passphrase_right`, `passphrase_read_back` |
 
-**Sync commit: `a523d25`.** At this commit the check was confirmed to describe the code above.
+**Sync commit: `a523d25`.** At this commit the check was confirmed to describe the code above. `crm.py` is newer than this commit: the check was extended for it on 2026-11-23, before its first commit. Move the sync commit to the commit that adds `crm.py`.
 
 ```sh
-git diff --stat a523d25 -- src/ai_call_center/graph/tools.py src/ai_call_center/passphrase.py src/ai_call_center/callers.py src/ai_call_center/leads.py src/ai_call_center/names.py src/ai_call_center/graph/state.py src/ai_call_center/agents/specs.py
+git diff --stat a523d25 -- src/ai_call_center/graph/tools.py src/ai_call_center/crm.py src/ai_call_center/passphrase.py src/ai_call_center/callers.py src/ai_call_center/leads.py src/ai_call_center/names.py src/ai_call_center/graph/state.py src/ai_call_center/agents/specs.py
 ```
 
 No output: the verified code is the same, and the last result still holds. Any output: run the check, then read "When a change is intended" below. Move the sync commit forward only after you confirmed that `check.py` still describes the code at the new commit: its actions, its `CTX_FIELDS`, its `TABLES`, its `PLACES` and its `MUTANTS`.
@@ -64,7 +65,7 @@ The search prints one block for each finding, with the shortest list of steps th
 | `STALE` (with `--mutants`) | The text that a mutant replaces is no longer in the code. | Update that entry of `MUTANTS` to the new code, so that it still removes the same check. |
 | `NOT CAUGHT` (with `--mutants`) | The search passes on broken code. | The search lost power. Find what `check.py` no longer drives or no longer watches. |
 
-A kind is `note word` (a message, an email address, a company, a call summary or a topic), `surname`, or `passphrase word`. A place is `tool result` (the text that a tool gives back to the voice model), `caller_history` (the notes in the call context), `caller_name` (the name that every agent gets in its handoff message, `known_name_note` in `voice/call_session.py`), or `new lead` (the lead that a save writes on this call).
+A kind is `note word` (a message, an email address, a company, a call summary or a topic), `surname`, or `passphrase word`. A place is `tool result` (the text that a tool gives back to the voice model), `caller_history` (the notes in the call context), `caller_name` (the name that every agent gets in its handoff message, `known_name_note` in `voice/call_session.py`), `new lead` (the lead that a save writes on this call), or `CRM record` (a record of the owner's CRM that `crm_lookup` read on this call; the agent gets its status and stage).
 
 ## A real bug, or a modeling error?
 
@@ -89,14 +90,14 @@ An unlikely order of steps is still a real bug: a person with a faked number cho
 
 Then run the search and `--mutants`, and move the sync commit in this file.
 
-`MUTANTS` has six broken copies of the code, and the search must fail on each one. One copy is left out on purpose: `save_lead_record` without its `ctx.identity_verified` test. That test is a second layer. Only `verify` fills `ctx.open_calls`, and only after a right passphrase, so the `open_calls` filter holds the property alone. If a change lets other code fill `ctx.open_calls`, that test becomes the only guard: add the broken copy to `MUTANTS` then.
+`MUTANTS` has eight broken copies of the code, and the search must fail on each one. Two copies are left out on purpose: `save_lead_record` without its `ctx.identity_verified` test, and `request_status` without its `ctx.identity_verified` test. Each test is a second layer. Only `verify` fills `ctx.open_calls`, and only after a right passphrase, so the `open_calls` filter holds the property alone. If a change lets other code fill `ctx.open_calls`, those tests become the only guard: add the broken copies to `MUTANTS` then.
 
 ## What a pass covers, and what it does not
 
 Inside these bounds, a pass covers every order of actions:
 
 - **Three calls** from one phone number (`--calls 4` is deeper and takes much longer). Two people. The second person is, in one run, a person with the same first name and another surname (a shared phone); and in a second run, a person who gives the real caller's full name (a faked number).
-- **The actions of a call:** give the name (`identify_caller`); say the right passphrase, a wrong one, or none (`verify_passphrase`); set a passphrase (`set_passphrase`, two times for the read-back); leave a message in three forms (`save_lead` with a new email address, with the email "on file", with "on file" and no name); ask to be forgotten (`forget_caller`); hang up.
+- **The actions of a call:** give the name (`identify_caller`); say the right passphrase, a wrong one, or none (`verify_passphrase`); set a passphrase (`set_passphrase`, two times for the read-back); leave a message in three forms (`save_lead` with a new email address, with the email "on file", with "on file" and no name); ask where their request stands (`crm_lookup`); ask to be forgotten (`forget_caller`); hang up. A hangup runs the real CRM write (`sync_call`).
 - **At most one message on a call** (`SAVES_IN_A_CALL`).
 
 The assumptions:
@@ -104,6 +105,8 @@ The assumptions:
 - Neither person says the other person's passphrase. Two passphrases that sound the same (`sound_key`) are not covered.
 - Each tool call is one step. That is true for `identify`, `verify`, `set_phrase` and `forget`: they have no `await`. `save_lead_record` waits for the owner's email after it writes the lead; a second tool call during that wait is not covered.
 - The summary of a call holds only what that caller said on that call. The summary model does not run.
+- Each call is about a project, so each call that is not forgotten leaves a person and a deal in the CRM. A call that leaves only a message with no deal is not covered; the lookup reads nothing from the CRM for it.
+- The CRM is a stand-in with no memory (`SearchCrm`): the ID of a record is its content. It always answers, each deal is open, and it has no person that the owner added by hand. So these paths of the write are not covered: an entry that waits, a person found by the CRM search, a person found by an email address, a closed deal.
 - Three settings differ from the product, to make the search finite and fast: the cost of the passphrase hash (`_SCRYPT`), the lock limit (`LOCK_AT` is 2, not 5), and the clock (one second for each record).
 
 Not covered at all:
@@ -111,6 +114,7 @@ Not covered at all:
 - The voice handlers and the text tools that wrap these functions (`voice/call_session.py`, the `@tool` functions), and the return of a call after a transfer to the owner (`telephony/transfers.py` copies the passphrase fields into the resumed call).
 - What a model says. The check proves what data the code gives an agent, not what the agent then does with it.
 - The email to the owner, the server log, the traces, the fault report and the GitHub issue.
+- What the owner sees in the CRM. A person with a faked number who gives the real caller's full name gets their entry on the real caller's person, marked "No passphrase check, so it is not proof". That is a record for the owner, not a release to a caller.
 - A caller with a hidden number.
 - That "forget me" deletes everything. The search runs `forget` and looks for leaks after it; it does not check what stays in the store.
 - The number of passphrase guesses that a person gets.

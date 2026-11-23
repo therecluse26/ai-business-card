@@ -334,6 +334,7 @@ def build_specs(
     writing_about: str = "",
     website: WebAddress | None = None,
     tracing: bool = False,
+    crm: bool = False,
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
@@ -352,6 +353,25 @@ def build_specs(
         f'If the caller asks "can you email {o}?" or "can I send {o} a message?", say yes, and take the message.'
         if emailing
         else f"- If the caller asks you to email {o}, say you can pass their message to {o}, and take the message."
+    )
+    # The owner's CRM (crm.py). The agents say what it does only when this server is connected to one.
+    crm_tools = ("crm_lookup",) if crm else ()
+    crm_route = ", or asks where an earlier message or request stands" if crm else ""
+    crm_section = (
+        f"""
+
+An earlier request of the caller (the crm_lookup tool):
+- When the caller asks if {o} got an earlier message, or where their project or role stands, call crm_lookup. It reads {o}'s CRM over MCP.
+- A look in the CRM is part of this demonstration, so the caller hears it. Before you call crm_lookup, say one short sentence, for example: "Let me look in {owner_first_name(o)}'s CRM. One moment." Then call crm_lookup in the same turn.
+- Say only what the result gives. Never guess a status, and never promise a date or an answer.
+- Say MCP as three letters, and CRM as three letters."""
+        if crm
+        else ""
+    )
+    crm_fact = (
+        f"\n- After a call that left a message, code writes it to {o}'s CRM over MCP, the Model Context Protocol: the caller as a person, the call as a timeline entry, a task to follow up, and a deal when the call was about a project or a role. No model chooses those writes, and they run after the caller hangs up, so they add no wait. A caller who passed the passphrase check can ask the contact agent where their request stands; the agent then reads the stage of their own deal from the CRM."
+        if crm
+        else ""
     )
     # One routing line for every agent but the feedback agent. The details are in the feedback agent's role, the handoff tool's description.
     feedback_line = f"- If the caller reports a fault of this phone line or asks for a feature of it, hand off to the feedback agent. A view about {o}, a question, or one answer you can correct is not that."
@@ -384,7 +404,7 @@ Routing:
 - The caller has a business, a product, or a software project, and wants to know how {o} could help with it. Hand off to the consultant agent.
 - The caller has a role to fill, or is recruiting. Questions about {o}'s experience go to the profile agent. To pass the role to {o}, hand off to the contact agent.
 - The caller wants to look around first. Hand off to the tour agent.
-- The caller wants to leave contact details, get a follow-up, or speak to {o}. Hand off to the contact agent.
+- The caller wants to leave contact details, get a follow-up, or speak to {o}{crm_route}. Hand off to the contact agent.
 {feedback_line}
 - If the intent is unclear, ask one short clarifying question. Do not ask more than two questions in total before you route.
 
@@ -469,7 +489,7 @@ What you know about the system:
 - A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
 - When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
 - The feedback agent takes a caller's bug report or feature idea about this line. After the call, a report becomes a GitHub issue, a triage agent sorts it, and a coding agent can open a pull request.
-- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}
+- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}{crm_fact}
 
 How to use your tool:
 - Call get_call_stats when the caller asks what has happened on this call, how long it has been, which providers have spoken, how fast the agents answer, how many tokens the call has used, or what the call costs. Then say the facts that answer the question, in one or two sentences.
@@ -514,7 +534,7 @@ Profile summary of {o}:
 
     contact = AgentSpec(
         name="contact",
-        role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner",
+        role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner" + crm_route,
         instructions=f"""{_preamble("contact", o, brand_name, name_hint, website)}
 
 Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
@@ -552,7 +572,7 @@ To connect the caller to {o}, only when they asked to speak to {o} now:
 - The result tells you what to say next. The caller then waits on hold while {o}'s phone rings. Never promise that {o} will answer.
 - If no transfer is possible, or {o} does not pick up, say {o} will call them back.
 
-You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.
+You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.{crm_section}
 
 Keep it short:
 - One or two sentences per turn. Say each thing once.
@@ -564,7 +584,7 @@ Keep it short:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "set_passphrase", "request_owner_transfer", *text_tools, "forget_caller", "end_call"),
+        tools=("save_lead", "set_passphrase", "request_owner_transfer", *crm_tools, *text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "tour", "consultant", "feedback"),
         leg=legs["contact"],
         voice=voices["contact"],

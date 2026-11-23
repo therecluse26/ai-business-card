@@ -7,8 +7,9 @@ The property: on a call, the agents and a new lead get no data that another pers
 The world: two people use one phone number and have one first name. Each can call, say their name, say a
 passphrase, set a passphrase, leave a message, ask to be forgotten, and hang up. Neither says the other
 person's passphrase. The search runs the real functions (`graph/tools.py`: `identify`, `verify`,
-`set_phrase`, `save_lead_record`, `forget`) on a real SQLite store, for every order of those actions,
-up to `--calls` calls. It is a breadth-first search, so each fault comes with its shortest list of steps.
+`set_phrase`, `save_lead_record`, `forget`; `crm.py`: `request_status`, `sync_call`) on a real SQLite
+store, for every order of those actions, up to `--calls` calls. It is a breadth-first search, so each
+fault comes with its shortest list of steps.
 
 Each person has secret words of three kinds: a surname, a note word (in their message, email address,
 company, call summary and topic), and a passphrase word. A fault is a secret word of one person in what
@@ -38,10 +39,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import ai_call_center
+from ai_call_center import crm as crm_module
 from ai_call_center import leads as leads_module
 from ai_call_center import passphrase
 from ai_call_center.agents.specs import Welcome
 from ai_call_center.analytics import AnalyticsStore
+from ai_call_center.callers import CallSummary
+from ai_call_center.crm import CrmStore
 from ai_call_center.feedback import FeedbackStore
 from ai_call_center.graph import tools
 from ai_call_center.graph.state import CallContext
@@ -62,6 +66,7 @@ TABLES = {
     "calls": "call_control_id, caller_number, started_at, ended_at, agents, summary, caller_name, topic",
     "caller_phrases": "id, caller_number, name, salt, hash, created_at, failed",
     "phrase_calls": "phrase_id, call_control_id",
+    "crm_calls": "call_control_id, caller_number, name, person_id, deal_id, deal_made, task_id, noted, entry, state, tries, error, created_at",
     "sqlite_sequence": "name, seq",  # the next row number of each table
 }
 
@@ -97,7 +102,8 @@ TOOL_RESULT = "tool result"  # the text that a tool gives back to the voice mode
 HISTORY = "caller_history"  # the notes of earlier calls in the call context
 CALLER_NAME = "caller_name"  # the name that every agent gets in its handoff message (`known_name_note`)
 NEW_LEAD = "new lead"  # the lead that a save writes on this call
-PLACES = (TOOL_RESULT, HISTORY, CALLER_NAME, NEW_LEAD)
+CRM_RECORD = "CRM record"  # a record of the owner's CRM that crm_lookup read on this call; the agent gets its status and stage
+PLACES = (TOOL_RESULT, HISTORY, CALLER_NAME, NEW_LEAD, CRM_RECORD)
 
 # Faults that are known and reported, and not fixed yet: (kind of secret word, place). A run passes
 # only when it finds exactly these. When the product code fixes one, remove it here (SKILL.md).
@@ -112,6 +118,7 @@ WITNESSES = (
     "a passphrase replaced another person's passphrase",
     "a passphrase was locked after wrong tries",
     "a caller was forgotten",
+    "a verified caller got the stage of their own request from the CRM",
 )
 
 # The fields of the call context that the caller-memory code reads or writes.
@@ -149,7 +156,8 @@ WORDS = {
     "save on file": 'The caller leaves a message; the agent passes the email "on file" (save_lead).',
     "save on file, no name": 'The caller leaves a message; the agent passes no name and the email "on file" (save_lead).',
     "forget": "The caller asks to be forgotten (forget_caller).",
-    "end": "The call ends, and its summary is stored.",
+    "crm lookup": "The caller asks where their request stands (crm_lookup).",
+    "end": "The call ends. Its summary is stored, and the owner's CRM gets the call.",
 }
 
 
@@ -174,6 +182,31 @@ class NoEmail:
         return None
 
 
+class SearchCrm:
+    """Stands in for the owner's CRM. It holds nothing: the ID of a record is its content, so each state of the
+    search is in the tables. It has no person that the owner added by hand, and each deal is open."""
+
+    def __init__(self) -> None:
+        self.read: list[str] = []  # each record that a get_record gave
+
+    async def tool(self, name: str, arguments: dict) -> dict:
+        if name == "search":
+            return {"hits": []}
+        if name == "create_person":
+            return {"id": f"person: {arguments['firstName']} {arguments['lastName']}".strip()}
+        if name in ("create_company", "create_deal"):
+            return {"id": f"{name.removeprefix('create_')}: {arguments['name']}"}
+        if name in ("add_note", "create_task"):
+            return {"id": name}
+        if name == "list_pipelines":
+            return {"pipelines": [{"id": "pipeline", "name": "Client work", "stages": [{"id": "stage", "name": "New lead"}]}]}
+        if name == "get_record":
+            record = {"id": arguments["id"], "name": arguments["id"].partition(": ")[2], "status": "open", "stageId": "stage"}
+            self.read.append(json.dumps(record))
+            return {"record": record, "timeline": []}
+        raise ValueError(name)  # pragma: no cover
+
+
 @dataclass(frozen=True)
 class Leak:
     kind: str  # SURNAME, NOTE or PHRASE
@@ -192,13 +225,15 @@ class World:
         self.clock = Clock()
         leads_module.now_iso = self.clock  # the time of a call
         tools.now_iso = self.clock  # the time of a lead
+        crm_module.now_iso = self.clock  # the time of a CRM entry
         # The cost of the hash does not change which passphrase matches. The real setting takes 34 ms.
         passphrase._SCRYPT = {"n": 2, "r": 1, "p": 1, "dklen": 32}
         passphrase.LOCK_AT = SEARCH_LOCK_AT
         self.loop = asyncio.new_event_loop()
         self.store = LeadStore(":memory:")
-        for table in (PhraseStore, AnalyticsStore, FeedbackStore):  # every table exists before the first snapshot
+        for table in (PhraseStore, AnalyticsStore, FeedbackStore, CrmStore):  # every table exists before the first snapshot
             table(self.store.connection)
+        self.crm = SearchCrm()
         self.welcome = Welcome(owner="Test Owner", companies="from two companies", tip="how this works")
         self.ctx: CallContext | None = None
         self.who = -1
@@ -233,7 +268,7 @@ class World:
     @staticmethod
     def key(state: tuple) -> tuple:
         """The state without what cannot change a later result: the times, the salts, the row numbers."""
-        (leads, calls, phrases, phrase_calls, _), ctx, who, saves, owners, _ = state
+        (leads, calls, phrases, phrase_calls, crm_calls, _), ctx, who, saves, owners, _ = state
         named = []
         for row_id, _, name, salt, stored, _, failed in phrases:
             which = next((phrase for phrase in ALL_PHRASES if passphrase._hash(phrase, salt) == stored), "?")
@@ -242,6 +277,8 @@ class World:
             tuple((lead[1], lead[2], lead[3], lead[4], lead[6]) for lead in leads),
             tuple((call[0], call[3] is not None, call[5], call[6], call[7]) for call in sorted(calls, key=lambda call: (call[2], call[0]))),
             tuple(named),
+            # The call, the name, the person, the deal, "this call made the deal", the state. The rows are in the order of the calls.
+            tuple((row[0], row[2], row[3], row[4], row[5], row[9]) for row in crm_calls),
             ctx,
             who,
             saves,
@@ -265,6 +302,7 @@ class World:
             mode="voice",
             welcome=self.welcome,
             owner_name="Test Owner",
+            crm=self.crm,
         )
 
     # --- actions ---
@@ -289,6 +327,7 @@ class World:
         ctx, me = self.ctx, self.people[self.who]
         assert ctx is not None
         step, lead = action[0], {}
+        self.crm.read = []
         if step == "identify":
             text = tools.identify(ctx, me.name)
         elif step.startswith("verify"):
@@ -323,23 +362,24 @@ class World:
         elif step == "forget":
             text, _ = tools.forget(ctx)
             self.seen.add(WITNESSES[5])
+        elif step == "crm lookup":
+            text = self.loop.run_until_complete(crm_module.request_status(ctx))
+            if ctx.identity_verified and any(me.note in record.lower() for record in self.crm.read):
+                self.seen.add(WITNESSES[6])
         elif step == "end":
-            # What `call_session._finish_call` and `chat.run` store. The summary model writes what was said on the call.
+            # What `call_session` and `chat.run` do at the end. The summary model writes what was said on the call.
+            # Each call is about a project, so each call that is not forgotten leaves a person and a deal in the CRM.
             if ctx.forgotten:
                 self.store.finish_call(ctx.call_control_id, agents=["classifier"], summary="")
             else:
-                self.store.finish_call(
-                    ctx.call_control_id,
-                    agents=["classifier"],
-                    summary=f"{me.name} asked about {me.note}.",
-                    caller_name=ctx.caller_name or me.name,
-                    topic=f"the {me.note} project",
-                )
+                summary = CallSummary(summary=f"{me.name} asked about {me.note}.", caller_name=ctx.caller_name or me.name, topic=f"the {me.note} project", interest="project")
+                self.store.finish_call(ctx.call_control_id, agents=["classifier"], summary=summary.summary, caller_name=summary.caller_name, topic=summary.topic)
+                self.loop.run_until_complete(crm_module.sync_call(ctx, summary, visited=["classifier"]))
             self.ctx, self.who, self.saves = None, -1, 0
             return []
         else:  # pragma: no cover
             raise ValueError(step)
-        places = {TOOL_RESULT: text, HISTORY: ctx.caller_history, CALLER_NAME: ctx.caller_name, NEW_LEAD: " ".join(lead.values())}
+        places = {TOOL_RESULT: text, HISTORY: ctx.caller_history, CALLER_NAME: ctx.caller_name, NEW_LEAD: " ".join(lead.values()), CRM_RECORD: " ".join(self.crm.read)}
         leaks = []
         for place, shown in places.items():
             for word, kind in self.people[1 - self.who].secrets.items():
@@ -468,6 +508,20 @@ MUTANTS = (
     ("save_lead reuses the contact of a call that the passphrase does not open", "graph/tools.py", "if lead.call_control_id in ctx.open_calls and same_person(confirmed, lead.name)]", "if same_person(confirmed, lead.name)]"),
     ("identify gives the agents the name on record after a name match, with no passphrase check", "graph/tools.py", "    ctx.caller_name = name\n    on_file =", "    ctx.caller_name = memory.name\n    on_file ="),
     ("every passphrase is right", "passphrase.py", "right = hmac.compare_digest(_hash(phrase, salt), stored)", "right = True"),
+    (
+        "the CRM lookup reads a deal that the call of another person made",
+        "crm.py",
+        "made = {row.deal_id: row for row in records if row.deal_id and row.deal_made}",
+        "made = {row.deal_id: row for row in records if row.deal_id}",
+    ),
+    (
+        "the CRM lookup reads the records of every call of the number, not only the calls that the passphrase opens",
+        "crm.py",
+        "records = CrmStore(ctx.leads.connection).records_for(ctx.open_calls)",
+        "records = CrmStore(ctx.leads.connection).records_for([row[0] for row in ctx.leads.connection.execute('SELECT call_control_id FROM crm_calls WHERE caller_number = ?', (ctx.caller_number,))])",
+    ),
+    # Not in this list on purpose: `request_status` without its `ctx.identity_verified` test. Only `verify` fills
+    # `ctx.open_calls`, so `records_for(ctx.open_calls)` reads nothing for a caller who is not verified.
 )
 
 
