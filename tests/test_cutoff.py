@@ -39,6 +39,22 @@ def test_a_short_no_is_an_answer_not_a_noise():
         assert '"yes" or "no"' in case_1
 
 
+def test_an_mm_hm_that_cut_the_agent_off_lets_it_finish_the_sentence():
+    watch = CallerSoundWatch(on_sound=None)
+    watch.observe(LLMFullResponseStartFrame(), DOWN, now=0.0)
+    watch.observe(BotStartedSpeakingFrame(), DOWN, now=0.0)
+    watch.observe(TTSTextFrame("Thanks, that's filed. When this call ends, it goes to the issue list.", text_type="sentence"), DOWN, now=0.1)
+    note, cut = watch.observe(UserStartedSpeakingFrame(), DOWN, now=2.0)
+    assert cut
+    case_1, case_2 = note.split("Case 2")
+    assert '"mm-hm"' in case_2 and '"okay"' in case_2 and '"mm-hm"' not in case_1  # it says the caller listens: not an answer
+    assert 'Say this again, in these words, and then go on as you planned: "When this call ends, it goes to the issue list."' in case_2
+
+
+def test_a_sound_in_silence_has_no_rule_for_a_listening_word():
+    assert '"mm-hm"' not in quiet_sound_note()  # with the agent silent, a short "yes" answers it
+
+
 def test_a_cut_sentence_is_still_said_again():
     watch = CallerSoundWatch(on_sound=None)
     watch.observe(LLMFullResponseStartFrame(), DOWN, now=0.0)
