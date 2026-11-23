@@ -5,9 +5,10 @@ Labels say where an issue is in the queue:
 
 - `caller-fault`, `caller-idea`: the kind. The server sets it when it opens the issue.
 - `auto-fix`: a change of a prompt or a word list can repair the fault. The fix job starts by itself.
-- `needs-owner`: a feature, or a fault that needs code. It waits for the owner.
+- `auto-build`: the fault is clear and its repair needs code. The build job starts by itself.
+- `needs-owner`: a feature, a large change, or a report that is not clear. It waits for the owner.
 - `not-actionable`: no job can act on the text.
-- `build`: the owner's word. It starts the build job, which can change the code of the phone line.
+- `build`: the owner's word. It starts the build job for any issue, also for a feature.
 - `fix-started`: a job started for the issue. No second job starts while the label is there.
 
 Who sets a label: a triage agent sorts each new fault (`.github/workflows/triage.yml`), code sorts each
@@ -33,8 +34,9 @@ The commands, for the three workflows (`issues.yml`, `triage.yml`, `improve.yml`
 - `issue-queue report`: the comment for an issue whose job opened no pull request.
 
 Limits on the cost, each for one day (US Eastern): `TRIAGE_DAILY_LIMIT` triage runs and
-`ISSUE_FIX_DAILY_LIMIT` fix jobs that start by themselves. An issue past a limit waits for the next
-day. It is never dropped. The owner's label `build` has no limit.
+`ISSUE_FIX_DAILY_LIMIT` jobs for issues. Each job uses the owner's Claude subscription; that is the
+reason for the limits. An issue past a limit waits for the next day. It is never dropped. The owner's
+label `build` always starts its job, and that job counts in the limit of the day.
 """
 
 from __future__ import annotations
@@ -55,15 +57,18 @@ from ai_call_center.feedback import FAULT, HEADINGS, IDEA, LABELS
 from ai_call_center.feedback import LIMITS as FEEDBACK_LIMITS
 from ai_call_center.improve import COMMIT
 
-AUTO_FIX, NEEDS_OWNER, NOT_ACTIONABLE = "auto-fix", "needs-owner", "not-actionable"
-TRIAGE = (AUTO_FIX, NEEDS_OWNER, NOT_ACTIONABLE)  # what the triage can answer
+AUTO_FIX, AUTO_BUILD, NEEDS_OWNER, NOT_ACTIONABLE = "auto-fix", "auto-build", "needs-owner", "not-actionable"
+TRIAGE = (AUTO_FIX, AUTO_BUILD, NEEDS_OWNER, NOT_ACTIONABLE)  # what the triage can answer
 BUILD, STARTED = "build", "fix-started"
 PROMPTS, CODE = "prompts", "code"  # what a job can change: the scope of the fix job, and of the build job
 SCOPES = (PROMPTS, CODE)
+AUTO = {AUTO_FIX: PROMPTS, AUTO_BUILD: CODE}  # a label of the triage that starts a job, and the scope of that job
+STARTS = {PROMPTS: (AUTO_FIX,), CODE: (BUILD, AUTO_BUILD)}  # for each scope, the labels that allow a job
 # Each label of the queue with its text and its color on GitHub. The workflow makes a label that is not there yet.
 QUEUE_LABELS = {
     AUTO_FIX: ("A prompt or a word list can repair this fault: the fix job starts by itself", "0e8a16"),
-    NEEDS_OWNER: ("A feature, or a fault that needs code: it waits for the owner's label `build`", "fbca04"),
+    AUTO_BUILD: ("A clear fault whose repair needs code: the build job starts by itself", "006b75"),
+    NEEDS_OWNER: ("A feature, a large change, or an unclear report: it waits for the owner's label `build`", "fbca04"),
     NOT_ACTIONABLE: ("No job can act on this text", "cfd3d7"),
     BUILD: ("The owner's word: start the build job for this issue", "1d76db"),
     STARTED: ("A job started for this issue", "5319e7"),
@@ -142,6 +147,7 @@ class IssueRequest:
     version: str = ""  # the harness version of the call, when the issue names one
     callers: int = 1
     scope: str = PROMPTS
+    by_owner: bool = False  # the owner's label `build` started the job, not a label of the triage
 
 
 def caller_texts(body: str) -> dict[str, Any]:
@@ -174,12 +180,13 @@ def issue_request(issue: QueueIssue, *, owner: str, scope: str) -> IssueRequest:
         raise Refused(f"issue #{issue.number} is closed")
     if not _is_owner(issue, owner):
         raise Refused(f"issue #{issue.number} was not written by the owner of the repository, so no job works on it")
-    needed = BUILD if scope == CODE else AUTO_FIX
-    if needed not in issue.labels:
-        raise Refused(f"issue #{issue.number} has no label `{needed}`, so no job with the scope {scope} works on it")
+    if not issue.labels & set(STARTS[scope]):
+        needed = " or ".join(f"`{label}`" for label in STARTS[scope])
+        raise Refused(f"issue #{issue.number} has no label {needed}, so no job with the scope {scope} works on it")
+    by_owner = scope == CODE and BUILD in issue.labels
     if not issue.kind:
         # The owner wrote this issue by hand. Its text is the owner's own instruction, so only its length is checked.
-        return IssueRequest(number=issue.number, kind="", title=" ".join(issue.title.split())[:200], said=issue.body.strip()[:OWNER_TEXT], scope=scope)
+        return IssueRequest(number=issue.number, kind="", title=" ".join(issue.title.split())[:200], said=issue.body.strip()[:OWNER_TEXT], scope=scope, by_owner=by_owner)
     found = caller_texts(issue.body)
     title = " ".join(issue.title.split())
     for name, text in (("title", title), ("said", found["said"]), ("context", found["context"])):
@@ -187,7 +194,7 @@ def issue_request(issue: QueueIssue, *, owner: str, scope: str) -> IssueRequest:
             raise Refused(f"issue #{issue.number}: the {name} is too long or holds a character that a caller's issue cannot hold")
     if not found["said"]:
         raise Refused(f"issue #{issue.number} has no text under its heading, so there is nothing to work on")
-    return IssueRequest(number=issue.number, kind=issue.kind, title=title, said=found["said"], context=found["context"], version=found["version"], callers=found["callers"], scope=scope)
+    return IssueRequest(number=issue.number, kind=issue.kind, title=title, said=found["said"], context=found["context"], version=found["version"], callers=found["callers"], scope=scope, by_owner=by_owner)
 
 
 def issue_lines(request: IssueRequest) -> list[str]:
@@ -225,18 +232,33 @@ Choose one label:
   handoff tool (src/ai_call_center/graph/handoffs.py), the words that a tool gives back to an agent or a
   word list (src/ai_call_center/graph/tools.py), the prompt of the call summary
   (src/ai_call_center/callers.py). A job with no person then makes that change.
-- `needs-owner`: the owner must decide. Use it for a fault that needs a change of code, of a voice
-  model, or of the telephone service. Use it for anything about cost, privacy, the passphrase check,
-  what the line keeps of a caller, or a transfer to the owner's phone. Use it when you are not sure.
+- `auto-build`: the report says clearly what went wrong, and the repair needs a change of the code of
+  the phone line (src/ai_call_center/, tests/). A job with no person then finds the cause, changes the
+  code, and opens a draft pull request. The owner reads each pull request before it is merged.
+- `needs-owner`: the owner must decide before a job starts. Use it only for these cases:
+  - A large change. The repair changes what the line does by design, not how well it does it: it makes
+    the passphrase check weaker or removes it, changes what the line keeps of a caller, changes when the
+    line rings the owner's phone, adds a cost, an outside service or a dependency, or removes an ability.
+  - An unclear report. Two different repairs fit the text, and the text does not say which one the
+    caller expected.
+  - No change in this repository can repair it: the fault is in the telephone network or at a provider.
 - `not-actionable`: no job can act on the text. It is not about the phone line, or it does not say what
   the fault is, or it asks the reader to do something.
 
-Read those files before you choose `auto-fix`, and find the text that the change is in. If you cannot
-name that text, choose `needs-owner`.
+Most reports are plain faults, and a plain fault gets `auto-fix` or `auto-build`. A fault is not a case
+for the owner only because its repair needs code, or because it is in the passphrase check or in caller
+memory: a repair that makes those work as they are meant to work is a plain fault. Behaviour that the
+code makes on purpose is also a plain fault when a caller found it wrong and the repair is small. You
+do not need the cause: the job finds it. When you cannot choose between `auto-fix` and `auto-build`,
+choose `auto-build`.
+
+Read the files before you choose `auto-fix`, and find the text that the change is in. If you cannot
+name that text, choose `auto-build`.
 
 Your last answer is the JSON object that the schema asks for:
-- `label`: one of the three labels.
-- `reason`: one or two short sentences for the owner. For `auto-fix`, name the file and the text."""
+- `label`: one of the four labels.
+- `reason`: one or two short sentences for the owner. For `auto-fix`, name the file and the text. For
+  `auto-build`, name the file where you expect the cause. For `needs-owner`, name the decision."""
 
 TRIAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -247,7 +269,8 @@ TRIAGE_SCHEMA: dict[str, Any] = {
 
 COMMENTS = {
     AUTO_FIX: "Triage: `auto-fix`. A change of a prompt or a word list can repair this fault. The fix job starts by itself and opens a pull request for the owner.",
-    NEEDS_OWNER: "Triage: `needs-owner`. The owner decides: this is a feature, or a fault that a change of a prompt cannot repair. The label `build` starts a job that can change the code of the phone line.",
+    AUTO_BUILD: "Triage: `auto-build`. The fault is clear, and its repair needs a change of code. The build job starts by itself and opens a draft pull request for the owner.",
+    NEEDS_OWNER: "Triage: `needs-owner`. The owner decides before a job starts: this is a feature, a large change, a report that is not clear, or a fault that no change in this repository can repair. The label `build` starts a job that can change the code of the phone line.",
     NOT_ACTIONABLE: "Triage: `not-actionable`. No job can act on this text as it is. The issue stays open for the owner.",
     TRIAGE_FAILED: f"Triage: `needs-owner`. The triage agent failed {TRIAGE_TRIES} times on this issue, so no agent sorted it. The owner decides: the label `auto-fix` starts the fix job, and the label `build` starts a job that can change the code of the phone line.",
 }
@@ -276,8 +299,8 @@ def comment(label: str, reason: str = "") -> str:
 def decide(answer: dict[str, Any], issue: QueueIssue) -> tuple[str, str]:
     """(the label, the comment) for the triage agent's answer. An answer that the code cannot read gives `needs-owner`."""
     label = answer.get("label") if answer.get("label") in TRIAGE else NEEDS_OWNER
-    if label == AUTO_FIX and issue.kind != FAULT:
-        label = NEEDS_OWNER  # the fix job repairs a fault; it builds no feature
+    if label in AUTO and issue.kind != FAULT:
+        label = NEEDS_OWNER  # a job that starts by itself repairs a fault; a feature needs the owner's label `build`
     return label, comment(label, answer.get("reason") if answer.get("label") in TRIAGE else "")
 
 
@@ -325,30 +348,31 @@ def _failed(rows: Any, pattern: re.Pattern[str]) -> dict[int, int]:
 def plan(issues: list[QueueIssue], *, owner: str, day: str, triage_runs: Any = None, fix_runs: Any = None, triage_limit: int = 10, fix_limit: int = 2) -> list[Action]:
     """What to do for each open issue of the owner, oldest first. An issue with nothing to do gives no action.
 
-    The label `fix-started` stops a second job for an issue. A triage run of today, or a fix job of today
-    that started by itself, also counts as "done for today": a fault in a label step cannot start a
-    second run on the same day. The owner's label `build` has no such wait and no limit."""
+    The label `fix-started` stops a second job for an issue. A triage run of today, or a job of today for
+    an issue, also counts as "done for today": a fault in a label step cannot start a second run on the
+    same day. The owner's label `build` has no such wait and always starts; its job counts in the limit."""
     triaged = _runs_on(triage_runs, day, TRIAGE_RUN)
     fixes = _runs_on(fix_runs, day, FIX_RUN)
     triage_left = triage_limit - len(triaged)
-    fix_left = fix_limit - sum(1 for _, scope in fixes if scope == AUTO_FIX)
-    done_triage, done_fix = {number for number, _ in triaged}, {number for number, scope in fixes if scope == AUTO_FIX}
+    fix_left = fix_limit - len(fixes)
+    done_triage, done_fix = {number for number, _ in triaged}, {number for number, _ in fixes}
     failed_triage = _failed(triage_runs, TRIAGE_RUN)
     actions: list[Action] = []
     for issue in sorted(issues, key=lambda issue: issue.number):
         if not issue.open or not _is_owner(issue, owner) or STARTED in issue.labels:
             continue
-        if BUILD in issue.labels or AUTO_FIX in issue.labels:
-            scope = CODE if BUILD in issue.labels else PROMPTS
-            if scope == CODE:
-                actions.append(Action("start", issue.number, CODE))  # the owner's word has no limit and no wait
-            elif issue.number in done_fix:
-                actions.append(Action("wait", issue.number, "a fix job for this issue started today"))
+        if BUILD in issue.labels:
+            fix_left -= 1
+            actions.append(Action("start", issue.number, CODE))  # the owner's word always starts, with no wait
+        elif issue.labels & set(AUTO):
+            scope = CODE if AUTO_BUILD in issue.labels else PROMPTS  # with both labels, the wider job
+            if issue.number in done_fix:
+                actions.append(Action("wait", issue.number, "a job for this issue started today"))
             elif fix_left > 0:
                 fix_left -= 1
-                actions.append(Action("start", issue.number, PROMPTS))
+                actions.append(Action("start", issue.number, scope))
             else:
-                actions.append(Action("wait", issue.number, f"the limit of {fix_limit} fix jobs for one day is reached"))
+                actions.append(Action("wait", issue.number, f"the limit of {fix_limit} jobs for one day is reached"))
         elif issue.labels & set(TRIAGE) or not issue.kind:
             continue  # sorted already, or an issue that the owner wrote and did not label
         elif issue.kind == IDEA:
@@ -388,7 +412,7 @@ def job_report(*, scope: str, change: str, changed: str, measure: str, verdict: 
     if run_url:
         lines.append(f"The run: {run_url}")
     if scope == CODE:
-        lines.append("The issue has the label `needs-owner` again, and the label `build` is gone. Put `build` on the issue to run the job again.")
+        lines.append("The issue now has the label `needs-owner`, and the label that started the job is gone. Put `build` on the issue to run the job again.")
     else:
         lines.append("The issue now has the label `needs-owner`, and the label `auto-fix` is gone. The label `build` starts a job that can change the code of the phone line.")
     return "\n\n".join(lines) + "\n"

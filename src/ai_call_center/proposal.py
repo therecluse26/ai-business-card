@@ -25,7 +25,8 @@ A job has a scope, which is what the agent can change:
 - `prompts`: the prompts, the word lists, the tests and the made-up test set. A failed rule and the
   label `auto-fix` give this scope.
 - `code`: the code of the phone line and its tests, but not the code that measures or judges a change.
-  Only the owner's label `build` gives this scope, and its pull request is always a draft.
+  The triage agent's label `auto-build` and the owner's label `build` give this scope, and its pull
+  request is always a draft.
 
 The measure is `score.py`. The agent cannot change it, and it cannot change the grader's rules.
 """
@@ -246,8 +247,19 @@ Your last answer is the JSON object that the schema asks for:
 - `change`: what you changed, and why it makes the fault less likely.
 - `made_up_call`: the id of the made-up call that you added, or "" when you added none."""
 
-BUILD_TASK = """This repository is a phone line that AI voice agents answer (Python, the package `ai_call_center`). The
-owner of the repository put the label `build` on GitHub issue #{number}. Your task: build what the
+STARTED_BY = {
+    "build": "the owner of the repository put the label `build` on it.",
+    "auto-build": "a triage agent read the caller's report and found a clear fault whose repair needs code (the label `auto-build`). No person read the issue yet.",
+}
+
+
+def _starter(request: IssueRequest) -> str:
+    """The label that started the job for an issue."""
+    return "build" if request.by_owner else "auto-build" if request.scope == CODE else "auto-fix"
+
+
+BUILD_TASK = """This repository is a phone line that AI voice agents answer (Python, the package `ai_call_center`). A
+label on GitHub issue #{number} started this job: {started} Your task: build what the
 issue asks for, as one change that the owner can review.
 
 The issue:
@@ -310,7 +322,7 @@ def task(request: Request, *, owner: str = "the owner") -> str:
         origin = FROM_A_CALLER if request.kind else FROM_THE_OWNER
         issue = "\n".join(issue_lines(request))
         if request.scope == CODE:
-            return BUILD_TASK.format(number=request.number, issue=issue, origin=origin, refused="\n".join(f"   - {path}" for path in CODE_REFUSED), limits=LIMITS_TEXT)
+            return BUILD_TASK.format(number=request.number, started=STARTED_BY[_starter(request)], issue=issue, origin=origin, refused="\n".join(f"   - {path}" for path in CODE_REFUSED), limits=LIMITS_TEXT)
         history = f"git log {request.version}..HEAD -- src/ai_call_center" if request.version else "git log -15 -- src/ai_call_center"
         return ISSUE_TASK.format(number=request.number, issue=issue, origin=origin, history=history, allowed=allowed, limits=LIMITS_TEXT)
     found = report_lines(request)
@@ -398,7 +410,7 @@ def pr_title(answer: dict[str, Any], request: Request) -> str:
 def _head(request: Request) -> list[str]:
     """The first part of the pull request text: why the job ran, and what it knew."""
     if isinstance(request, IssueRequest):
-        started = "The owner put the label `build` on the issue, and that started this job." if request.scope == CODE else "A triage step gave the issue the label `auto-fix`, and that started this job. No person started it."
+        started = "The owner put the label `build` on the issue, and that started this job." if request.by_owner else f"A triage step gave the issue the label `{_starter(request)}`, and that started this job. No person started it."
         lines = [f"Closes #{request.number}.", "", started, "", "## The issue", *issue_lines(request), ""]
         if request.kind:
             lines += ['A model on the server wrote the issue from a call, and code removed each private word ("[removed]"). The job had no transcript.', ""]

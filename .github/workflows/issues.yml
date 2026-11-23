@@ -5,10 +5,11 @@
 # still open to do (src/ai_call_center/issue_queue.py):
 #
 #   a new fault (`caller-fault`)   starts the triage agent (triage.yml). It answers with one label:
-#                                  `auto-fix`, `needs-owner` or `not-actionable`.
+#                                  `auto-fix`, `auto-build`, `needs-owner` or `not-actionable`.
 #   a new idea (`caller-idea`)     gets the label `needs-owner`. A feature is the owner's decision: no agent is asked.
 #   `auto-fix`                     starts the fix job (improve.yml, scope prompts). It can change a prompt or a word list.
-#   `build` (the owner's label)    starts the build job (improve.yml, scope code). It can change the code of the phone line.
+#   `auto-build`                   starts the build job (improve.yml, scope code). It can change the code of the phone line.
+#   `build` (the owner's label)    starts the build job for any issue, also for a feature.
 #
 # The label `fix-started` says that a job started for the issue. A job that opens no pull request removes
 # it, and puts the issue back to `needs-owner` with a comment.

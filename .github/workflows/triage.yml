@@ -3,7 +3,8 @@
 #
 # The agent's only output is one label from a fixed list and one short reason:
 #   auto-fix        a change of a prompt or a word list can repair the fault. The fix job then starts by itself.
-#   needs-owner     the owner decides: the fault needs code, or it is about cost, privacy or the owner's phone.
+#   auto-build      the fault is clear and its repair needs code. The build job then starts by itself.
+#   needs-owner     the owner decides: a large change, a report that is not clear, or a fault outside this repository.
 #   not-actionable  no job can act on the text.
 #
 # Two jobs, so the agent never has a token that can write:
@@ -11,7 +12,7 @@
 #          changes a file or runs a command. Its answer leaves this job as one JSON object.
 #   label  code reads the answer (src/ai_call_center/issue_queue.py). A label that is not in the fixed list
 #          becomes `needs-owner`. Code sets the label and writes the comment. Then it starts the queue again,
-#          so `auto-fix` starts the fix job.
+#          so `auto-fix` starts the fix job and `auto-build` starts the build job.
 #
 # The text of the issue is data for the agent. A model on the server wrote it from a call, code removed each
 # private word, and code here checks it again: the owner of the repository is the author of the issue, and
@@ -147,10 +148,10 @@ jobs:
         run: |
           set -euo pipefail
           case "$LABEL" in
-            auto-fix|needs-owner|not-actionable) label="$LABEL" ;;
+            auto-fix|auto-build|needs-owner|not-actionable) label="$LABEL" ;;
             *) echo "::error::The label is not one of the fixed list."; exit 1 ;;
           esac
           gh api "repos/${GITHUB_REPOSITORY}/issues/${QUEUE_ISSUE}/labels" --method POST -f "labels[]=${label}" --silent
           gh api "repos/${GITHUB_REPOSITORY}/issues/${QUEUE_ISSUE}/comments" --method POST -F body=@"$RUNNER_TEMP/comment.md" --silent
           # A label that the token of a job set starts no workflow. So this step starts the queue: it starts the fix job.
-          if [ "$label" = auto-fix ]; then gh workflow run issues.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"; fi
+          if [ "$label" = auto-fix ] || [ "$label" = auto-build ]; then gh workflow run issues.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"; fi

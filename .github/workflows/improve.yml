@@ -7,7 +7,7 @@
 #    (src/ai_call_center/fault_report.py). The job has no transcript.
 # 2. A GitHub issue, by its label (issues.yml, src/ai_call_center/issue_queue.py). The input `issue` names
 #    it. The label `auto-fix` gives the scope `prompts`: the job is the same as for a failed rule. The
-#    owner's label `build` gives the scope `code`: the agent can change the code of the phone line, but not
+#    label `auto-build` (the triage agent) or `build` (the owner) gives the scope `code`: the agent can change the code of the phone line, but not
 #    the code that measures or judges a change (CODE_REFUSED in proposal.py), no workflow, and no
 #    dependency. The pull request of the scope `code` is always a draft.
 #    The job reads the issue itself, and code checks it: the owner of the repository is its author, and it
@@ -433,7 +433,7 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}/comments" --method POST -F body=@"$RUNNER_TEMP/report.md" --silent
           gh api "$labels" --method POST -f "labels[]=needs-owner" --silent
           # The label that started the job goes, so the queue starts no second job by itself.
-          started=auto-fix
-          if [ "$FIX_SCOPE" = code ]; then started=build; fi
-          gh api "$labels/$started" --method DELETE --silent || true
+          started="auto-fix"
+          if [ "$FIX_SCOPE" = code ]; then started="build auto-build"; fi
+          for label in $started; do gh api "$labels/$label" --method DELETE --silent || true; done
           gh api "$labels/fix-started" --method DELETE --silent || true

@@ -901,8 +901,9 @@ What the coding agent can and cannot do:
   and the test set. The job refuses a patch that changes another file: the grader, the scorer, a
   workflow, or a script.
 - It can add an entry at the end of a test set file. It cannot change or remove an old entry.
-- This list is the scope `prompts`: a failed rule, and an issue with the label `auto-fix`. Only the
-  owner's label `build` on an issue gives the wider scope `code` (see "From an issue to a pull request").
+- This list is the scope `prompts`: a failed rule, and an issue with the label `auto-fix`. The triage
+  agent's label `auto-build` and the owner's label `build` on an issue give the wider scope `code` (see
+  "From an issue to a pull request").
 
 What the pull request shows, and its limits:
 
@@ -1033,17 +1034,23 @@ thing that starts a job (`issue_queue.py`, `.github/workflows/issues.yml`).
 | `caller-fault`, no other label | The triage agent sorts it (`triage.yml`). | The queue |
 | `caller-idea`, no other label | It gets `needs-owner`. No agent is asked. | Code: a feature is the owner's decision |
 | `auto-fix` | The fix job starts (`improve.yml`, scope `prompts`). | The triage agent, or the owner |
+| `auto-build` | The build job starts (`improve.yml`, scope `code`). | The triage agent, or the owner |
 | `needs-owner` | It waits. | The triage agent, or code |
 | `not-actionable` | It waits. No job can act on the text. | The triage agent |
-| `build` | The build job starts (`improve.yml`, scope `code`). | Only the owner |
+| `build` | The build job starts for any issue, also for a feature. | Only the owner |
 | `fix-started` | A job started. No second job starts. | The queue |
 
 **The triage agent** reads one issue and the prompts of the agents. Its only output is one label from
-the list `auto-fix`, `needs-owner`, `not-actionable`, and one short reason. It chooses `auto-fix` only
-when it can name the text that the change is in: a prompt, a handoff text, a tool's words, or a word
-list. A fault that needs code, and each thing about cost, privacy, the passphrase check or the owner's
-phone, goes to `needs-owner`. Code reads the answer: a label that is not in the list becomes
-`needs-owner`, and code sets the label and writes the comment. The agent's token can only read, and
+the list `auto-fix`, `auto-build`, `needs-owner`, `not-actionable`, and one short reason. A plain
+fault starts a job with no word of the owner. The agent chooses `auto-fix` when it can name the text
+that the change is in: a prompt, a handoff text, a tool's words, or a word list. It chooses
+`auto-build` when the report is clear and the repair needs code; the job finds the cause. It chooses
+`needs-owner` only for three cases: a large change (a weaker passphrase check, a change of what the
+line keeps of a caller or of when it rings the owner's phone, a new cost, service or dependency, an
+ability that goes), a report that two different repairs fit, or a fault that no change in this
+repository can repair. A fault is not a case for the owner only because it needs code. Code reads the
+answer: a label that is not in the list becomes `needs-owner`, a label that starts a job on an issue
+that is not a fault becomes `needs-owner`, and code sets the label and writes the comment. The agent's token can only read, and
 it has no tool that changes a file or runs a command.
 
 **The two jobs** are one workflow with two scopes:
@@ -1061,7 +1068,7 @@ The pull request says `Closes #N`, so a merge closes the issue. A job that opens
 writes the reason as a comment on the issue, removes `fix-started` and the label that started it, and
 sets `needs-owner`. To run the build job again, put `build` on the issue again.
 
-**The owner's label wins.** The owner can set `auto-fix` or `build` on an issue at any time, also on
+**The owner's label wins.** The owner can set `auto-fix`, `auto-build` or `build` on an issue at any time, also on
 an issue that the owner wrote by hand. The queue reads the labels again on each run, and it sorts no
 issue a second time. To have an issue sorted again, remove its triage label.
 
@@ -1080,7 +1087,9 @@ Who can start a job:
 Limits, each for one day (US Eastern). An issue past a limit waits for the next day; it is never dropped.
 
 - `TRIAGE_DAILY_LIMIT` triage runs (default 10).
-- `ISSUE_FIX_DAILY_LIMIT` fix jobs that start by themselves (default 2). The owner's `build` has no limit.
+- `ISSUE_FIX_DAILY_LIMIT` jobs for issues, in both scopes (default 2). Each job uses the owner's Claude
+  subscription, and a build job can run for 60 minutes; that is the reason for the limit. The owner's
+  `build` always starts its job, and that job counts in the limit of the day.
 - The triage agent gets 3 tries for one issue, one in a day. After 3 failed runs the issue gets
   `needs-owner`, with a comment.
 
@@ -1093,8 +1102,8 @@ variables: `TRIAGE_MODEL`, `BUILD_MODEL`, `TRIAGE_DAILY_LIMIT`, `ISSUE_FIX_DAILY
 
 What this does not promise:
 
-- The triage agent can be wrong. A wrong `auto-fix` costs one fix job, whose pull request the owner
-  reviews. A wrong `needs-owner` costs the owner one label.
+- The triage agent can be wrong. A wrong `auto-fix` or `auto-build` costs one job, whose pull request
+  the owner reviews; no job merges its own change. A wrong `needs-owner` costs the owner one label.
 - Each fix adds a made-up call at the end of `evals/calls.json`. Two open pull requests then change
   the same lines, and the second one needs a merge of `main` before it can merge.
 - A pull request that the owner closes with no merge leaves `fix-started` on its issue. Remove the
