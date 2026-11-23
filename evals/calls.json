@@ -112,5 +112,16 @@
       "No, that is all. Goodbye."
     ],
     "expect": {"visits": ["feedback"], "outcome": "none"}
+  },
+  {
+    "id": "owner-name-after-message",
+    "about": "The caller leaves a message. After the save, the contact agent says who has the message, with the owner's real first name and no other.",
+    "caller": [
+      "This is Oskar Feldmann from Brightwater Tiles.",
+      "Please leave a message: I want to talk about a stock tracking system for our three warehouses. A call back on this number is fine.",
+      "Yes, that is right.",
+      "No, thanks. Goodbye."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "message"}
   }
 ]
