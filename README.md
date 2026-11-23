@@ -8,8 +8,8 @@ Stack: Telnyx (phone), Pipecat (audio), LangGraph + LangChain (routing, state, t
 
 ## Status
 
-M1 to M5 are done: the five agents run as a text chat and on a phone call.
-On the phone, each agent has its own voice. Two agents run on Google Gemini Live and three on OpenAI
+M1 to M5 are done: the agents run as a text chat and on a phone call.
+On the phone, each agent has its own voice. Two agents run on Google Gemini Live and four on OpenAI
 Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
 call stats, transfer to the owner) run from the voice model's requests. The line recognises a
 returning caller by the name they give, looks up a new caller's carrier and area, and limits calls, call length, and
@@ -32,6 +32,7 @@ Dropped: the local pipeline leg (M7). Its timing spike showed it would answer ab
 | `tour` | Explains how this system works, with live facts from the call |
 | `consultant` | Asks about the caller's business and suggests uses |
 | `contact` | Connects the caller to the owner, or takes a message: a name and one line on what they want |
+| `feedback` | Takes a bug report or a feature idea about the line itself, for a GitHub issue after the call |
 
 ## Run
 
@@ -125,7 +126,7 @@ The first words of a call are exact (`greeting_words` in `agents/specs.py`); the
 
 - `OWNER_NAME_PRONUNCIATION` tells every agent how to say the owner's name, in plain words. It is a hint in the prompt: the voice models take no phonetic markup.
 - `RESPELLINGS` is the stronger tool when a voice still says a name wrong. It holds `<written>=<respelling>` pairs, for example `Lovelace=Luv-layss`. A voice model says a word the way the word is written in the text it reads. So the server puts the respelling in everything a voice model reads: the instructions, the greeting, each tool result. The lead email, the call summary, the log and the text chat keep the written word (`voice/respell.py`).
-- Every caller hears the same first words. With `BRAND_NAME` set: "Hi, you've reached <brand>. I'm one of five
+- Every caller hears the same first words. With `BRAND_NAME` set: "Hi, you've reached <brand>. I'm one of six
   AI agents <owner> built, and this call is a live sample of the work <first name> does for clients. I remember
   callers, so first: who am I speaking with?" Without a brand, the first sentence is "Hi, you've reached
   <owner>'s AI business card." The words say nothing about an earlier call, so they leak nothing.
@@ -900,6 +901,8 @@ What the coding agent can and cannot do:
   and the test set. The job refuses a patch that changes another file: the grader, the scorer, a
   workflow, or a script.
 - It can add an entry at the end of a test set file. It cannot change or remove an old entry.
+- This list is the scope `prompts`: a failed rule, and an issue with the label `auto-fix`. Only the
+  owner's label `build` on an issue gives the wider scope `code` (see "From an issue to a pull request").
 
 What the pull request shows, and its limits:
 
@@ -943,7 +946,7 @@ keeps it (`feedback.py`):
 
 1. **The decision grader answers two more questions** in its one request after hangup: did the caller
    report a fault of the phone line, and did the caller ask for a feature. With no yes at
-   `GRADER_FAIL_AT`, nothing more happens.
+   `GRADER_FAIL_AT`, nothing more happens, unless the feedback agent filed a report (below).
 2. **The grader model writes each item** in three short texts: a title, what the caller reported or
    asked for, and what the line did at that moment. At most 3 items for one call.
 3. **Code removes each private word** with the scrub of the fault report (below). The transcript
@@ -956,6 +959,22 @@ keeps it (`feedback.py`):
      and a comment keeps the new caller's words.
    - The owner closed that issue as "not planned": the count goes up, with no comment and no new issue.
    - The owner closed that issue as completed: a new issue opens, because the fault is back after a fix.
+
+**The feedback agent.** The other agents hand such a caller to the `feedback` agent. A view about the
+owner, a plain question, or one answer that an agent can correct stays with the agent. The feedback
+agent asks at most two short questions, one at a time, and only for what the caller did not say yet:
+for a fault, what happened and what the caller expected; for an idea, what the line should do and why.
+It says the report back in one sentence. After the caller's yes, it calls `file_feedback`.
+
+- `file_feedback(kind, summary)` only keeps the report in the call context, at most 3 for one call.
+  No request leaves the server during the call. Its result gives the agent the words to say, and the
+  words promise no fix and no date.
+- After hangup, a kind that the agent filed counts as certain, as if the decision grader said yes. The
+  agent's summary goes to the grader model's prompt as a hint, marked as data. The public text still
+  comes from the grader model and the scrub; the words of the summary are scrubbed as words of the call.
+- The feedback agent has no transfer tool, so a report never rings the owner's phone.
+- A caller who asked to be forgotten files nothing: "forget me" clears the reports, and the call is not graded.
+- A text call (`uv run chat`) keeps the reports but opens no issue.
 
 An issue starts with two lines that code keeps current:
 
@@ -970,13 +989,16 @@ own caller. "Forget me" deletes the caller's rows from that table; the count in 
 
 Limits:
 
-- At most `FEEDBACK_DAILY_LIMIT` new issues in one day (default 3, US Eastern). A count has no limit.
+- The number of new issues in one day has no limit. An issue costs nothing. Before 2026-11-22 a limit
+  of 3 new issues in one day dropped each later report, and such a report was lost. The cost limits
+  are now on the jobs that an issue can start (the next section).
+- At most 3 items from one call.
 - A caller who asked to be forgotten gets no issue: that call is not graded.
-- An issue starts no fix job. A caller's words are not an instruction; the owner decides what becomes work.
 - The two models must agree on the kind: the grader model's item is dropped when the decision grader
-  did not say yes for that kind.
+  did not say yes for that kind, and the feedback agent filed no report of that kind.
 - `FEEDBACK_ISSUES=false` turns the step off. With no token or no repository, nothing is sent.
-- When the decision grader gives no answer for a call, no feedback is read from that call.
+- When the decision grader gives no answer for a call, only a report that the feedback agent filed
+  is read from that call.
 
 What this step cannot promise:
 
@@ -1000,6 +1022,81 @@ Set up: add the repository permission **Issues** (read and write) to the token `
 and make the two labels one time: `gh label create caller-fault` and `gh label create caller-idea`.
 Without the permission, the server log says "the caller's feedback did not get into GitHub: HTTPError:
 HTTP Error 403".
+
+### From an issue to a pull request: the queue, the triage agent, and two jobs
+
+An issue is the one place where work waits. A label says where an issue is, and a label is the only
+thing that starts a job (`issue_queue.py`, `.github/workflows/issues.yml`).
+
+| An issue with | What happens | Who decided |
+|---|---|---|
+| `caller-fault`, no other label | The triage agent sorts it (`triage.yml`). | The queue |
+| `caller-idea`, no other label | It gets `needs-owner`. No agent is asked. | Code: a feature is the owner's decision |
+| `auto-fix` | The fix job starts (`improve.yml`, scope `prompts`). | The triage agent, or the owner |
+| `needs-owner` | It waits. | The triage agent, or code |
+| `not-actionable` | It waits. No job can act on the text. | The triage agent |
+| `build` | The build job starts (`improve.yml`, scope `code`). | Only the owner |
+| `fix-started` | A job started. No second job starts. | The queue |
+
+**The triage agent** reads one issue and the prompts of the agents. Its only output is one label from
+the list `auto-fix`, `needs-owner`, `not-actionable`, and one short reason. It chooses `auto-fix` only
+when it can name the text that the change is in: a prompt, a handoff text, a tool's words, or a word
+list. A fault that needs code, and each thing about cost, privacy, the passphrase check or the owner's
+phone, goes to `needs-owner`. Code reads the answer: a label that is not in the list becomes
+`needs-owner`, and code sets the label and writes the comment. The agent's token can only read, and
+it has no tool that changes a file or runs a command.
+
+**The two jobs** are one workflow with two scopes:
+
+- **The fix job (scope `prompts`)** is the job that a failed rule starts, with the issue in place of
+  the fault report. It can change the same files, and the same guard checks it.
+- **The build job (scope `code`)** can change the code of the phone line (`src/ai_call_center/`), the
+  tests and this file. It cannot change the code that measures or judges a change: the scorer, the
+  guard, the queue, the grader and its rules, the scrub of the fault report, and the step that makes an
+  issue from a caller's words (`CODE_REFUSED` in `proposal.py`). It cannot change a workflow, a script,
+  or a dependency. The job also runs the formal check of caller memory. Its pull request is always a
+  draft, because the scorer measures the agents' words and not new code.
+
+The pull request says `Closes #N`, so a merge closes the issue. A job that opens no pull request
+writes the reason as a comment on the issue, removes `fix-started` and the label that started it, and
+sets `needs-owner`. To run the build job again, put `build` on the issue again.
+
+**The owner's label wins.** The owner can set `auto-fix` or `build` on an issue at any time, also on
+an issue that the owner wrote by hand. The queue reads the labels again on each run, and it sorts no
+issue a second time. To have an issue sorted again, remove its triage label.
+
+Who can start a job:
+
+- Only an issue that the owner of the repository wrote counts. The server opens a caller's issue with
+  the owner's token (`IMPROVE_GITHUB_TOKEN`). An issue that another person opens on GitHub starts
+  nothing, with each label. A comment on an issue is never read.
+- Only a person with rights on the repository can set a label.
+- Each job reads the issue itself and checks it again: the author, the label for its scope, and, for a
+  caller's issue, that each text holds only letters and plain punctuation. So a person who starts
+  `improve.yml` by hand with the number of an issue gets no more than the labels allow.
+- The text of a caller's issue is data for both agents. Each task says so, and the guard of the files
+  and the owner's review hold the result.
+
+Limits, each for one day (US Eastern). An issue past a limit waits for the next day; it is never dropped.
+
+- `TRIAGE_DAILY_LIMIT` triage runs (default 10).
+- `ISSUE_FIX_DAILY_LIMIT` fix jobs that start by themselves (default 2). The owner's `build` has no limit.
+- The triage agent gets 3 tries for one issue, one in a day. After 3 failed runs the issue gets
+  `needs-owner`, with a comment.
+
+The queue runs on each new issue, on each change of a label by a person, and each morning. It reads
+all open issues and does only what is not done, so a lost event loses no work. It needs no new secret:
+the token of its own run sets the labels and starts the two other workflows. Optional repository
+variables: `TRIAGE_MODEL`, `BUILD_MODEL`, `TRIAGE_DAILY_LIMIT`, `ISSUE_FIX_DAILY_LIMIT`.
+
+What this does not promise:
+
+- The triage agent can be wrong. A wrong `auto-fix` costs one fix job, whose pull request the owner
+  reviews. A wrong `needs-owner` costs the owner one label.
+- Each fix adds a made-up call at the end of `evals/calls.json`. Two open pull requests then change
+  the same lines, and the second one needs a merge of `main` before it can merge.
+- A pull request that the owner closes with no merge leaves `fix-started` on its issue. Remove the
+  label to run a job again, or close the issue.
 
 ### A message is saved only after the caller's yes
 

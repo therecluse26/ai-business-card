@@ -1,0 +1,120 @@
+# The queue of GitHub issues: from a caller's feedback to a job that works on it. Nobody starts it by hand.
+#
+# The phone server opens an issue for a fault that a caller reported, and for a feature that a caller asked
+# for (src/ai_call_center/feedback.py). This workflow reads each open issue and its labels, and does what is
+# still open to do (src/ai_call_center/issue_queue.py):
+#
+#   a new fault (`caller-fault`)   starts the triage agent (triage.yml). It answers with one label:
+#                                  `auto-fix`, `needs-owner` or `not-actionable`.
+#   a new idea (`caller-idea`)     gets the label `needs-owner`. A feature is the owner's decision: no agent is asked.
+#   `auto-fix`                     starts the fix job (improve.yml, scope prompts). It can change a prompt or a word list.
+#   `build` (the owner's label)    starts the build job (improve.yml, scope code). It can change the code of the phone line.
+#
+# The label `fix-started` says that a job started for the issue. A job that opens no pull request removes
+# it, and puts the issue back to `needs-owner` with a comment.
+#
+# The workflow is safe to run at any time: it reads all open issues and acts only on what is not done. So an
+# event that GitHub drops, or a run that fails, loses nothing: the next event or the run of each morning
+# does the work.
+#
+# Who can start a job:
+#   - Only an issue that the owner of the repository wrote counts. The server opens a caller's issue with the
+#     owner's token. An issue that another person opens on GitHub starts nothing.
+#   - Only a person with rights on the repository can set a label. A comment on an issue is never read.
+#   - This workflow runs no agent and no line from an issue. It reads labels and starts workflows.
+#
+# The limits are where the cost is, each for one day (US Eastern). An issue past a limit waits for the next day.
+# Optional repository variables:
+#   - TRIAGE_DAILY_LIMIT     triage runs in one day (default 10)
+#   - ISSUE_FIX_DAILY_LIMIT  fix jobs in one day that started by themselves (default 2). `build` has no limit.
+name: Queue of issues
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled]
+  schedule:
+    - cron: "23 10 * * *" # each morning: 5:23 AM or 6:23 AM US Eastern
+  workflow_dispatch:
+
+# One run at a time. A run that waits can be replaced by a newer one; the newer one does the same work.
+# An issue of another person starts no job below, and it gets a group of its own, so it cannot replace a run that waits.
+concurrency:
+  group: ${{ (github.event_name != 'issues' || github.event.issue.user.login == github.repository_owner) && 'issue-queue' || format('issue-queue-not-the-owner-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  queue:
+    if: github.event_name != 'issues' || github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write # set a label, write the comment for a new idea
+      actions: write # read the runs of today, start triage.yml and improve.yml
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Make the labels of the queue
+        run: |
+          set -euo pipefail
+          uv run issue-queue labels > "$RUNNER_TEMP/labels.tsv"
+          while IFS=$'\t' read -r name color text; do
+            gh label create "$name" --color "$color" --description "$text" --force
+          done < "$RUNNER_TEMP/labels.tsv"
+
+      - name: Plan what to do
+        env:
+          TRIAGE_DAILY_LIMIT: ${{ vars.TRIAGE_DAILY_LIMIT }}
+          ISSUE_FIX_DAILY_LIMIT: ${{ vars.ISSUE_FIX_DAILY_LIMIT }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues?state=open&creator=${GITHUB_REPOSITORY_OWNER}&per_page=100" > "$RUNNER_TEMP/issues.json"
+          # The newest 100 runs of each workflow: many more than the limits of one day.
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/triage.yml/runs?per_page=100" > "$RUNNER_TEMP/triage-runs.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/improve.yml/runs?per_page=100" > "$RUNNER_TEMP/fix-runs.json"
+          uv run issue-queue plan --issues "$RUNNER_TEMP/issues.json" --triage-runs "$RUNNER_TEMP/triage-runs.json" --fix-runs "$RUNNER_TEMP/fix-runs.json" > "$RUNNER_TEMP/plan.txt"
+          if [ -s "$RUNNER_TEMP/plan.txt" ]; then cat "$RUNNER_TEMP/plan.txt"; else echo "Nothing to do."; fi | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Do it
+        run: |
+          set -euo pipefail
+          add_label() { gh api "repos/${GITHUB_REPOSITORY}/issues/$1/labels" --method POST -f "labels[]=$2" --silent; }
+          say() { gh api "repos/${GITHUB_REPOSITORY}/issues/$1/comments" --method POST -F body=@"$2" --silent; }
+          failed=0
+          # Each line is: a verb, the number of an issue, and a detail. Code wrote each word (issue-queue plan).
+          # The plan comes in on its own channel (3), so a command in the loop cannot read a line of it.
+          while read -r verb number detail <&3; do
+            case "$number" in ''|*[!0-9]*) continue ;; esac
+            case "$verb" in
+              triage)
+                gh workflow run triage.yml --ref "$GITHUB_REF_NAME" -f issue="$number" || failed=1 ;;
+              label)
+                uv run issue-queue comment --label "$detail" --out "$RUNNER_TEMP/comment.md"
+                { add_label "$number" "$detail" && say "$number" "$RUNNER_TEMP/comment.md"; } || failed=1 ;;
+              giveup)
+                uv run issue-queue comment --label triage-failed --out "$RUNNER_TEMP/comment.md"
+                { add_label "$number" needs-owner && say "$number" "$RUNNER_TEMP/comment.md"; } || failed=1 ;;
+              start)
+                # The label first: when the start fails, the label goes again, and the next run tries one more time.
+                if add_label "$number" fix-started; then
+                  if ! gh workflow run improve.yml --ref "$GITHUB_REF_NAME" -f issue="$number" -f scope="$detail"; then
+                    gh api "repos/${GITHUB_REPOSITORY}/issues/${number}/labels/fix-started" --method DELETE --silent || true
+                    failed=1
+                  fi
+                else
+                  failed=1
+                fi ;;
+              wait)
+                echo "Issue #${number} waits: ${detail}" ;;
+            esac
+          done 3< "$RUNNER_TEMP/plan.txt"
+          exit "$failed"

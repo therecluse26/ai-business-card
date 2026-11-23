@@ -40,6 +40,7 @@ call-report = "ai_call_center.analytics:main"
 check-grader = "ai_call_center.check_grader:main"
 score-harness = "ai_call_center.score:main"
 proposal = "ai_call_center.proposal:main"
+issue-queue = "ai_call_center.issue_queue:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]

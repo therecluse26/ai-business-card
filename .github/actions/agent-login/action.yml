@@ -1,0 +1,51 @@
+# One step for each job that runs the coding agent (improve.yml, triage.yml).
+#
+# A secret with a fault gives "Not logged in" much later, with no reason. This step says the fault at once.
+# A token that was copied from a terminal can hold a line break or a space. A token has no white space,
+# so the step removes it. It prints the length of the token and never the token.
+name: Check the login of the coding agent
+description: Stop at once when the job has no login for the coding agent, and give the subscription token with no white space.
+
+inputs:
+  token:
+    description: The repository secret CLAUDE_CODE_OAUTH_TOKEN, or empty
+    required: false
+    default: ""
+  key:
+    description: The repository secret ANTHROPIC_API_KEY, or empty
+    required: false
+    default: ""
+
+outputs:
+  token:
+    description: The subscription token with no white space; empty when the coding agent uses the API key
+    value: ${{ steps.check.outputs.token }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        KEY: ${{ inputs.key }}
+      run: |
+        if [ -z "$TOKEN" ] && [ -z "$KEY" ]; then
+          echo "::error::No login for the coding agent. Add the repository secret CLAUDE_CODE_OAUTH_TOKEN (from 'claude setup-token') or ANTHROPIC_API_KEY."
+          exit 1
+        fi
+        if [ -z "$TOKEN" ]; then echo "The coding agent uses ANTHROPIC_API_KEY."; exit 0; fi
+        clean="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"
+        if [ "${#clean}" -lt 40 ]; then
+          echo "::error::The secret CLAUDE_CODE_OAUTH_TOKEN is not a token: ${#TOKEN} characters, ${#clean} of them not white space. Run 'claude setup-token' and set the secret again."
+          exit 1
+        fi
+        echo "::add-mask::$clean"
+        if [ "${#clean}" != "${#TOKEN}" ]; then
+          echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN holds $(( ${#TOKEN} - ${#clean} )) white space character(s). The job removed them. Set the secret again, with the token on one line, to end this warning."
+        fi
+        echo "token=$clean" >> "$GITHUB_OUTPUT"
+        case "$clean" in
+          sk-ant-oat*) echo "The coding agent uses the subscription token (${#clean} characters, the expected start)." ;;
+          *) echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN does not start with sk-ant-oat. A token from 'claude setup-token' does." ;;
+        esac

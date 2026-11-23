@@ -140,6 +140,48 @@ def test_each_command_of_the_fix_job_runs_as_the_workflow_calls_it(repo: Path, t
         assert used and used <= set(outputs), f"the workflow reads an output of the step `{step}` that the command does not write"
 
 
+def test_the_build_job_for_an_issue_runs_the_same_commands_with_the_scope_code(repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The owner's label `build` starts the same workflow for an issue. The step "Read the issue" wrote the file;
+    here it is a made-up issue. The agent adds a module and changes the README, which the scope `prompts` refuses."""
+    temp = tmp_path / "runner"
+    temp.mkdir()
+    task, _, guard, before, after, body = workflow_commands(temp)
+    found = {"number": 12, "title": "Add a goodbye line", "body": "Each agent says goodbye before the call ends.", "state": "open", "user": {"login": "Ann-Lee"}, "labels": [{"name": "build"}]}
+    (temp / "issue.json").write_text(json.dumps(found), encoding="utf-8")
+    for name, value in {"FIX_ISSUE": "12", "FIX_SCOPE": "code", "FIX_ISSUE_FILE": str(temp / "issue.json"), "GITHUB_REPOSITORY_OWNER": "Ann-Lee", "FIX_RULE": "", "FIX_VERSION": ""}.items():
+        monkeypatch.setenv(name, value)
+    # The workflow gives these names to the steps: the scope and the file of the issue.
+    assert "FIX_SCOPE: ${{ inputs.issue != '' && inputs.scope || 'prompts' }}" in WORKFLOW and WORKFLOW.count('echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"') == 2
+
+    run(task, monkeypatch, temp / "outputs")
+    text = (temp / "task.md").read_text(encoding="utf-8")
+    assert "GitHub issue #12" in text and "Each agent says goodbye before the call ends." in text and "src/ai_call_center/score.py" in text
+
+    the_coding_agent_makes_a_change(repo)
+    (repo / "src/ai_call_center/goodbye.py").write_text('GOODBYE = "Goodbye."\n', encoding="utf-8")
+    (repo / "README.md").write_text("Each agent says goodbye.\n", encoding="utf-8")
+    git("add", "-A", "--", "src", "tests", "evals", "README.md")  # the step "Make a patch of the change", for the scope code
+    (temp / "change.patch").write_text(git("diff", "--cached", "--binary", "HEAD"), encoding="utf-8")
+    git("reset", "-q", "--hard", "HEAD")
+
+    monkeypatch.setenv("FIX_SCOPE", "prompts")  # the same patch with the scope of the fix job: refused, and nothing is applied
+    with pytest.raises(AssertionError, match="exit code 1"):
+        run(guard, monkeypatch, temp / "outputs")
+    assert not (repo / "README.md").exists()
+    monkeypatch.setenv("FIX_SCOPE", "code")
+
+    assert run(guard, monkeypatch, temp / "outputs") == {"changed": "true", "new_calls": NEW_CALL}
+    assert (repo / "src/ai_call_center/goodbye.py").exists() and (repo / "README.md").exists()
+    run(before, monkeypatch, temp / "outputs")
+    run(after, monkeypatch, temp / "outputs")
+    monkeypatch.setenv("AGENT_ANSWER", json.dumps({"changed": True, "title": "Each agent says goodbye", "reason": "The line must say goodbye.", "change": "A new module.", "made_up_call": NEW_CALL}))
+    assert run(body, monkeypatch, temp / "outputs") == {"verdict": "same", "title": "Each agent says goodbye"}
+    text = (temp / "body.md").read_text(encoding="utf-8")
+    assert text.startswith("Closes #12.") and "`src/ai_call_center/goodbye.py`" in text and "This job could change the code of the phone line" in text
+    # A change of code is always a draft, also when the scorer shows it as better.
+    assert 'if [ "$VERDICT" != "better" ] || [ "$FIX_SCOPE" = code ]; then draft=true; fi' in WORKFLOW
+
+
 def test_the_flags_of_the_made_up_calls_are_flags_of_the_scorer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The job adds `--calls` and `--only ID` when the made-up calls run. Here the scorer only reads its flags:
     its run is a fake, and its test set is an empty folder, so no model gets a request."""

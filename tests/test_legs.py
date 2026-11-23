@@ -143,6 +143,7 @@ NOVA_KEYS = {"nova_aws_access_key_id": "AKIATEST", "nova_aws_secret_access_key":
 def test_agent_legs_setting_moves_an_agent_and_rejects_a_typing_mistake():
     assert parse_agent_legs("") == {}
     assert parse_agent_legs("consultant=nova_sonic, tour = gemini_live") == {"consultant": "nova_sonic", "tour": "gemini_live"}
+    assert parse_agent_legs("feedback=gemini_live") == {"feedback": "gemini_live"}
     with pytest.raises(ValueError, match="unknown voice leg"):
         parse_agent_legs("consultant=nova")
     with pytest.raises(ValueError, match="unknown agent"):

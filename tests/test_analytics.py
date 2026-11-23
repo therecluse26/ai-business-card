@@ -228,6 +228,30 @@ async def test_a_caller_who_asked_to_be_forgotten_gets_no_record_and_loses_an_ea
     assert AnalyticsStore(session.settings.leads_db).calls() == []
 
 
+async def test_a_report_that_the_feedback_agent_filed_goes_to_the_feedback_step_and_a_forgotten_one_does_not(tmp_path, ctx, monkeypatch):
+    from ai_call_center.graph.tools import file_report, forget
+    from ai_call_center.voice import call_session
+
+    calls = []
+
+    async def report(settings, db, lines, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(call_session, "report_feedback", report)
+    session = _session(tmp_path)
+    await session._record_analytics(ctx, _stats(), MESSAGES, visited=["classifier"], outcome=NO_OUTCOME, summary_tries=0)
+    assert calls == []  # no decision grader and no filed report: nothing to do
+    file_report(ctx, "fault", "The tour agent's answer stopped in the middle.")
+    await session._record_analytics(ctx, _stats(), MESSAGES, visited=["classifier", "feedback"], outcome=NO_OUTCOME, summary_tries=0)
+    [kwargs] = calls
+    assert kwargs["filed"] == [("fault", "The tour agent's answer stopped in the middle.")] and kwargs["chances"] == {}
+    forget(ctx)
+    ctx.feedback_filed.append(("fault", "Filed after the caller asked to be forgotten."))
+    await session._record_analytics(ctx, _stats(), MESSAGES, visited=["classifier", "feedback"], outcome=NO_OUTCOME, summary_tries=0)
+    assert len(calls) == 1  # a forgotten call is not graded, so nothing of it is filed
+
+
 async def test_a_failure_in_the_analytics_does_not_stop_the_end_of_a_call(tmp_path, ctx):
     session = _session(tmp_path)
     await session._record_analytics(ctx, object(), MESSAGES, visited=["classifier"], outcome=NO_OUTCOME, summary_tries=0)  # type: ignore[arg-type]

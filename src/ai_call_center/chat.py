@@ -202,6 +202,9 @@ async def run(caller_number: str = "+10000000000") -> None:
             print(f"[grade: {describe_scores(record.scores)}]")
         except Exception as exc:  # noqa: BLE001 - the grade must not hide the end of the session
             print(f"[the call was not graded: {type(exc).__name__}: {exc}]")
+        if ctx.feedback_filed:
+            # Only a phone call turns a filed report into a GitHub issue (voice/call_session.py).
+            print(f"[{len(ctx.feedback_filed)} report(s) filed by the feedback agent; a text call opens no GitHub issue]")
     leads = ctx.leads.all()
     print(f"\n[hung up] active agent: {active}; leads saved this process: {len(leads)}")
     if isinstance(notifier, RecordingNotifier) and notifier.sent:

@@ -495,10 +495,10 @@ def test_the_greeting_says_whose_line_this_is_and_asks_who_is_calling(specs):
     from ai_call_center.voice.call_session import connect_message
 
     assert opening_line("Ada Lovelace") == (
-        "Hi, you've reached Ada Lovelace's AI business card. I'm one of five AI agents Ada built, and this call is a live sample of the work Ada does for clients."
+        "Hi, you've reached Ada Lovelace's AI business card. I'm one of six AI agents Ada built, and this call is a live sample of the work Ada does for clients."
     )
     # A brand name comes first, and the owner's full name stays in the greeting.
-    assert opening_line("Ada Lovelace", "Analytical Engines").startswith("Hi, you've reached Analytical Engines. I'm one of five AI agents Ada Lovelace built,")
+    assert opening_line("Ada Lovelace", "Analytical Engines").startswith("Hi, you've reached Analytical Engines. I'm one of six AI agents Ada Lovelace built,")
     branded = build_specs(Profile(summary="x", full="x"), owner_name="Ada Lovelace", brand_name="Analytical Engines")
     assert all("Analytical Engines is the name that Ada Lovelace works under" in s.instructions for s in branded.values())
     assert greeting_words("Ada Lovelace", "Analytical Engines") in branded["classifier"].instructions
@@ -608,3 +608,72 @@ async def test_a_message_that_waited_for_a_yes_is_saved_when_the_call_ends(ctx, 
 def test_an_agent_asked_for_by_its_own_name_stays_on_the_call(specs):
     assert "If the caller asks for the contact agent, that is you" in specs["contact"].instructions
     assert "If the caller asks for the tour agent, that is you" in specs["tour"].instructions
+
+
+# --- the feedback agent ---
+
+
+async def test_file_feedback_records_the_report_in_the_call_and_sends_nothing(make_graph, ctx, config, notifier, telephony):
+    from ai_call_center.agents.specs import feedback_filed
+
+    ctx.owner_name = "Ada Lovelace"
+    summary = "The tour agent's answer about the cost stopped in the middle."
+    model = scripted(tool_call("file_feedback", kind="fault", summary=summary), "Thanks, that's filed.")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Yes, that is right.")], "active_agent": "feedback"}, config=config, context=ctx)
+
+    assert ctx.feedback_filed == [("fault", summary)]
+    words = [m.content for m in result["messages"] if isinstance(m, ToolMessage)][-1]
+    assert words.startswith(f'Say exactly these words to the caller, and nothing else: "{feedback_filed("Ada Lovelace")}"')
+    assert "Then ask if there is anything else." in words
+    assert notifier.sent == [] and telephony.transfers == []  # no email, no call, no request during the call
+
+
+def test_the_words_after_a_filed_report_are_true_and_promise_no_fix():
+    from ai_call_center.agents.specs import feedback_filed
+
+    words = feedback_filed("Ada Lovelace")
+    assert words == "Thanks, that's filed. When this call ends, it goes to Ada's issue list on GitHub, and Ada decides what to work on."
+    assert not any(word in words.lower() for word in ("fix", "will be", "today", "tomorrow", "soon"))
+    assert "the owner's issue list" in feedback_filed("")
+
+
+def test_file_feedback_checks_the_kind_and_keeps_at_most_the_items_of_one_call(ctx):
+    from ai_call_center.feedback import MAX_ITEMS
+    from ai_call_center.graph.tools import file_report
+
+    assert file_report(ctx, "complaint", "The agent was rude.").startswith("Not filed: kind must be")
+    assert file_report(ctx, "idea", "   ").startswith("Not filed: the summary is empty.")
+    assert ctx.feedback_filed == []
+    assert file_report(ctx, " Idea ", "The line  should speak Spanish.").startswith("Say exactly these words")
+    assert file_report(ctx, "idea", "The line should speak Spanish.").startswith("Filed already on this call.")
+    for n in range(MAX_ITEMS):
+        file_report(ctx, "fault", f"Fault number {n} of the line.")
+    assert len(ctx.feedback_filed) == MAX_ITEMS and ctx.feedback_filed[0] == ("idea", "The line should speak Spanish.")
+    assert file_report(ctx, "fault", "One more fault.").startswith(f"Not filed: one call can file {MAX_ITEMS} reports at most")
+
+
+def test_a_caller_who_asked_to_be_forgotten_files_nothing(ctx):
+    from ai_call_center.graph.tools import file_report, forget
+
+    file_report(ctx, "fault", "The agent went silent after a handoff.")
+    forget(ctx)
+    assert ctx.feedback_filed == []  # "forget me" removes what was filed before it
+    assert file_report(ctx, "idea", "The line should speak Spanish.").startswith("Not filed: the caller asked to be forgotten")
+    assert ctx.feedback_filed == []
+
+
+def test_each_other_agent_routes_feedback_in_one_line_and_the_tour_agent_explains_it(specs):
+    routing = "If the caller reports a fault of this phone line or asks for a feature of it, hand off to the feedback agent."
+    assert all(spec.instructions.count(routing) == 1 for name, spec in specs.items() if name != "feedback")
+    assert routing not in specs["feedback"].instructions
+    assert "a report becomes a GitHub issue, a triage agent sorts it, and a coding agent can open a pull request" in specs["tour"].instructions
+    assert all("one of six AI voice agents" in spec.instructions for spec in specs.values())
+
+
+def test_the_feedback_agent_asks_two_questions_at_most_and_reads_the_report_back(specs):
+    text = specs["feedback"].instructions
+    assert "two questions at most" in text and "Ask only for what the caller has not said yet" in text
+    assert "what happened, and what the caller expected" in text and "what the line should do, and why" in text
+    assert 'say the report back in one sentence, and ask: "Is that right?"' in text and "After a yes, call file_feedback, in silence." in text
+    assert "Never promise a fix, a date, or a call from" in text
+    assert "request_owner_transfer" not in specs["feedback"].tools

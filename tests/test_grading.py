@@ -49,6 +49,17 @@ def test_the_introduction_lines_must_come_in_the_order_of_the_handoffs():
     assert verdicts(code_scores(lines, visited=["classifier", "tour", "contact"]))["handoff_intro"] == FAIL
 
 
+def test_the_feedback_agent_is_an_agent_that_the_grader_can_name():
+    from ai_call_center.decision_grader import ENTRY_AGENT
+    from ai_call_center.grading import AGENTS
+
+    assert "feedback" in AGENTS and ENTRY_AGENT == "classifier"
+    lines = ["caller: Your answer cut off.", "agent: Hi, I'm the feedback agent, running on OpenAI. What did you expect?", "caller: The whole answer.", "agent: Hi, I'm the classifier agent, running on OpenAI."]
+    assert verdicts(code_scores(lines, visited=["classifier", "feedback", "classifier"]))["handoff_intro"] == PASS
+    score = next(score for score in code_scores(lines[:1], visited=["classifier", "feedback"]) if score.rule == "handoff_intro")
+    assert score.verdict == FAIL and score.agent == "feedback"
+
+
 def test_a_call_with_no_handoff_and_no_summary_has_two_rules_that_do_not_apply():
     scores = verdicts(code_scores(CALL[:3], visited=["classifier"]))
     assert scores["handoff_intro"] == NA and scores["summary_first_try"] == NA

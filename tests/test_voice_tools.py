@@ -18,16 +18,43 @@ def test_every_graph_tool_has_a_voice_schema(specs):
 def test_agent_tool_sets_match_text_mode(specs):
     schemas = voice_tool_schemas(specs)
     names = {name: [t.name for t in tools_for_agent(spec, schemas).standard_tools] for name, spec in specs.items()}
-    assert names["classifier"] == ["identify_caller", "verify_passphrase", "forget_caller", "end_call", "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact"]
+    assert names["classifier"] == [
+        "identify_caller", "verify_passphrase", "forget_caller", "end_call",
+        "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact", "transfer_to_feedback",
+    ]  # fmt: skip
     assert names["contact"][:3] == ["save_lead", "set_passphrase", "request_owner_transfer"]
     assert "transfer_to_contact" not in names["contact"]
     assert all("end_call" in tools for tools in names.values())  # any agent can hang up after a goodbye
+
+
+def test_every_agent_can_reach_the_feedback_agent_and_it_can_hand_back(specs):
+    schemas = voice_tool_schemas(specs)
+    names = {name: [t.name for t in tools_for_agent(spec, schemas).standard_tools] for name, spec in specs.items()}
+    assert all("transfer_to_feedback" in tools for agent, tools in names.items() if agent != "feedback")
+    assert names["feedback"] == [
+        "file_feedback", "forget_caller", "end_call",
+        "transfer_to_classifier", "transfer_to_profile", "transfer_to_tour", "transfer_to_consultant", "transfer_to_contact",
+    ]  # fmt: skip
+    # A report about the line never rings the owner's phone.
+    assert "request_owner_transfer" not in names["feedback"] and "save_lead" not in names["feedback"]
+    feedback = schemas["file_feedback"]
+    assert feedback.required == ["kind", "summary"] and set(feedback.properties) == {"kind", "summary"}
 
 
 def test_each_agent_has_its_own_voice(specs):
     voices = [spec.voice for spec in specs.values()]
     assert len(set(voices)) == len(voices)
     assert specs["classifier"].voice == DEFAULT_VOICES["classifier"]
+
+
+def test_the_feedback_agent_has_a_voice_that_no_other_agent_on_its_leg_uses():
+    from ai_call_center.agents.specs import DEFAULT_LEGS, LEG_VOICES
+
+    # Nova has three English voices, so agents share them there. The other legs have a voice for each agent.
+    for leg in ("openai_realtime", "gemini_live"):
+        others = {agent: voice for agent, voice in LEG_VOICES[leg].items() if agent != "feedback"}
+        assert LEG_VOICES[leg]["feedback"] not in others.values()
+    assert set(LEG_VOICES["nova_sonic"]) == set(DEFAULT_LEGS)  # a move to Nova still finds a voice
 
 
 # --- a handoff: the agent that gets the call answers the caller ---

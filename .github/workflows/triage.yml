@@ -1,0 +1,152 @@
+# The triage agent sorts one issue that a caller's fault report opened. The queue starts this workflow
+# (issues.yml); nobody starts it by hand.
+#
+# The agent's only output is one label from a fixed list and one short reason:
+#   auto-fix        a change of a prompt or a word list can repair the fault. The fix job then starts by itself.
+#   needs-owner     the owner decides: the fault needs code, or it is about cost, privacy or the owner's phone.
+#   not-actionable  no job can act on the text.
+#
+# Two jobs, so the agent never has a token that can write:
+#   sort   the agent reads the issue and the prompts. Its token can only read, and it has no tool that
+#          changes a file or runs a command. Its answer leaves this job as one JSON object.
+#   label  code reads the answer (src/ai_call_center/issue_queue.py). A label that is not in the fixed list
+#          becomes `needs-owner`. Code sets the label and writes the comment. Then it starts the queue again,
+#          so `auto-fix` starts the fix job.
+#
+# The text of the issue is data for the agent. A model on the server wrote it from a call, code removed each
+# private word, and code here checks it again: the owner of the repository is the author of the issue, and
+# the text holds only letters and plain punctuation. The owner can change the label at any time.
+#
+# Needs the same login as the fix job: the repository secret CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.
+# Optional repository variable:
+#   - TRIAGE_MODEL  the model of the triage agent (default: claude-opus-5-5)
+name: Triage of an issue
+# The queue counts the triage runs of one day by this name (TRIAGE_RUN in issue_queue.py).
+run-name: "Triage of issue #${{ inputs.issue }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: "The number of the GitHub issue"
+        required: true
+        type: string
+
+concurrency:
+  group: triage-${{ inputs.issue }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # The input goes to the steps as an environment value, never as text inside a command.
+  QUEUE_ISSUE: ${{ inputs.issue }}
+
+jobs:
+  sort:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      answer: ${{ steps.agent.outputs.structured_output }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Read the issue and write the task
+        id: task
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$QUEUE_ISSUE" in ''|*[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${QUEUE_ISSUE}" > "$RUNNER_TEMP/issue.json"
+          uv run issue-queue task --issue-file "$RUNNER_TEMP/issue.json" --out "$RUNNER_TEMP/task.md" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo 'text<<END_OF_TASK_41d9a3'
+            cat "$RUNNER_TEMP/task.md"
+            echo
+            echo 'END_OF_TASK_41d9a3'
+            echo "schema=$(uv run issue-queue schema)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check the login of the triage agent
+        id: login
+        uses: ./.github/actions/agent-login
+        with:
+          token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: The triage agent sorts the issue
+        id: agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ steps.login.outputs.token }}
+          # Claude Code uses an API key before a subscription token. So the key is given only when there is no token.
+          anthropic_api_key: ${{ !secrets.CLAUDE_CODE_OAUTH_TOKEN && secrets.ANTHROPIC_API_KEY || '' }}
+          github_token: ${{ github.token }}
+          prompt: ${{ steps.task.outputs.text }}
+          claude_args: |
+            --model ${{ vars.TRIAGE_MODEL || 'claude-opus-5-5' }}
+            --max-turns 20
+            --permission-mode default
+            --allowedTools "Read,Grep,Glob"
+            --disallowedTools "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch"
+            --json-schema '${{ steps.task.outputs.schema }}'
+
+      - name: Why the triage agent failed
+        if: failure() && steps.agent.conclusion == 'failure'
+        run: |
+          file="$RUNNER_TEMP/claude-execution-output.json"
+          if [ ! -f "$file" ]; then echo "The triage agent wrote no output file." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          jq -rs 'flatten | .[] | if .type == "result" then "result: \(.subtype), error: \(.is_error), turns: \(.num_turns)\n\((.result // "") | tostring | .[0:800])" elif (.type == "assistant" and .error != null) then "error of the model request: \(.error)" else empty end' "$file" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # A job of its own: this runner did not run the agent, so the token that can write is safe here.
+  label:
+    needs: sort
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # set the label, write the comment
+      actions: write # start the queue again
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Read the agent's answer
+        id: decide
+        env:
+          AGENT_ANSWER: ${{ needs.sort.outputs.answer }}
+        run: |
+          set -euo pipefail
+          case "$QUEUE_ISSUE" in ''|*[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
+          # The issue as it is now: the owner can have set a label while the agent read it. Then nothing is set.
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${QUEUE_ISSUE}" > "$RUNNER_TEMP/issue.json"
+          uv run issue-queue decide --issue-file "$RUNNER_TEMP/issue.json" --out "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set the label and write the comment
+        if: steps.decide.outputs.label != ''
+        env:
+          LABEL: ${{ steps.decide.outputs.label }}
+        run: |
+          set -euo pipefail
+          case "$LABEL" in
+            auto-fix|needs-owner|not-actionable) label="$LABEL" ;;
+            *) echo "::error::The label is not one of the fixed list."; exit 1 ;;
+          esac
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${QUEUE_ISSUE}/labels" --method POST -f "labels[]=${label}" --silent
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${QUEUE_ISSUE}/comments" --method POST -F body=@"$RUNNER_TEMP/comment.md" --silent
+          # A label that the token of a job set starts no workflow. So this step starts the queue: it starts the fix job.
+          if [ "$label" = auto-fix ]; then gh workflow run issues.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"; fi

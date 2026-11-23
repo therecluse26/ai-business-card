@@ -17,6 +17,7 @@ from ai_call_center.agents.specs import (
     PASSPHRASE_SET,
     PASSPHRASE_SKIPPED,
     PASSPHRASE_WRONG,
+    feedback_filed,
     passphrase_question,
     passphrase_read_back,
     passphrase_right,
@@ -24,6 +25,7 @@ from ai_call_center.agents.specs import (
 from ai_call_center.analytics import AnalyticsStore
 from ai_call_center.caller_voice import voice_sentence, voice_summary
 from ai_call_center.decisions import Decision
+from ai_call_center.feedback import FAULT, IDEA, MAX_ITEMS
 from ai_call_center.graph.state import CallContext, CallState
 from ai_call_center.callers import UNKNOWN_NUMBERS, CallSummary, history_text, recall, transcript_lines
 from ai_call_center.leads import Lead, now_iso
@@ -174,6 +176,7 @@ def forget(ctx: CallContext) -> tuple[str, list[str]]:
     ctx.caller_history, ctx.identity_confirmed, ctx.returning_name = "", False, ""
     ctx.identity_verified, ctx.open_calls, ctx.phrase_closed, ctx.held_phrase, ctx.phrase_set = False, [], True, "", False
     ctx.held_message, ctx.refused_transfer = None, None
+    ctx.feedback_filed.clear()  # a forgotten call is not graded, so no report of it reaches GitHub
     ctx.voice_readings.clear()  # and the voice reader hears no more of this call
     log.info("call %s: the caller asked to be forgotten (%d earlier calls, %d messages)", ctx.call_control_id, len(call_ids), len(leads))
     owner = ctx.owner_name.split()[0] if ctx.owner_name.strip() else "the owner"
@@ -457,6 +460,37 @@ def set_passphrase(passphrase: str, runtime: ToolRuntime[CallContext, CallState]
 def forget_caller(runtime: ToolRuntime[CallContext, CallState]) -> str:
     """Delete what this line knows about the caller, and do not save this call. Call it only after the caller asked to be forgotten and said yes to your one question. The result gives the exact words to say."""
     return forget(runtime.context)[0]
+
+
+def file_report(ctx: CallContext, kind: str, summary: str) -> str:
+    """The feedback agent read a report back, and the caller said yes. It is kept in the call context only:
+    no request leaves the server during the call. After hangup it makes `feedback.report_feedback` run.
+    Shared by text and voice modes."""
+    kind, summary = kind.strip().lower(), " ".join(summary.split())
+    if ctx.forgotten:
+        return "Not filed: the caller asked to be forgotten, so this line keeps nothing from this call. Say that in one sentence, and ask if there is anything else."
+    if kind not in (FAULT, IDEA):
+        return f'Not filed: kind must be "{FAULT}" or "{IDEA}". Call file_feedback again, in silence, with one of them.'
+    if not summary:
+        return "Not filed: the summary is empty. Call file_feedback again, in silence, with the one sentence that the caller said yes to."
+    if (kind, summary) in ctx.feedback_filed:
+        return "Filed already on this call. Do not file it again. Ask if there is anything else."
+    if len(ctx.feedback_filed) >= MAX_ITEMS:
+        return f"Not filed: one call can file {MAX_ITEMS} reports at most, and this call has them. Say that in one sentence, and ask if there is anything else."
+    ctx.feedback_filed.append((kind, summary))
+    log.info("call %s: the feedback agent filed a report (%s)", ctx.call_control_id, kind)
+    return f"{_say(feedback_filed(ctx.owner_name))} Then ask if there is anything else. Never promise a fix or a date."
+
+
+@tool
+def file_feedback(kind: str, summary: str, runtime: ToolRuntime[CallContext, CallState]) -> str:
+    """File the caller's report about this phone line: a fault, or an idea for a feature. Call it once for each report, in silence, after the caller said yes to your one-sentence read-back. The result gives the exact words to say next.
+
+    Args:
+        kind: "fault" when something on the line went wrong, "idea" when the caller asks for a feature.
+        summary: Your one-sentence report, as the caller confirmed it.
+    """
+    return file_report(runtime.context, kind, summary)
 
 
 async def text_portfolio_link_to_caller(ctx: CallContext, *, owner_name: str) -> str:

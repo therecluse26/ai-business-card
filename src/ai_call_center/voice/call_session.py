@@ -91,6 +91,7 @@ from ai_call_center.graph.tools import (
     asked_for_the_owner,
     confirmed_the_message,
     describe_call,
+    file_report,
     forget,
     identify,
     message_confirm_question,
@@ -701,12 +702,15 @@ class CallSession:
             # A failed rule starts the job that proposes a fix. A test call can start it too: it shows the loop with no caller.
             await request_fixes(self.settings, self.settings.leads_db, record, report=fault_of)
             # What the caller said aloud about the line: a fault or a wish for a feature. It becomes a GitHub issue (feedback.py).
-            if decider is not None and decider.last_answers:
+            # A report that the feedback agent filed counts as certain, also with no answer from the decision grader.
+            answers = decider.last_answers if decider is not None else {}
+            if answers or ctx.feedback_filed:
                 await report_feedback(
                     self.settings,
                     self.settings.leads_db,
                     lines,
-                    chances=feedback_chances(decider.last_answers),
+                    chances=feedback_chances(answers),
+                    filed=ctx.feedback_filed,
                     model=grader,
                     call_id=self.call_control_id,
                     caller_number=ctx.caller_number,
@@ -1124,6 +1128,10 @@ class CallSession:
         async def on_set_passphrase(params: FunctionCallParams) -> None:
             await params.result_callback(set_phrase(ctx, str(params.arguments.get("passphrase") or "")))
 
+        async def on_file_feedback(params: FunctionCallParams) -> None:
+            # Kept in the call context only. The GitHub issue is made after hangup (`_record_analytics`).
+            await params.result_callback(file_report(ctx, str(params.arguments.get("kind") or ""), str(params.arguments.get("summary") or "")))
+
         async def on_forget_caller(params: FunctionCallParams) -> None:
             result, _ = forget(ctx)
             if ctx.forgotten:
@@ -1246,6 +1254,7 @@ class CallSession:
             vl.service.register_function("identify_caller", respelled(on_identify_caller))
             vl.service.register_function("verify_passphrase", respelled(on_verify_passphrase))
             vl.service.register_function("set_passphrase", respelled(on_set_passphrase))
+            vl.service.register_function("file_feedback", respelled(on_file_feedback))
             vl.service.register_function("forget_caller", respelled(on_forget_caller))
             vl.service.register_function("get_call_stats", respelled(on_call_stats))
             vl.service.register_function("search_writing", respelled(on_search_writing))

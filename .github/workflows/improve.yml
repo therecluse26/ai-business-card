@@ -1,18 +1,28 @@
-# A call that fails a rule of the grader starts this job. Nobody starts it by hand.
+# A coding agent proposes one change, and code measures it. Nobody starts this job by hand. Two things start it:
 #
-# The phone server sends a fix request (src/ai_call_center/improve.py): the rule, the agent at fault,
-# a cause code, the harness version, two counts, and a fault report. Each name is a word from a fixed
-# list in grading.py. The fault report says what went wrong in the call, with each private word removed
-# by code on the server (src/ai_call_center/fault_report.py). The job has no transcript.
+# 1. A call that fails a rule of the grader. The phone server sends a fix request
+#    (src/ai_call_center/improve.py): the rule, the agent at fault, a cause code, the harness version, two
+#    counts, and a fault report. Each name is a word from a fixed list in grading.py. The fault report says
+#    what went wrong in the call, with each private word removed by code on the server
+#    (src/ai_call_center/fault_report.py). The job has no transcript.
+# 2. A GitHub issue, by its label (issues.yml, src/ai_call_center/issue_queue.py). The input `issue` names
+#    it. The label `auto-fix` gives the scope `prompts`: the job is the same as for a failed rule. The
+#    owner's label `build` gives the scope `code`: the agent can change the code of the phone line, but not
+#    the code that measures or judges a change (CODE_REFUSED in proposal.py), no workflow, and no
+#    dependency. The pull request of the scope `code` is always a draft.
+#    The job reads the issue itself, and code checks it: the owner of the repository is its author, and it
+#    has the label for the scope. So a person who dispatches this workflow with a number gets no more than
+#    the labels allow.
 #
-# Three jobs, so the coding agent never has a token that can write:
-#   change   the agent changes one prompt or one word list. Its token can only read. The change
-#            leaves this job as a patch.
+# Four jobs, so the coding agent never has a token that can write:
+#   change   the agent makes one change. Its token can only read. The change leaves this job as a patch.
 #   measure  code that the agent cannot edit checks the patch, runs the tests, and runs the scorer
 #            before the change and after it. Then it pushes the change as a branch.
 #   open     opens the pull request with the evidence. This runner never ran the agent's change,
 #            so the owner's token (IMPROVE_PR_TOKEN) is safe here.
 #            A person reviews the pull request. A merge to main deploys (fly-deploy.yml).
+#   report   only for an issue whose job opened no pull request: a comment on the issue says why, and
+#            the issue goes back to the label `needs-owner`. This runner ran no line of the agent's change.
 #
 # Needs:
 #   - one repository secret for the coding agent:
@@ -30,18 +40,33 @@
 #     pull request, and a person approves the run of the checks (test.yml).
 # Optional repository variables:
 #   - IMPROVE_MODEL        the model of the coding agent (default: claude-opus-5-5)
+#   - BUILD_MODEL          the model of the coding agent for the scope `code` (default: IMPROVE_MODEL)
 #   - IMPROVE_SCORE_CALLS  "all" (default): the scorer runs each made-up call, before and after.
 #                          "new": only the made-up call that the agent added. "none": the word list only.
 #                          The made-up calls are model requests that cost money.
 #   - OWNER_NAME           the owner's name, as the agents say it
 name: Propose a fix for a failed rule
+# The queue counts the jobs of one day by this name (FIX_RUN in issue_queue.py).
+run-name: "${{ inputs.issue != '' && format('Issue #{0} ({1})', inputs.issue, inputs.scope == 'code' && 'build' || 'auto-fix') || format('Rule {0}', inputs.rule) }}"
 
 on:
   workflow_dispatch:
     inputs:
+      issue:
+        description: "The number of a GitHub issue. Empty for a failed rule: then the inputs below say what failed"
+        required: false
+        default: ""
+        type: string
+      scope:
+        description: "For an issue: what the agent can change. prompts needs the label auto-fix; code needs the label build"
+        required: false
+        default: "prompts"
+        type: choice
+        options: [prompts, code]
       rule:
         description: "The key of the failed rule (grading.py)"
-        required: true
+        required: false
+        default: ""
         type: string
       agent:
         description: "The agent at fault; empty when the grader named none"
@@ -50,12 +75,13 @@ on:
         type: string
       cause:
         description: "A cause code of the rule, or other"
-        required: true
+        required: false
         default: "other"
         type: string
       version:
         description: "The harness version of the call (a git commit)"
-        required: true
+        required: false
+        default: ""
         type: string
       failed_calls:
         description: "Graded calls at this version that failed the rule"
@@ -83,9 +109,11 @@ on:
         default: ""
         type: string
 
-# One proposal at a time. A second fix request waits; it does not stop the first.
+# One proposal at a time for the failed rules, and one for each issue. A second fix request waits; it does
+# not stop the first. Each issue has a group of its own: GitHub keeps only one waiting run in a group, so
+# in one group for all, a third run would remove the second.
 concurrency:
-  group: improve
+  group: improve${{ inputs.issue != '' && format('-issue-{0}', inputs.issue) || '' }}
   cancel-in-progress: false
 
 permissions:
@@ -93,6 +121,8 @@ permissions:
 
 env:
   # The inputs go to the steps as environment values, never as text inside a command.
+  FIX_ISSUE: ${{ inputs.issue }}
+  FIX_SCOPE: ${{ inputs.issue != '' && inputs.scope || 'prompts' }} # a failed rule always has the scope prompts
   FIX_RULE: ${{ inputs.rule }}
   FIX_AGENT: ${{ inputs.agent }}
   FIX_CAUSE: ${{ inputs.cause }}
@@ -107,9 +137,10 @@ env:
 jobs:
   change:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: ${{ inputs.issue != '' && inputs.scope == 'code' && 60 || 25 }}
     permissions:
       contents: read
+      issues: read
     outputs:
       changed: ${{ steps.patch.outputs.changed }}
       answer: ${{ steps.agent.outputs.structured_output }}
@@ -120,6 +151,16 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
+
+      - name: Read the issue
+        if: inputs.issue != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$FIX_ISSUE" in *[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}" > "$RUNNER_TEMP/issue.json"
+          echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"
 
       - name: Check the fix request and write the task
         id: task
@@ -133,34 +174,13 @@ jobs:
             echo "schema=$(uv run proposal schema)"
           } >> "$GITHUB_OUTPUT"
 
-      # A secret with a fault gives "Not logged in" much later, with no reason. This step says the fault at once.
-      # A token that was copied from a terminal can hold a line break or a space. A token has no white space,
-      # so the step removes it. It prints the length of the token and never the token.
       - name: Check the login of the coding agent
         id: login
-        env:
-          TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: |
-          if [ -z "$TOKEN" ] && [ -z "$KEY" ]; then
-            echo "::error::No login for the coding agent. Add the repository secret CLAUDE_CODE_OAUTH_TOKEN (from 'claude setup-token') or ANTHROPIC_API_KEY."
-            exit 1
-          fi
-          if [ -z "$TOKEN" ]; then echo "The coding agent uses ANTHROPIC_API_KEY."; exit 0; fi
-          clean="$(printf '%s' "$TOKEN" | tr -d '[:space:]')"
-          if [ "${#clean}" -lt 40 ]; then
-            echo "::error::The secret CLAUDE_CODE_OAUTH_TOKEN is not a token: ${#TOKEN} characters, ${#clean} of them not white space. Run 'claude setup-token' and set the secret again."
-            exit 1
-          fi
-          echo "::add-mask::$clean"
-          if [ "${#clean}" != "${#TOKEN}" ]; then
-            echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN holds $(( ${#TOKEN} - ${#clean} )) white space character(s). The job removed them. Set the secret again, with the token on one line, to end this warning."
-          fi
-          echo "token=$clean" >> "$GITHUB_OUTPUT"
-          case "$clean" in
-            sk-ant-oat*) echo "The coding agent uses the subscription token (${#clean} characters, the expected start)." ;;
-            *) echo "::warning::The secret CLAUDE_CODE_OAUTH_TOKEN does not start with sk-ant-oat. A token from 'claude setup-token' does." ;;
-          esac
+        uses: ./.github/actions/agent-login
+        with:
+          token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          key: ${{ secrets.ANTHROPIC_API_KEY }}
+
       - name: The coding agent makes one change
         id: agent
         uses: anthropics/claude-code-action@v1
@@ -171,10 +191,10 @@ jobs:
           github_token: ${{ github.token }}
           prompt: ${{ steps.task.outputs.text }}
           claude_args: |
-            --model ${{ vars.IMPROVE_MODEL || 'claude-opus-5-5' }}
-            --max-turns 40
+            --model ${{ env.FIX_SCOPE == 'code' && vars.BUILD_MODEL || vars.IMPROVE_MODEL || 'claude-opus-5-5' }}
+            --max-turns ${{ env.FIX_SCOPE == 'code' && '150' || '40' }}
             --permission-mode acceptEdits
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(uv run pytest:*),Bash(uv run score-harness),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(uv run pytest:*),Bash(uv run score-harness),Bash(uv run python .claude/skills/formal-verify-caller-memory/check.py),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
             --disallowedTools "WebFetch,WebSearch"
             --json-schema '${{ steps.task.outputs.schema }}'
 
@@ -189,8 +209,11 @@ jobs:
       - name: Make a patch of the change
         id: patch
         run: |
-          # Only src, tests and evals go into the patch. The next job refuses a file that the agent must not change.
-          git add -A -- src tests evals
+          # Only src, tests and evals go into the patch; for the scope `code`, README.md too.
+          # The next job refuses a file that the agent must not change.
+          paths=(src tests evals)
+          if [ "$FIX_SCOPE" = code ]; then paths+=(README.md); fi
+          git add -A -- "${paths[@]}"
           git diff --cached --binary HEAD > "$RUNNER_TEMP/change.patch"
           if [ -s "$RUNNER_TEMP/change.patch" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
 
@@ -212,6 +235,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      issues: read
     outputs:
       branch: ${{ steps.push.outputs.branch }}
       title: ${{ steps.body.outputs.title }}
@@ -228,12 +252,28 @@ jobs:
           name: change
           path: ${{ runner.temp }}
 
+      # The runner of the job `change` ran the agent's commands, so this job reads the issue again from GitHub.
+      - name: Read the issue
+        if: inputs.issue != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$FIX_ISSUE" in *[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}" > "$RUNNER_TEMP/issue.json"
+          echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"
+
       - name: Check the patch, then apply it
         id: guard
         run: uv run proposal guard --patch "$RUNNER_TEMP/change.patch"
 
       - name: Unit tests
         run: uv run pytest -q
+
+      # A change of code can change how the line knows a caller. The search runs the real functions; it makes no model request.
+      - name: Formal check of caller memory
+        if: env.FIX_SCOPE == 'code'
+        run: uv run python .claude/skills/formal-verify-caller-memory/check.py
 
       - name: Score before the change and after it
         env:
@@ -285,12 +325,20 @@ jobs:
           TITLE: ${{ steps.body.outputs.title }}
         run: |
           set -euo pipefail
-          branch="improve/${FIX_RULE}-${GITHUB_RUN_ID}"
+          if [ -n "$FIX_ISSUE" ]; then
+            branch="improve/issue-${FIX_ISSUE}-${GITHUB_RUN_ID}"
+            why="A change for issue #${FIX_ISSUE} (scope: ${FIX_SCOPE}). The pull request holds the evidence."
+          else
+            branch="improve/${FIX_RULE}-${GITHUB_RUN_ID}"
+            why="A fix request for the rule ${FIX_RULE} (agent: ${FIX_AGENT:-not known}, cause: ${FIX_CAUSE}). The pull request holds the evidence."
+          fi
+          paths=(src tests evals)
+          if [ "$FIX_SCOPE" = code ]; then paths+=(README.md); fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add -A -- src tests evals
-          git commit -m "$TITLE" -m "A fix request for the rule ${FIX_RULE} (agent: ${FIX_AGENT:-not known}, cause: ${FIX_CAUSE}). The pull request holds the evidence."
+          git add -A -- "${paths[@]}"
+          git commit -m "$TITLE" -m "$why"
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
@@ -325,8 +373,9 @@ jobs:
         run: |
           set -euo pipefail
           # A change that the scorer does not show is a draft: a person must judge it with no measure.
+          # A change of code is always a draft: the scorer measures the agents' words, not new code.
           draft=false
-          if [ "$VERDICT" != "better" ]; then draft=true; fi
+          if [ "$VERDICT" != "better" ] || [ "$FIX_SCOPE" = code ]; then draft=true; fi
           open_as() {
             GH_TOKEN="$1" gh api "repos/${GITHUB_REPOSITORY}/pulls" --method POST \
               -f title="$TITLE" -f head="$BRANCH" -f base="$GITHUB_REF_NAME" -F body=@"$RUNNER_TEMP/body.md" -F draft="$draft" --jq .html_url
@@ -339,3 +388,48 @@ jobs:
             echo "::notice::There is no secret IMPROVE_PR_TOKEN, so the job's own token opens the pull request. A person must approve the run of its checks."
           fi
           open_as "$JOB_TOKEN" >> "$GITHUB_STEP_SUMMARY"
+
+  # For an issue only. When the job opened no pull request, the issue must not stay in "a job started" for ever.
+  report:
+    needs: [change, measure, open]
+    if: always() && inputs.issue != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen
+
+      - name: Write why there is no pull request
+        id: report
+        env:
+          CHANGE_RESULT: ${{ needs.change.result }}
+          CHANGED: ${{ needs.change.outputs.changed }}
+          MEASURE_RESULT: ${{ needs.measure.result }}
+          VERDICT: ${{ needs.measure.outputs.verdict }}
+          OPEN_RESULT: ${{ needs.open.result }}
+          AGENT_ANSWER: ${{ needs.change.outputs.answer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: uv run issue-queue report --out "$RUNNER_TEMP/report.md"
+
+      - name: Say it on the issue, and put the issue back to the owner
+        if: steps.report.outputs.opened == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$FIX_ISSUE" in *[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
+          cat "$RUNNER_TEMP/report.md" >> "$GITHUB_STEP_SUMMARY"
+          labels="repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}/labels"
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}/comments" --method POST -F body=@"$RUNNER_TEMP/report.md" --silent
+          gh api "$labels" --method POST -f "labels[]=needs-owner" --silent
+          # The label that started the job goes, so the queue starts no second job by itself.
+          started=auto-fix
+          if [ "$FIX_SCOPE" = code ]; then started=build; fi
+          gh api "$labels/$started" --method DELETE --silent || true
+          gh api "$labels/fix-started" --method DELETE --silent || true

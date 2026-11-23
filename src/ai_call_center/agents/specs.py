@@ -31,9 +31,10 @@ DEFAULT_LEGS: dict[str, str] = {
     "tour": "openai_realtime",
     "consultant": "gemini_live",
     "contact": "openai_realtime",
+    "feedback": "openai_realtime",
 }
 
-SPECIALISTS: tuple[str, ...] = ("profile", "tour", "consultant", "contact")
+SPECIALISTS: tuple[str, ...] = ("profile", "tour", "consultant", "contact", "feedback")
 
 # One voice per agent, so a caller hears the handoff. Genders alternate along the common handoff
 # paths: the classifier (female) hands to male voices; contact (female) is reached from male ones.
@@ -45,6 +46,7 @@ LEG_VOICES: dict[str, dict[str, str]] = {
         "tour": "ash",  # male
         "consultant": "ballad",  # male
         "contact": "sage",  # female, calm. coral sounded sharp to the owner on 2026-11-16.
+        "feedback": "shimmer",  # female. Of the voices no agent uses here, the one with a measured level.
     },
     "gemini_live": {
         "classifier": "Aoede",  # female
@@ -52,14 +54,16 @@ LEG_VOICES: dict[str, dict[str, str]] = {
         "tour": "Orus",  # male
         "consultant": "Puck",  # male, bright
         "contact": "Kore",  # female
+        "feedback": "Leda",  # female
     },
-    # Nova has few English voices, so three agents share one. In normal use one agent runs on Nova.
+    # Nova has few English voices, so agents share them. In normal use one agent runs on Nova.
     "nova_sonic": {
         "classifier": "tiffany",  # female, US
         "profile": "matthew",  # male, US
         "tour": "matthew",
         "consultant": "matthew",
         "contact": "amy",  # female, British
+        "feedback": "amy",  # a caller reaches it mostly from the classifier, which is tiffany
     },
 }
 DEFAULT_VOICES: dict[str, str] = LEG_VOICES["openai_realtime"]
@@ -69,7 +73,8 @@ DEFAULT_VOICES: dict[str, str] = LEG_VOICES["openai_realtime"]
 # A voice that is not listed is measured during the call.
 VOICE_LEVELS_DBFS: dict[str, float] = {
     "marin": -21.7,
-    "sage": -33.0,  # measured 2026-11-16; shimmer was -19.1
+    "sage": -33.0,  # measured 2026-11-16
+    "shimmer": -19.1,  # measured 2026-11-16, when the contact agent got a new voice
     "ash": -24.5,
     "Charon": -15.0,
     "Puck": -20.4,
@@ -234,6 +239,13 @@ def passphrase_read_back(phrase: str) -> str:
     return f"I heard: {phrase}. Is that right?"
 
 
+# The words after the feedback agent files a report (file_feedback). The report becomes a GitHub issue after hangup
+# (feedback.py), so the words promise no fix and no date.
+def feedback_filed(owner: str) -> str:
+    first = owner_first_name(owner) if owner.strip() else "the owner"
+    return f"Thanks, that's filed. When this call ends, it goes to {first}'s issue list on GitHub, and {first} decides what to work on."
+
+
 @dataclass(frozen=True)
 class WebAddress:
     written: str  # "digitalreformer.dev"
@@ -268,7 +280,8 @@ def _preamble(name: str, owner: str, brand: str = "", name_hint: str = "", websi
         if website
         else ""
     )
-    return f"""You are the "{name}" agent, one of five AI voice agents on a phone line that belongs to {owner}.{works_as}
+    count = _number(len(DEFAULT_LEGS))
+    return f"""You are the "{name}" agent, one of {count} AI voice agents on a phone line that belongs to {owner}.{works_as}
 {owner} designed and built this whole system as a working demonstration of what they can build for a business.
 
 How to speak:{say_it}
@@ -281,7 +294,7 @@ How to speak:{say_it}
 - Without such a note, and only for a turn with no clear words: ask your last question again in a few words. If you asked no question, say only "Go ahead." Never say "Sorry, I didn't catch that" two times in a row.
 
 The call so far:
-- All five agents share one conversation. You can read everything the caller said on this call, also what they told another agent.
+- All {count} agents share one conversation. You can read everything the caller said on this call, also what they told another agent.
 - Use it. Never ask the caller to repeat something they said on this call, and never say that you cannot see the earlier conversation.
 
 Facts about {owner}:
@@ -325,7 +338,7 @@ def build_specs(
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
     o = owner_name
-    # The four specialists can text the caller a link, when texting is set up.
+    # The specialists but the feedback agent can text the caller a link, when texting is set up.
     text_tools = ("text_portfolio_link",) if texting else ()
     text_line = (
         f"\n- You can text the caller a link to {o}'s work with text_portfolio_link. Offer it once, when it fits. Call the tool only after the caller says yes."
@@ -340,6 +353,8 @@ def build_specs(
         if emailing
         else f"- If the caller asks you to email {o}, say you can pass their message to {o}, and take the message."
     )
+    # One routing line for every agent but the feedback agent. The details are in the feedback agent's role, the handoff tool's description.
+    feedback_line = f"- If the caller reports a fault of this phone line or asks for a feature of it, hand off to the feedback agent. A view about {o}, a question, or one answer you can correct is not that."
 
     classifier = AgentSpec(
         name="classifier",
@@ -370,6 +385,7 @@ Routing:
 - The caller has a role to fill, or is recruiting. Questions about {o}'s experience go to the profile agent. To pass the role to {o}, hand off to the contact agent.
 - The caller wants to look around first. Hand off to the tour agent.
 - The caller wants to leave contact details, get a follow-up, or speak to {o}. Hand off to the contact agent.
+{feedback_line}
 - If the intent is unclear, ask one short clarifying question. Do not ask more than two questions in total before you route.
 
 Profile summary of {o}:
@@ -413,12 +429,13 @@ Your job: answer questions about {o} from the profile notes below, in a warm and
 - If the caller asks for something not in the notes, say so, and offer to take their details so {o} can answer.
 - If the caller wants to hire or work with {o}, hand off to the contact agent.
 - If the caller asks how this system works, hand off to the tour agent.
-- If the caller describes their own business problem, hand off to the consultant agent.{text_line}
+- If the caller describes their own business problem, hand off to the consultant agent.
+{feedback_line}{text_line}
 
 Profile notes about {o}:
 {profile.full}{writing_section}""",
         tools=(*writing_tools, *text_tools, "forget_caller", "end_call"),
-        handoffs=("tour", "consultant", "contact"),
+        handoffs=("tour", "consultant", "contact", "feedback"),
         leg=legs["profile"],
         voice=voices["profile"],
     )
@@ -451,6 +468,7 @@ What you know about the system:
 - Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. A match gives a welcome back and nothing more: a phone number can be faked, so a match is not proof. The notes of an earlier call need a passphrase that the caller set on that call. Code checks the passphrase, and the server keeps a salted hash of it, not the passphrase. A caller can set one after they leave a message. With any doubt the caller counts as new, so nobody hears another person's details.
 - A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
 - When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
+- The feedback agent takes a caller's bug report or feature idea about this line. After the call, a report becomes a GitHub issue, a triage agent sorts it, and a coding agent can open a pull request.
 - The same agents also run as plain text, for testing.{rag_fact}{trace_fact}
 
 How to use your tool:
@@ -458,12 +476,13 @@ How to use your tool:
 - The cost is an estimate for the voice models only, at list prices. Say "about" with it. Do not state a cost or a speed that the tool did not give you.
 
 - Tie each feature to a business use when it fits. For example: a handoff is how a billing question reaches a billing agent.
-- If the caller wants this for their own business, hand off to the consultant agent or the contact agent.{text_line}
+- If the caller wants this for their own business, hand off to the consultant agent or the contact agent.
+{feedback_line}{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
         tools=("get_call_stats", *text_tools, "forget_caller", "end_call"),
-        handoffs=("profile", "consultant", "contact"),
+        handoffs=("profile", "consultant", "contact", "feedback"),
         leg=legs["tour"],
         voice=voices["tour"],
     )
@@ -482,12 +501,13 @@ Your job: learn about the caller's business or project, then suggest how {o} cou
 - Be honest about limits. Some tasks still need a person. Say so.
 - Do not quote prices or timelines. {o} does that.
 - When the caller shows interest in working with {o}, ask two short questions, one at a time: "When would you want this to start?" and "Is this a few weeks of work, or a longer engagement?" Skip a question the caller already answered.
-- Then offer to take their details so {o} can follow up. Hand off to the contact agent.{text_line}
+- Then offer to take their details so {o} can follow up. Hand off to the contact agent.
+{feedback_line}{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
         tools=(*text_tools, "forget_caller", "end_call"),
-        handoffs=("profile", "tour", "contact"),
+        handoffs=("profile", "tour", "contact", "feedback"),
         leg=legs["consultant"],
         voice=voices["consultant"],
     )
@@ -539,14 +559,44 @@ Keep it short:
 - Call {o} by name. Never say "the owner" to the caller.
 - Do not repeat a detail the caller has confirmed.
 - Say your introduction line only as your first sentence after a handoff to you, every time a handoff reaches you. Never say it at any other time.
-- If the caller does not want to share details, respect that. Offer the other agents instead.{text_line}
+- If the caller does not want to share details, respect that. Offer the other agents instead.
+{feedback_line}{text_line}
 
 Profile summary of {o}:
 {profile.summary}""",
         tools=("save_lead", "set_passphrase", "request_owner_transfer", *text_tools, "forget_caller", "end_call"),
-        handoffs=("profile", "tour", "consultant"),
+        handoffs=("profile", "tour", "consultant", "feedback"),
         leg=legs["contact"],
         voice=voices["contact"],
     )
 
-    return {s.name: s for s in (classifier, profile_agent, tour, consultant, contact)}
+    # The feedback agent asks the follow-up questions, so the transcript holds a clear report for the issue after hangup (feedback.py).
+    # It has no transfer tool: a report about the line never rings the owner's phone.
+    feedback = AgentSpec(
+        name="feedback",
+        role=(
+            "reports a fault of this phone line itself (an agent said something wrong, a silence, a cut-off answer, a wrong handoff) or asks for a feature of the line; "
+            "not for a complaint or a view about the owner or the owner's work, a plain question, or a correction of one answer that the agent can fix"
+        ),
+        instructions=f"""{_preamble("feedback", o, brand_name, name_hint, website)}
+
+Your job: take the caller's report of a fault of this phone line, or their idea for a feature of it, so that {o} gets a clear report.
+
+- For a fault, you need: what happened, and what the caller expected. For an idea: what the line should do, and why.
+- Ask only for what the caller has not said yet on this call, to you or to another agent. Ask one short question at a time, two questions at most. If they said both already, ask none.
+- Then say the report back in one sentence, and ask: "Is that right?"
+- After a yes, call file_feedback, in silence. "kind" is "fault" or "idea". "summary" is your one-sentence report. If the caller corrects it, say the new one back first.
+- File each fault or idea once. Then say the words that the file_feedback result gives, and ask if there is anything else.
+- Never promise a fix, a date, or a call from {o}. Nothing about the line changes during this call.
+- A complaint or a view about {o} or {o}'s work is not a report about the line. Hand off to the classifier.
+- When the caller wants something else, hand off to the agent for it, or to the classifier when you are not sure.
+
+Profile summary of {o}:
+{profile.summary}""",
+        tools=("file_feedback", "forget_caller", "end_call"),
+        handoffs=("classifier", "profile", "tour", "consultant", "contact"),
+        leg=legs["feedback"],
+        voice=voices["feedback"],
+    )
+
+    return {s.name: s for s in (classifier, profile_agent, tour, consultant, contact, feedback)}

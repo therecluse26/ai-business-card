@@ -74,4 +74,7 @@ class CallContext:
     owner_name: str = ""  # for words that name the owner, for example after forget_caller
     website_spoken: str = ""  # the owner's website as a voice says it; the goodbye line names it
     texts_sent: int = 0
+    # (kind, summary) for each report that the feedback agent filed (file_feedback). After hangup they make
+    # `feedback.report_feedback` run; the public text still comes from its model and its scrub. Never sent during the call.
+    feedback_filed: list[tuple[str, str]] = field(default_factory=list)
     transfer_hours: TransferHours | None = None  # None = a live transfer is allowed at any time

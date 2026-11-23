@@ -64,6 +64,24 @@ async def test_contact_agent_sees_its_tools_and_not_the_classifier(make_graph, c
     assert handoff_tool_name("contact") not in names
 
 
+@pytest.mark.parametrize("source", [name for name in SPECIALISTS if name != "feedback"])
+async def test_each_specialist_can_hand_a_report_about_the_line_to_the_feedback_agent(make_graph, ctx, config, specs, source):
+    model = scripted(tool_call(handoff_tool_name("feedback")), "Hi, I'm the feedback agent, running on OpenAI. What happened?")
+    result = await make_graph(model).ainvoke({"messages": [HumanMessage("Your answer just cut off. That is a bug.")], "active_agent": source}, config=config, context=ctx)
+    assert result["active_agent"] == "feedback"
+    assert model.system_prompt_of_call(1).startswith(specs["feedback"].instructions)
+
+
+async def test_the_feedback_agent_hands_the_call_back_to_the_classifier(make_graph, ctx, config, specs):
+    model = scripted(tool_call(handoff_tool_name("classifier")), "Hi, I'm the classifier agent, running on OpenAI. What else can I do for you?")
+    graph = make_graph(model)
+
+    result = await graph.ainvoke({"messages": [HumanMessage("No more feedback. I have another question.")], "active_agent": "feedback"}, config=config, context=ctx)
+
+    assert result["active_agent"] == "classifier" and result["handoffs"] == ["classifier"]
+    assert set(model.bound_tool_names[0]) == {"file_feedback", "forget_caller", "end_call", *(handoff_tool_name(name) for name in ("classifier", "profile", "tour", "consultant", "contact"))}
+
+
 async def test_text_mode_line_is_appended(make_graph, ctx, config):
     model = scripted("Hello.")
     graph = make_graph(model)
