@@ -176,7 +176,7 @@ def transcript_lines(messages: list[Any]) -> list[str]:
 
 SUMMARY_PROMPT = """Below is the transcript of a phone call to an AI assistant line.
 Write a JSON object with these keys:
-- "summary": at most 40 words, in one or two plain sentences: what the caller wanted, and how the call ended. Write it for the assistant that will take this caller's next call. Do not include email addresses or phone numbers.
+- "summary": at most 40 words in total, in one or two short sentences: what the caller wanted, and how the call ended. Leave the specifics to "owner_note". Write it for the assistant that will take this caller's next call. Do not include email addresses or phone numbers.
 - "caller_name": the caller's name if they gave one, else "".
 - "topic": at most 8 words that finish the sentence "Last time you asked about ...", for example "a new booking platform". No names, no companies, no numbers, no email addresses. "" if the caller asked about nothing.
 - "interest": "project" if the caller talked about work they want done (a product, a system, a project, help for their business); "role" if they talked about a job or a role to fill; else "none".

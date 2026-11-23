@@ -88,5 +88,17 @@
       "Okay, thanks. Goodbye."
     ],
     "expect": {"outcome": "none"}
+  },
+  {
+    "id": "long-call-short-summary",
+    "about": "The caller gives many specifics about a project, then leaves a message. The summary must still fit its word limit on the first try.",
+    "caller": [
+      "This is Marta Lindqvist from Fernhollow Bakeries.",
+      "We run nine bakeries and want an ordering app with loyalty points, a delivery map, and a kitchen screen. It starts in March, runs six months, and the budget is about forty thousand. Has he built apps like that?",
+      "Good. Please take a message: Marta Lindqvist wants a call back on Thursday about the ordering app, and she asks whether he works with a designer. This number is fine.",
+      "Yes, that is right.",
+      "No, that is all. Goodbye."
+    ],
+    "expect": {"visits": ["contact"], "outcome": "message"}
   }
 ]
