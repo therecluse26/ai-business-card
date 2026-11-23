@@ -923,6 +923,13 @@ To turn the loop on:
    For issues from a caller's feedback (above), add the permission **Issues** (read and write).
 4. Put `IMPROVE_GITHUB_TOKEN` and `IMPROVE_REPO` (as `owner/name`) in `.env`. Then run
    `bash scripts/fly-secrets.sh` to copy them to Fly.
+5. Make a second fine-grained personal access token: this repository only, with the repository
+   permission **Pull requests** (read and write) and nothing else. Then run `gh secret set IMPROVE_PR_TOKEN`
+   in this repository. The fix job opens its pull request with this token, so the checks of the pull request
+   (`test.yml`) start at once. GitHub holds each run of a pull request that a job's own token opened, until
+   a person selects "Approve workflows to run". With no `IMPROVE_PR_TOKEN`, or with one that is not valid
+   any more, the job's own token opens the pull request, and that approval is necessary again.
+   Only the last job of the workflow gets this token. That job runs no line of the coding agent's change.
 
 Optional repository variables: `IMPROVE_MODEL` (the coding agent's model), `IMPROVE_SCORE_CALLS`
 (`all`, `new` or `none`: which made-up calls the scorer runs; these cost money), and `OWNER_NAME`.
