@@ -65,6 +65,22 @@ def test_the_right_passphrase_opens_the_notes_from_the_call_where_it_was_set(dan
     assert PhraseStore(dana.leads.connection).find(dana.caller_number, "Dana").calls == {"call-first", dana.call_control_id}
 
 
+def test_any_reply_to_the_question_is_the_passphrase_even_a_full_sentence(dana):
+    """The agent passes the whole reply on; only "I don't know" or "I don't remember" is no passphrase."""
+    for result in (identify(dana, "Dana"), verify(dana, "green lantern")):
+        assert "The caller's reply is the passphrase, even a full sentence: call verify_passphrase with all of it, word for word" in result
+        assert "Only if they say they do not know it, do not remember it, or will not say it" in result
+
+
+def test_a_full_sentence_passphrase_matches_on_the_first_try(ctx, leads):
+    sentence = "The quiet heron waits by the mill pond at dawn."
+    _past_call(leads, ctx, "call-first", FIRST, "Asked about a booking app for a clinic.", "a booking app")
+    PhraseStore(leads.connection).set(ctx.caller_number, "Dana Reyes", sentence, calls=["call-first"])
+    identify(ctx, "Dana")
+    result = verify(ctx, "the quiet heron waits by the mill pond at dawn")  # as a speech model can write it
+    assert "Thank you, that matches." in result and ctx.identity_verified and ctx.phrase_tries == 1
+
+
 def test_a_recognised_caller_keeps_the_name_they_said_on_this_call(dana):
     """A second person on the same phone, with the same first name. The surname on record is a detail of the earlier caller."""
     result = identify(dana, "Dana Whitfield")
