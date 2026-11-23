@@ -302,7 +302,7 @@ async def test_end_call_does_not_hang_up_on_a_caller_who_is_still_talking(make_g
 def test_only_the_callers_own_goodbye_ends_the_call():
     from ai_call_center.graph.tools import said_goodbye
 
-    for said in ("Bye.", "Okay, goodbye!", "No, that's all.", "That is everything, thanks.", "No thanks.", "Nope.", "I'm good.", "Have a great day.", "I have to go.", "You can hang up now."):
+    for said in ("Bye.", "Okay, goodbye!", "No, that's all.", "That is everything, thanks.", "No thanks.", "Nope.", "No, I don't.", "Not really.", "I'm good.", "Have a great day.", "I have to go.", "You can hang up now."):
         assert said_goodbye([f"caller: {said}"]), said
     for said in ("Thanks. What else can you do?", "No, this is Bill.", "Tell me about his background.", "Yes.", "I would like to leave a message."):
         assert not said_goodbye([f"caller: {said}"]), said

@@ -82,7 +82,9 @@ def identify(ctx: CallContext, name: str) -> str:
         return f"{_say(words) if words else f'Greet {name} by name, and ask what they would like to do.'}\n{SETTLED}"
     ctx.identity_confirmed = True
     ctx.returning_name = memory.name
-    ctx.caller_name = memory.name  # the spelling from their earlier call, which they confirmed then
+    # The agents get the name that the caller said on this call. The name on record is a detail of an earlier
+    # caller: two people on one phone can have the same first name, and a number can be faked. `verify` gives it.
+    ctx.caller_name = name
     on_file = PhraseStore(ctx.leads.connection).find(ctx.caller_number, memory.name)
     if on_file is not None and not on_file.locked:
         return f"{_say(passphrase_question(name))}\n{PHRASE_ASKED}\n{SETTLED}"
@@ -118,6 +120,8 @@ def verify(ctx: CallContext, phrase: str) -> str:
     store.add_call(right.row_id, ctx.call_control_id)  # this call was made with the passphrase, so the passphrase opens it next time
     memory = recall(ctx.leads, ctx.caller_number, name, exclude_call=ctx.call_control_id, only_calls=right.calls)
     ctx.caller_history = history_text(memory) if memory else ""
+    if memory:
+        ctx.caller_name = memory.name  # the spelling from the calls that their passphrase opens, which they confirmed then
     return f"{_say(passphrase_right(memory.topic if memory else ''))}\n\n{ctx.caller_history}".rstrip()
 
 
@@ -734,7 +738,8 @@ GOODBYE = re.compile(
     r"|\bend (the|this) call\b",
     flags=re.IGNORECASE,
 )
-ONLY_NO = re.compile(r"^\W*(no|nope|nah)\W*$", flags=re.IGNORECASE)  # the answer to "anything else?"
+# The answer to "anything else?". A plain "No, I don't." missed here, and the agent asked again.
+ONLY_NO = re.compile(r"^\W*(no|nope|nah|not really|nothing)(\W+(i don't|i do not|not really|nothing|there isn't|there's not))?\W*$", flags=re.IGNORECASE)
 GOODBYE_TURNS_CHECKED = 2
 
 

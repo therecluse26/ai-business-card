@@ -5,11 +5,13 @@
 # list in grading.py. The fault report says what went wrong in the call, with each private word removed
 # by code on the server (src/ai_call_center/fault_report.py). The job has no transcript.
 #
-# Two jobs, so the coding agent never has a token that can write:
+# Three jobs, so the coding agent never has a token that can write:
 #   change   the agent changes one prompt or one word list. Its token can only read. The change
 #            leaves this job as a patch.
 #   measure  code that the agent cannot edit checks the patch, runs the tests, and runs the scorer
-#            before the change and after it. Then it opens a pull request with the evidence.
+#            before the change and after it. Then it pushes the change as a branch.
+#   open     opens the pull request with the evidence. This runner never ran the agent's change,
+#            so the owner's token (IMPROVE_PR_TOKEN) is safe here.
 #            A person reviews the pull request. A merge to main deploys (fly-deploy.yml).
 #
 # Needs:
@@ -19,6 +21,13 @@
 #     With both, the subscription pays for the coding agent, and the API key pays for the scorer.
 #     With no ANTHROPIC_API_KEY, the scorer runs no made-up call: its models need an API key.
 #   - Settings > Actions > General > "Allow GitHub Actions to create and approve pull requests"
+#   - a repository secret for the pull request, so that its checks start with no approval:
+#       IMPROVE_PR_TOKEN         a fine-grained personal access token of the owner, for this repository
+#                                only, with "Pull requests: Read and write" and nothing else.
+#     GitHub holds each workflow run of a pull request that the token of a job opened, until a person
+#     approves the run (GitHub changelog, 2026-05-21). A pull request that the owner's token opened has
+#     no such hold. With no such secret, or when it is not valid any more, the job's own token opens the
+#     pull request, and a person approves the run of the checks (test.yml).
 # Optional repository variables:
 #   - IMPROVE_MODEL        the model of the coding agent (default: claude-opus-5-5)
 #   - IMPROVE_SCORE_CALLS  "all" (default): the scorer runs each made-up call, before and after.
@@ -203,7 +212,10 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
-      pull-requests: write
+    outputs:
+      branch: ${{ steps.push.outputs.branch }}
+      title: ${{ steps.body.outputs.title }}
+      verdict: ${{ steps.body.outputs.verdict }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -265,12 +277,12 @@ jobs:
         if: steps.body.outputs.verdict == 'worse'
         run: echo "A check that passed before the change now fails. The job opens no pull request." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Open the pull request
+      - name: Push the change as a branch
+        id: push
         if: steps.body.outputs.verdict != 'worse'
         env:
           GH_TOKEN: ${{ github.token }}
           TITLE: ${{ steps.body.outputs.title }}
-          VERDICT: ${{ steps.body.outputs.verdict }}
         run: |
           set -euo pipefail
           branch="improve/${FIX_RULE}-${GITHUB_RUN_ID}"
@@ -280,7 +292,50 @@ jobs:
           git add -A -- src tests evals
           git commit -m "$TITLE" -m "A fix request for the rule ${FIX_RULE} (agent: ${FIX_AGENT:-not known}, cause: ${FIX_CAUSE}). The pull request holds the evidence."
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.push.outputs.branch != ''
+        with:
+          name: pull-request
+          path: ${{ runner.temp }}/body.md
+          retention-days: 14
+
+  # A job of its own: this runner ran no line of the agent's change, so nothing here can read the owner's token.
+  open:
+    needs: measure
+    if: needs.measure.outputs.branch != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pull-request
+          path: ${{ runner.temp }}
+
+      - name: Open the pull request
+        env:
+          OWNER_TOKEN: ${{ secrets.IMPROVE_PR_TOKEN }}
+          JOB_TOKEN: ${{ github.token }}
+          BRANCH: ${{ needs.measure.outputs.branch }}
+          TITLE: ${{ needs.measure.outputs.title }}
+          VERDICT: ${{ needs.measure.outputs.verdict }}
+        run: |
+          set -euo pipefail
           # A change that the scorer does not show is a draft: a person must judge it with no measure.
-          draft=()
-          if [ "$VERDICT" != "better" ]; then draft=(--draft); fi
-          gh pr create --base "${GITHUB_REF_NAME}" --head "$branch" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md" "${draft[@]}"
+          draft=false
+          if [ "$VERDICT" != "better" ]; then draft=true; fi
+          open_as() {
+            GH_TOKEN="$1" gh api "repos/${GITHUB_REPOSITORY}/pulls" --method POST \
+              -f title="$TITLE" -f head="$BRANCH" -f base="$GITHUB_REF_NAME" -F body=@"$RUNNER_TEMP/body.md" -F draft="$draft" --jq .html_url
+          }
+          # The owner's token first: GitHub starts the checks of such a pull request with no approval.
+          if [ -n "${OWNER_TOKEN:-}" ]; then
+            if open_as "$OWNER_TOKEN" >> "$GITHUB_STEP_SUMMARY"; then exit 0; fi
+            echo "::warning::The secret IMPROVE_PR_TOKEN did not open the pull request. Make a new token if it is not valid any more. The job's own token opens the pull request now, so a person must approve the run of its checks."
+          else
+            echo "::notice::There is no secret IMPROVE_PR_TOKEN, so the job's own token opens the pull request. A person must approve the run of its checks."
+          fi
+          open_as "$JOB_TOKEN" >> "$GITHUB_STEP_SUMMARY"
