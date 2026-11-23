@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     jev_timeout_ms: int = 500  # after this the word list's answer stands; measure with `uv run check-jev`
 
     # The owner's CRM (zepto-crm), reached over MCP (see crm.py). After a call that left a message, code writes the
-    # caller, the call, a task and, for a project or a role, a deal. With the address or the token empty, nothing is written or read.
+    # caller, the call, a deal and a task. With the address or the token empty, nothing is written or read.
     crm_mcp_url: str = ""  # https://<crm-host>/ext/mcp
     crm_api_token: SecretStr = SecretStr("")  # an API token of the CRM, scope "full"; make it from a user with the role member
     crm_timeout_secs: float = 10.0  # for one request; check the real times with `uv run check-crm`

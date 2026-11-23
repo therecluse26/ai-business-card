@@ -23,7 +23,7 @@ The coverage record. The check runs these, and nothing else of the product:
 | `src/ai_call_center/passphrase.py` | `PhraseStore` (`find`, `check`, `add_call`, `set`, `forget`), `sound_key`, `usable`, `_hash`, `TRIES`, `LOCK_AT` |
 | `src/ai_call_center/callers.py` | `recall`, `history_text`, `UNKNOWN_NUMBERS` |
 | `src/ai_call_center/leads.py` | `LeadStore`: `save`, `leads_for`, `lead_for_call`, `start_call`, `finish_call`, `calls_for`, `forget` |
-| `src/ai_call_center/crm.py` | `request_status` (the CRM lookup), `sync_call`, `entry_for_call`, `write_waiting` and the write steps under it, `same_crm_person`, `CrmStore` |
+| `src/ai_call_center/crm.py` | `request_status` (the CRM lookup), `sync_call`, `entry_for_call`, `write_waiting` and the write steps under it (`_find_or_make_person`, `_fill_person`, `_open_deal`), `same_crm_person`, `CrmStore` |
 | `src/ai_call_center/names.py` | `same_person` |
 | `src/ai_call_center/graph/state.py` | the fields of `CallContext` in `CTX_FIELDS` of `check.py` |
 | `src/ai_call_center/agents/specs.py` | `Welcome.returning_caller`, `Welcome.new_caller`, `passphrase_question`, `passphrase_right`, `passphrase_read_back` |
@@ -105,8 +105,8 @@ The assumptions:
 - Neither person says the other person's passphrase. Two passphrases that sound the same (`sound_key`) are not covered.
 - Each tool call is one step. That is true for `identify`, `verify`, `set_phrase` and `forget`: they have no `await`. `save_lead_record` waits for the owner's email after it writes the lead; a second tool call during that wait is not covered.
 - The summary of a call holds only what that caller said on that call. The summary model does not run.
-- Each call is about a project, so each call that is not forgotten leaves a person and a deal in the CRM. A call that leaves only a message with no deal is not covered; the lookup reads nothing from the CRM for it.
-- The CRM is a stand-in with no memory (`SearchCrm`): the ID of a record is its content. It always answers, each deal is open, and it has no person that the owner added by hand. So these paths of the write are not covered: an entry that waits, a person found by the CRM search, a person found by an email address, a closed deal.
+- Each call is about a project, so each call that is not forgotten leaves a lead: a person and a deal in the CRM. A call with no message and no talk about work leaves nothing in the CRM, and is not covered; the lookup has nothing to read for it.
+- The CRM is a stand-in with no memory (`SearchCrm`): the ID of a record is its content. It always answers, each deal is open, and it has no person that the owner added by hand. So these paths of the write are not covered: an entry that waits, a person found by the CRM search, a person found by an email address, a closed deal, and what `_fill_person` sends to a person that exists.
 - Three settings differ from the product, to make the search finite and fast: the cost of the passphrase hash (`_SCRYPT`), the lock limit (`LOCK_AT` is 2, not 5), and the clock (one second for each record).
 
 Not covered at all:

@@ -75,6 +75,17 @@ class FakeCrm:
         self.people[person["id"]] = person
         return person
 
+    def update_person(self, id: str, **fields: Any) -> dict:
+        if id not in self.people:
+            raise CrmError("not_found", "The person was not found")
+        email = fields.get("email")
+        if email and "@" not in email:
+            raise CrmError("validation_failed", "The input is not valid", [{"path": "email", "message": "Not an email address"}])
+        if email and any(person["email"] == email for person in self.people.values() if person["id"] != id):
+            raise CrmError("conflict", "A person with this email exists", {"field": "email"})
+        self.people[id].update(fields)
+        return self.people[id]
+
     def create_company(self, name: str) -> dict:
         company = {"id": f"company-{len(self.companies) + 1}", "name": name}
         self.companies[company["id"]] = company
@@ -206,12 +217,13 @@ async def test_a_message_about_a_project_becomes_a_person_a_timeline_entry_a_dea
     assert (row.state, row.entry, row.person_id, row.deal_id, row.deal_made, row.task_id) == (WRITTEN, "", person["id"], deal["id"], True, task["id"])
 
 
-async def test_a_message_that_is_not_about_work_makes_no_deal(ctx, crm):
+async def test_each_lead_is_a_deal_whatever_the_summary_model_says_about_the_interest(ctx, crm):
+    # The summary model reads the interest, and it can read it wrong. A lead that the owner got by email is a lead in the CRM.
     call = _call(ctx, "call-1", crm)
     await _message(call, need="Tell the owner that Grace says hello.", name="Grace Hopper")
-    await _end(call, CallSummary(summary="Grace left a greeting.", topic="a greeting", interest="none"))
-    assert crm.deals == {}
-    assert [(task["type"], task["recordId"]) for task in crm.tasks] == [("person", "person-1")]
+    await _end(call, CallSummary(summary="Grace left a greeting.", topic="", interest="none"))
+    assert [deal["name"] for deal in crm.deals.values()] == ["Grace Hopper: a message"]
+    assert [(task["type"], task["recordId"]) for task in crm.tasks] == [("deal", "deal-1")]
 
 
 async def test_a_talk_about_a_project_with_no_message_still_reaches_the_crm(ctx, crm):
@@ -230,12 +242,48 @@ async def test_a_caller_who_asked_to_be_forgotten_leaves_nothing(ctx, crm):
     assert crm.calls == []
 
 
-async def test_a_call_from_the_owners_phone_leaves_the_person_and_the_entry_only(ctx, crm):
+async def test_a_call_from_the_owners_phone_leaves_the_same_records_each_marked_as_a_test(ctx, crm):
     call = _call(ctx, "call-1", crm)
-    await _message(call)
+    await _message(call, name="Bill Williams")
     await _end(call, test=True)
+    assert len(crm.people) == 1
     assert crm.notes[0]["title"] == "Test call to the AI line: a booking app"
-    assert (crm.deals, crm.tasks) == ({}, [])
+    assert [deal["name"] for deal in crm.deals.values()] == ["Test: Bill Williams: a booking app"]
+    assert [(task["title"], task["recordId"]) for task in crm.tasks] == [("Test: Follow up with Bill Williams: a booking app", "deal-1")]
+
+
+async def test_a_person_that_exists_gets_only_the_fields_that_are_empty(ctx, crm):
+    first = _call(ctx, "call-1", crm)
+    await _message(first, name="Ada")  # a first name only, no email address, no company
+    await _end(first)
+    assert (crm.people["person-1"]["lastName"], crm.people["person-1"]["email"]) == ("", None)
+
+    second = _call(ctx, "call-2", crm)
+    await _message(second, name="Ada Lovelace", email="ada@example.test", company="Analytical Engines")
+    await _end(second)
+    person = crm.people["person-1"]
+    assert (person["lastName"], person["email"], crm.companies[person["companyId"]]["name"]) == ("Lovelace", "ada@example.test", "Analytical Engines")
+
+    person["email"] = "ada@owner-corrected.test"  # the owner corrected the record by hand
+    third = _call(ctx, "call-3", crm)
+    await _message(third, name="Ada Lovelace", email="other@example.test", company="Another Company")
+    await _end(third)
+    assert len(crm.people) == 1
+    assert (person["email"], crm.companies[person["companyId"]]["name"]) == ("ada@owner-corrected.test", "Analytical Engines")
+    assert "update_person" not in crm.names()[-6:]  # nothing was empty, so nothing was sent
+
+
+async def test_an_email_address_of_another_person_does_not_stop_the_other_fields(ctx, crm):
+    crm.create_person(firstName="Grace", lastName="Hopper", email="shared@example.test")
+    first = _call(ctx, "call-1", crm)
+    await _message(first, name="Ada")
+    await _end(first)
+    second = _call(ctx, "call-2", crm)
+    await _message(second, name="Ada Lovelace", email="shared@example.test")
+    await _end(second)
+    ada = crm.people["person-2"]
+    assert (ada["lastName"], ada["email"]) == ("Lovelace", None)
+    assert CrmStore(ctx.leads.connection).get("call-2").state == WRITTEN
 
 
 async def test_a_hidden_number_is_not_written_as_a_phone_number(ctx, crm):
@@ -424,16 +472,22 @@ async def test_a_verified_caller_gets_the_stage_of_their_own_deal_and_nothing_el
     assert sorted(crm.names()) == ["get_record", "list_pipelines"]
 
 
-async def test_a_message_with_no_deal_is_reported_as_received(ctx, crm):
-    first = _call(ctx, "call-1", crm)
-    await _message(first, need="Tell the owner that Ada says hello.")
-    _set(first, "purple lantern")
-    await _end(first, CHAT)
+async def test_a_call_that_joined_an_earlier_deal_is_reported_as_received_with_no_stage(ctx, crm):
+    first = _call(ctx, "call-1", crm)  # no passphrase on this call, so no later call opens it
+    await _message(first)
+    await _end(first)
     second = _call(ctx, "call-2", crm)
-    identify(second, "Ada Lovelace")
-    verify(second, "purple lantern")
+    await _message(second, need="One more detail.")
+    _set(second, "purple lantern")
+    await _end(second)
+    assert CrmStore(ctx.leads.connection).get("call-2").deal_made is False
+
+    third = _call(ctx, "call-3", crm)
+    identify(third, "Ada Lovelace")
+    verify(third, "purple lantern")
     crm.calls.clear()
-    assert "CRM has the caller's message" in await request_status(second)
+    status = await request_status(third)
+    assert "CRM has the caller's message" in status and "stage" in status.split("can give no")[1]
     assert crm.calls == []  # the answer is in this server's own table
 
 
@@ -460,7 +514,7 @@ async def test_a_person_with_a_faked_number_and_the_real_name_never_reads_the_re
     assert again.identity_verified and again.open_calls == ["call-2"]
     crm.calls.clear()
     status = await request_status(again)
-    assert "stage" not in status.split("It has no stage")[0]
+    assert "CRM has the caller's message" in status and "can give no stage" in status
     assert crm.calls == []  # the real caller's deal was not read
 
 

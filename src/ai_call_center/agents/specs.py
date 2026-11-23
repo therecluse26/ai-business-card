@@ -372,7 +372,7 @@ An earlier request of the caller (the crm_lookup tool):
         else ""
     )
     crm_fact = (
-        f"\n- After a call that left a message, code writes it to {o}'s CRM over MCP, the Model Context Protocol: the caller as a person, the call as a timeline entry, a task to follow up, and a deal when the call was about a project or a role. No model chooses those writes, and they run after the caller hangs up, so they add no wait. A caller who passed the passphrase check can ask the contact agent where their request stands; the agent then reads the stage of their own deal from the CRM."
+        f"\n- After a call that left a message, code writes it to {o}'s CRM over MCP, the Model Context Protocol: the caller as a person, the call as a timeline entry, a deal in the first stage of the pipeline, and a task to follow up. The rules are the same for every call: one person for each caller, one deal for each lead, and only an empty field of a person is filled. No model chooses those writes, and they run after the caller hangs up, so they add no wait. A caller who passed the passphrase check can ask the contact agent where their request stands; the agent then reads the stage of their own deal from the CRM."
         if crm
         else ""
     )

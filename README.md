@@ -1163,18 +1163,25 @@ client is 60 lines of `httpx`, with no MCP package.
 
 **The writes.** Code makes them after hangup. No model chooses them, and the caller waits for none of them.
 
-- A call counts when the owner got a lead from it: a saved message, a note of a request for a live call, or
-  a talk about a project or a role (the rule of the warm lead email).
-- The caller becomes a person. The line looks for the person first: an earlier call of the same number and
-  name, then a CRM search by the phone number. A hit needs the same name and the same number on the record.
-  The CRM has one unique field, the email address; a person with the caller's address is used, not copied.
-- The call becomes an entry of the kind "call" on the person's timeline: the message, the start, the size, the
-  call summary, how to reach the caller, the agents, the length, and "verified", "recognised" or "new".
-- A project or a role makes a deal in the first stage of the first pipeline. A second call of the same
-  person about work uses their open deal. A message about something else makes no deal.
-- A task "Follow up with <name>" is due on the day of the call (Eastern). A call that went to the owner's
-  phone makes no task.
-- A call from `OWNER_PHONE` is a test: it leaves the person and the entry, marked "Test call", and no deal or task.
+The rules are the same for every call. `crm.py` is the only place that has them.
+
+| | When the line makes it | When the line uses one that exists | What the line changes later |
+|---|---|---|---|
+| **Which call** | A call that gave the owner a lead: a saved message, a note of a request for a live call, or a talk about a project or a role with no message (the warm lead email) | | A caller who asked to be forgotten leaves nothing |
+| **Person** | No person matches the caller | An earlier call of the same number and name; a CRM person with that number and name; the CRM person with that email address | It fills a field that is empty: surname, email address, phone number, company. It never changes a field that has a value |
+| **Timeline entry** | One for each call, of the kind "call", on the person | | Nothing |
+| **Deal** | Each lead is in one deal, in the first stage of the first pipeline | The person has an open deal from this line: the call joins it, and no second deal is made | Nothing. The line never moves, renames or closes a deal. The stage belongs to the owner |
+| **Task** | One "Follow up with <name>" for each call, due on the day of the call (Eastern), on the deal. None when the call went to the owner's phone | | Nothing. The line never closes a task |
+
+- A lead email and a CRM lead go together: each call that sends the owner a lead email is in a deal.
+  The summary model does not decide this. It only names the deal, from the topic of the call.
+- The match of a name needs the same first name, and no two different surnames. "Sam" and "Sam Carter"
+  are one person; "Sam Pike" and "Sam Carter" on one shared phone are two.
+- The entry holds the message, the start, the size, the call summary, how to reach the caller, the agents,
+  the length, and "verified", "recognised" or "new".
+- A call from `OWNER_PHONE` is a test call. It gets the same records, and each one has "Test" in its name:
+  "Test call to the AI line: ...", "Test: <name>: ...", "Test: Follow up with ...". Search the CRM for "Test"
+  to find them and delete them.
 - `uv run chat` writes to the CRM only with `--crm`.
 
 **When the CRM is down.** The entry waits in the table `crm_calls`, and the end of the next call sends it
@@ -1186,7 +1193,8 @@ log and `uv run check-crm` show the CRM's reason. The lead is in the owner's ema
 
 - Code allows it only after the passphrase check of the call. A match of number and name reads nothing.
 - It reads only a deal that a call with that passphrase made. A call that joined the deal of an earlier
-  call does not open that deal: the earlier call can be the call of another person.
+  call does not open that deal: the earlier call can be the call of another person. That caller hears
+  that the owner has the message, with no stage.
 - The agent gets the status, the stage ("stage 2 of 5"), and two dates. It gets no name of a deal, no note of
   the owner, and no contact detail.
 - The agent says aloud that it looks in the CRM, as it does for the RAG search. The read has 4 s; after

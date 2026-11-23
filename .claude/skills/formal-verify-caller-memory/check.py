@@ -196,7 +196,7 @@ class SearchCrm:
             return {"id": f"person: {arguments['firstName']} {arguments['lastName']}".strip()}
         if name in ("create_company", "create_deal"):
             return {"id": f"{name.removeprefix('create_')}: {arguments['name']}"}
-        if name in ("add_note", "create_task"):
+        if name in ("add_note", "create_task", "update_person"):
             return {"id": name}
         if name == "list_pipelines":
             return {"pipelines": [{"id": "pipeline", "name": "Client work", "stages": [{"id": "stage", "name": "New lead"}]}]}
@@ -368,7 +368,7 @@ class World:
                 self.seen.add(WITNESSES[6])
         elif step == "end":
             # What `call_session` and `chat.run` do at the end. The summary model writes what was said on the call.
-            # Each call is about a project, so each call that is not forgotten leaves a person and a deal in the CRM.
+            # Each call is about a project, so each call that is not forgotten leaves a lead: a person and a deal in the CRM.
             if ctx.forgotten:
                 self.store.finish_call(ctx.call_control_id, agents=["classifier"], summary="")
             else:

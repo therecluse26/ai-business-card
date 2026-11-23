@@ -1,8 +1,25 @@
 """The owner's CRM (zepto-crm), reached over MCP.
 
-After a call that left something for the owner, code writes it to the CRM: the caller as a person, the
-call as an entry on that person's timeline, a task to follow up, and a deal when the call was about a
-project or a role. No model chooses these writes, and none of them runs while the caller is on the line.
+After a call that left a lead for the owner, code writes it to the CRM. No model chooses these writes, and
+none of them runs while the caller is on the line.
+
+The rules of the writes. They are the same for every call, and this module is the only place that has them:
+
+  Which call    A call that gave the owner a lead: a saved message, a note of a request for a live call, or
+                a talk about a project or a role with no message (the warm lead email). A lead email and a
+                CRM lead go together. A caller who asked to be forgotten leaves nothing.
+  Person        One for each caller. The line uses a person that exists: an earlier call of the same number
+                and name, a CRM person with that number and name, or the CRM person with that email
+                address. The line fills a field of that person only when the field is empty (surname, email
+                address, phone number, company). It never changes a field that has a value.
+  Entry         One entry of the kind "call" on the person's timeline for each call. Never changed.
+  Deal          Each lead is in one deal, in the first stage of the first pipeline. A person with an open
+                deal from this line gets no second deal: the call joins the open one. The line never
+                moves, renames or closes a deal. The stage belongs to the owner.
+  Task          One "Follow up with <name>" for each call, due on the day of the call, on the deal. There
+                is none when the call went to the owner's phone. The line never closes a task.
+  Test call     A call from the owner's own phone gets the same records. Each one has "Test" in its name,
+                so the owner can find them and delete them.
 
 An entry that the CRM did not take waits in the table `crm_calls`, and the end of the next call sends it
 again. So a CRM that is down loses nothing: the lead is in the store and in the owner's email already.
@@ -35,7 +52,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-WARM = ("project", "role")  # the interests that make a deal
+WARM = ("project", "role")  # the interests that make a lead of a call with no message (the warm lead email)
 UNNAMED = "Unnamed caller"
 SYNC_LIMIT_SECS = 60.0  # all the writes after one call; what is not written by then waits for the next call
 STATUS_LIMIT_SECS = 4.0  # the read during a call; after this the agent says that it cannot check now
@@ -160,7 +177,7 @@ class CrmEntry:
     company: str = ""
     title: str = ""  # of the timeline entry
     body: str = ""  # of the timeline entry
-    deal: str = ""  # the name of the deal; "" = no deal
+    deal: str = ""  # the name of the deal that is made when the person has no open one
     task: str = ""  # the title of the task; "" = no task
     task_notes: str = ""
     due: str = ""  # of the task, YYYY-MM-DD
@@ -169,10 +186,10 @@ class CrmEntry:
 def entry_for_call(ctx: CallContext, summary: CallSummary, *, visited: list[str], transferred: bool = False, test: bool = False, now: datetime | None = None) -> CrmEntry | None:
     """The CRM entry for a call that is over, or None when the call left nothing for the owner.
 
-    A call counts when the owner got a lead from it: a saved message, a note of a request for a live call,
-    or a talk about a project or a role (the warm lead email). A caller who asked to be forgotten leaves nothing.
+    The rules are at the top of this module. A call counts when the owner got a lead from it: a saved message,
+    a note of a request for a live call, or a talk about a project or a role (the warm lead email).
     `transferred`: the owner's phone rings or the owner is on the line, so there is no task to follow up yet.
-    `test`: the call is from the owner's own phone. It leaves the person and the timeline entry only.
+    `test`: the call is from the owner's own phone. It gets the same records, each with "Test" in its name.
     """
     if ctx.forgotten:
         return None
@@ -204,7 +221,9 @@ def entry_for_call(ctx: CallContext, summary: CallSummary, *, visited: list[str]
     lines.append(f"Agents: {' -> '.join(visited)}. About {minutes} min, on {now.astimezone(EASTERN).strftime('%b %-d at %-I:%M %p Eastern')}.")
     if row_id:
         lines.append(f"Lead record {row_id} of the phone line.")
-    follow_up = not transferred and not test
+    follow_up = not transferred
+    about = topic or (f"a {summary.interest}" if warm else "a message")
+    mark = "Test: " if test else ""
     return CrmEntry(
         call_control_id=ctx.call_control_id,
         caller_number="" if hidden else ctx.caller_number,
@@ -213,8 +232,8 @@ def entry_for_call(ctx: CallContext, summary: CallSummary, *, visited: list[str]
         company=company,
         title=("Test call to the AI line" if test else "Call to the AI line") + (f": {topic}" if topic else ""),
         body="\n".join(lines),
-        deal=f"{name}: {topic or 'a ' + summary.interest}" if warm and not test else "",
-        task=f"Follow up with {name}" + (f": {topic}" if topic else "") if follow_up else "",
+        deal=f"{mark}{name}: {about}",
+        task=f"{mark}Follow up with {name}" + (f": {topic}" if topic else "") if follow_up else "",
         task_notes=(lead.need if lead else summary.owner_note or summary.summary) if follow_up else "",
         due=now.astimezone(EASTERN).date().isoformat() if follow_up else "",
     )
@@ -394,8 +413,8 @@ async def _company(crm: Crm, name: str) -> str:
         return ""
 
 
-async def _find_or_make_person(crm: Crm, entry: CrmEntry) -> str:
-    """The CRM person for the caller of this entry.
+async def _find_or_make_person(crm: Crm, entry: CrmEntry) -> tuple[str, bool]:
+    """The CRM person for the caller of this entry, and True when this call made the person.
 
     The CRM has one unique field for a person: the email address. So the search goes by the phone number,
     and a hit counts only with the same name (`same_crm_person`) and the same number on the record.
@@ -408,7 +427,7 @@ async def _find_or_make_person(crm: Crm, entry: CrmEntry) -> str:
         for hit in named[:3]:
             person = (await crm.tool("get_record", {"type": "person", "id": hit["id"], "timeline": 0})).get("record") or {}
             if _digits(str(person.get("phone") or "")) == digits:
-                return str(hit["id"])
+                return str(hit["id"]), False
     first, _, last = entry.name.partition(" ")
     fields: dict[str, Any] = {"firstName": first[:NAME_MAX], "lastName": last.strip()[:NAME_MAX]}
     if entry.caller_number:
@@ -416,15 +435,44 @@ async def _find_or_make_person(crm: Crm, entry: CrmEntry) -> str:
     if company_id := await _company(crm, entry.company):
         fields["companyId"] = company_id
     try:
-        return str((await crm.tool("create_person", {**fields, **({"email": entry.email} if entry.email else {})}))["id"])
+        return str((await crm.tool("create_person", {**fields, **({"email": entry.email} if entry.email else {})}))["id"]), True
     except CrmError as error:
         existing = error.details.get("existingId") if isinstance(error.details, dict) else None
         if error.code == "conflict" and existing:
-            return str(existing)  # a person with this email address is in the CRM
+            return str(existing), False  # a person with this email address is in the CRM
         if error.code == "validation_failed" and entry.email:
             # An address as a voice model heard it can be no address. The timeline entry still has it.
-            return str((await crm.tool("create_person", fields))["id"])
+            return str((await crm.tool("create_person", fields))["id"]), True
         raise
+
+
+async def _fill_person(crm: Crm, person_id: str, entry: CrmEntry) -> None:
+    """A person that the CRM has already gets what this call adds: a surname, an email address, a phone number, a company.
+
+    Only a field that is empty is filled. A field with a value stays: the owner can have corrected it.
+    Raises CrmError "not_found" when the CRM no longer has the person.
+    """
+    person = (await crm.tool("get_record", {"type": "person", "id": person_id, "timeline": 0})).get("record") or {}
+    surname = entry.name.partition(" ")[2].strip() if entry.name != UNNAMED else ""
+    new: dict[str, Any] = {}
+    if surname and not person.get("lastName"):
+        new["lastName"] = surname[:NAME_MAX]
+    if entry.caller_number and not person.get("phone"):
+        new["phone"] = entry.caller_number
+    if entry.company and not person.get("companyId") and (company_id := await _company(crm, entry.company)):
+        new["companyId"] = company_id
+    email = entry.email if not person.get("email") else ""
+    for fields in ({**new, "email": email}, new) if email else (new,):
+        if not fields:
+            return
+        try:
+            await crm.tool("update_person", {"id": person_id, **fields})
+            return
+        except CrmError as error:
+            if error.code in DOWN or error.code == "not_found":
+                raise
+            # The address is no address, or another person has it: the other fields are sent without it. The entry has it.
+            log.warning("CRM: the person %s did not take %s (%s)", person_id, ", ".join(fields), error)
 
 
 async def _open_deal(crm: Crm, store: CrmStore, person_id: str, *, exclude: str) -> str:
@@ -447,8 +495,20 @@ async def _write(crm: Crm, store: CrmStore, call_control_id: str) -> None:
     if row is None or not row.entry:
         return
     entry = CrmEntry(**json.loads(row.entry))
-    person_id = row.person_id or store.person_for(entry.caller_number, entry.name) or await _find_or_make_person(crm, entry)
-    store.update(call_control_id, person_id=person_id)
+    person_id = row.person_id
+    if not person_id:
+        person_id, made = store.person_for(entry.caller_number, entry.name), False
+        if not person_id:
+            person_id, made = await _find_or_make_person(crm, entry)
+        if not made:
+            try:
+                await _fill_person(crm, person_id, entry)
+            except CrmError as error:
+                if error.code != "not_found":
+                    raise
+                store.forget_person(person_id)
+                raise CrmError("gone", "the CRM no longer has this person") from error
+        store.update(call_control_id, person_id=person_id)
     digest = _digest(entry.body)
     if digest != row.noted:
         try:
@@ -460,16 +520,15 @@ async def _write(crm: Crm, store: CrmStore, call_control_id: str) -> None:
             raise
         store.update(call_control_id, noted=digest)
     deal_id = row.deal_id
-    if entry.deal and not deal_id:
+    if not deal_id:
         deal_id, made = await _open_deal(crm, store, person_id, exclude=call_control_id), False
         if not deal_id:
             company_id = await _company(crm, entry.company)
-            deal = await crm.tool("create_deal", {"name": entry.deal[:TITLE_MAX], "personIds": [person_id], **({"companyId": company_id} if company_id else {})})
+            deal = await crm.tool("create_deal", {"name": (entry.deal or f"{entry.name}: a message")[:TITLE_MAX], "personIds": [person_id], **({"companyId": company_id} if company_id else {})})
             deal_id, made = str(deal["id"]), True
         store.update(call_control_id, deal_id=deal_id, deal_made=int(made))
     if entry.task and not row.task_id:
-        link = {"type": "deal", "recordId": deal_id} if deal_id else {"type": "person", "recordId": person_id}
-        task = await crm.tool("create_task", {"title": entry.task[:TASK_MAX], "notes": entry.task_notes[:NOTES_MAX] or None, "dueDate": entry.due or None, **link})
+        task = await crm.tool("create_task", {"title": entry.task[:TASK_MAX], "notes": entry.task_notes[:NOTES_MAX] or None, "dueDate": entry.due or None, "type": "deal", "recordId": deal_id})
         store.update(call_control_id, task_id=str(task["id"]))
     store.update(call_control_id, entry="", state=WRITTEN, error="")
 
@@ -570,7 +629,8 @@ async def request_status(ctx: CallContext) -> str:
 
     Only after the passphrase check, and only from the calls that the passphrase opens (`ctx.open_calls`).
     A deal counts only when one of those calls made it: a call that only joined the deal of an earlier
-    call can be the call of another person with the same name on the same number.
+    call can be the call of another person with the same name on the same number. Such a caller hears
+    that the owner has their message, and no stage.
     """
     owner = ctx.owner_name.split()[0] if ctx.owner_name.strip() else "the owner"
     if ctx.crm is None:
@@ -600,7 +660,7 @@ async def request_status(ctx: CallContext) -> str:
             log.warning("call %s: the CRM read failed (%s: %s)", ctx.call_control_id, type(error).__name__, error)
             return f"The CRM did not answer. Say in one sentence that you cannot check it right now, and that {owner} has their message."
     else:
-        lines.append(f"- {owner}'s CRM has the caller's message from {_iso_day(records[0].created_at)}. It has no stage: {owner} tracks a stage only for a project or a role.")
+        lines.append(f"- {owner}'s CRM has the caller's message from {_iso_day(records[0].created_at)}. This call can give no stage for it. Say only that {owner} has the message.")
     return (
         f"Read from {owner}'s CRM over MCP, just now:\n"
         + "\n".join(lines)
