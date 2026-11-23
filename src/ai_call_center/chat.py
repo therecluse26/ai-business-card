@@ -1,6 +1,7 @@
 """Terminal simulator: you type as the caller; the graph answers as the active agent.
 
 Run: uv run chat
+     uv run chat --crm    the end of the call also writes to the owner's CRM, as a phone call does (crm.py)
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from ai_call_center.agents.specs import (
 from ai_call_center.analytics import MESSAGE, NO_OUTCOME, TEXT, TRANSFER, CallAnalytics, call_day, forget_call, harness_version, record_call
 from ai_call_center.callers import summarize_call, transcript_lines
 from ai_call_center.config import get_settings
+from ai_call_center.crm import CrmStore, default_crm, sync_call
 from ai_call_center.decision_grader import default_decision_grader
 from ai_call_center.decisions import default_decider
 from ai_call_center.grading import describe_scores
@@ -85,7 +87,7 @@ def print_new_messages(messages: list, start: int) -> None:
             print(f"  [result] {msg.content}")
 
 
-async def run(caller_number: str = "+10000000000") -> None:
+async def run(caller_number: str = "+10000000000", *, crm: bool = False) -> None:
     settings = get_settings()
     tracing.start(settings, voice=False)
     specs = default_specs()
@@ -113,6 +115,7 @@ async def run(caller_number: str = "+10000000000") -> None:
         ),
         owner_name=settings.owner_name,
         decider=default_decider(settings),
+        crm=default_crm(settings) if crm else None,  # `--crm`: a text call is a test, so it writes to the owner's CRM only on request
         earlier_calls=store.call_count_for(caller_number, exclude=call_id),
         transfer_hours=TransferHours.parse(settings.transfer_hours, settings.transfer_days),
         website_spoken=site.spoken if (site := web_address(settings.website_url, settings.brand_name)) else "",
@@ -177,6 +180,10 @@ async def run(caller_number: str = "+10000000000") -> None:
             print(f"\n[call summary saved for {caller_number}: {summary.summary} (topic: {summary.topic or '-'}, interest: {summary.interest})]")
         if await send_warm_lead_at_call_end(ctx, summary, lead_saved=bool(noted) or message_saved(ctx), visited=visited):
             print("[warm lead email sent: the caller talked about a project or a role and left no message]")
+        if ctx.crm is not None:
+            await sync_call(ctx, summary, visited=visited, transferred=transferred)
+            row = CrmStore(store.connection).get(call_id)
+            print(f"[CRM: {'this call left no entry' if row is None else 'entry ' + row.state + (', person ' + row.person_id if row.person_id else '')}]")
         # The grader scores the call, as it does after a phone call. A call from this simulator is marked as a test.
         try:
             record = await record_call(
@@ -215,7 +222,7 @@ def main() -> None:
     try:
         args = sys.argv[1:]
         number = args[args.index("--from") + 1] if "--from" in args and len(args) > args.index("--from") + 1 else "+10000000000"
-        asyncio.run(run(number))
+        asyncio.run(run(number, crm="--crm" in args))
     except KeyboardInterrupt:
         sys.exit(130)
 

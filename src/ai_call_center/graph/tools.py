@@ -16,7 +16,10 @@ from ai_call_center.agents.specs import (
     PASSPHRASE_OFFER,
     PASSPHRASE_SET,
     PASSPHRASE_SKIPPED,
+    PASSPHRASE_START,
     PASSPHRASE_WRONG,
+    RETURNING_QUESTION,
+    WELCOME_QUESTION,
     feedback_filed,
     passphrase_question,
     passphrase_read_back,
@@ -24,6 +27,7 @@ from ai_call_center.agents.specs import (
 )
 from ai_call_center.analytics import AnalyticsStore
 from ai_call_center.caller_voice import voice_sentence, voice_summary
+from ai_call_center.crm import CrmStore, request_status
 from ai_call_center.decisions import Decision
 from ai_call_center.feedback import FAULT, IDEA, MAX_ITEMS
 from ai_call_center.graph.state import CallContext, CallState
@@ -54,9 +58,15 @@ NO_NOTES = (
     "only after a passphrase check, and they can set a passphrase after they leave a message."
 )
 PHRASE_ASKED = (
-    "When the caller says the passphrase, call verify_passphrase with it, in silence. "
-    "If they do not know it or do not want to say it, call verify_passphrase with an empty passphrase. Say nothing about an earlier call before its result."
+    "The caller's reply is the passphrase, even a full sentence: call verify_passphrase with all of it, word for word, in silence. "
+    "Only if they say they do not know it, do not remember it, or will not say it, call verify_passphrase with an empty passphrase. Say nothing about an earlier call before its result."
 )
+
+
+def _start_asked(ask: str) -> str:
+    return f'If the caller says a word or phrase, call set_passphrase with it, in silence. If they skip it or ask for something, answer them, or ask: "{ask}"\n'
+
+
 PHRASE_CLOSED = "You have no notes of the caller's earlier calls. Do not ask for the passphrase again on this call, and say nothing about what an earlier call was about."
 
 
@@ -78,10 +88,15 @@ def identify(ctx: CallContext, name: str) -> str:
         )
         return follow + (_say(words) if words else "ask what they would like to do.")
     memory = recall(ctx.leads, ctx.caller_number, name, exclude_call=ctx.call_control_id)
+    # A caller with no passphrase to check is asked to set one at the start, so the next call can verify them.
+    offer = ctx.phrase_offer and ctx.caller_number not in UNKNOWN_NUMBERS and not ctx.forgotten
     if memory is None:
         ctx.caller_name = name
-        words = welcome.new_caller(name) if welcome else ""
-        return f"{_say(words) if words else f'Greet {name} by name, and ask what they would like to do.'}\n{SETTLED}"
+        if welcome:
+            say = _say(welcome.new_caller(name, PASSPHRASE_START if offer else WELCOME_QUESTION))
+        else:
+            say = f"Greet {name} by name. {_say(PASSPHRASE_START)}" if offer else f"Greet {name} by name, and ask what they would like to do."
+        return f"{say}\n{_start_asked(WELCOME_QUESTION) if offer else ''}{SETTLED}"
     ctx.identity_confirmed = True
     ctx.returning_name = memory.name
     # The agents get the name that the caller said on this call. The name on record is a detail of an earlier
@@ -91,8 +106,11 @@ def identify(ctx: CallContext, name: str) -> str:
     if on_file is not None and not on_file.locked:
         return f"{_say(passphrase_question(name))}\n{PHRASE_ASKED}\n{SETTLED}"
     ctx.phrase_closed = True
-    words = welcome.returning_caller(name) if welcome else ""
-    return f"{_say(words) if words else f'Welcome {name} back, and ask what they would like to do.'}\n{NO_NOTES}\n{SETTLED}"
+    if welcome:
+        say = _say(welcome.returning_caller(name, PASSPHRASE_START if offer else RETURNING_QUESTION))
+    else:
+        say = f"Welcome {name} back. {_say(PASSPHRASE_START)}" if offer else f"Welcome {name} back, and ask what they would like to do."
+    return f"{say}\n{_start_asked(RETURNING_QUESTION) if offer else ''}{NO_NOTES}\n{SETTLED}"
 
 
 def verify(ctx: CallContext, phrase: str) -> str:
@@ -154,7 +172,8 @@ def set_phrase(ctx: CallContext, phrase: str) -> str:
     store.set(ctx.caller_number, name, phrase, calls=[ctx.call_control_id, *(ctx.open_calls if ctx.identity_verified else [])])
     ctx.held_phrase, ctx.phrase_set = "", True
     log.info("call %s: the caller set a passphrase", ctx.call_control_id)
-    return f"{_say(PASSPHRASE_SET)} Then ask if there is anything else. Never say the passphrase again."
+    then = "Then ask if there is anything else." if message_saved(ctx) else "Then ask what you can do for them."
+    return f"{_say(PASSPHRASE_SET)} {then} Never say the passphrase again."
 
 
 def forget(ctx: CallContext) -> tuple[str, list[str]]:
@@ -172,6 +191,8 @@ def forget(ctx: CallContext) -> tuple[str, list[str]]:
             PhraseStore(ctx.leads.connection).forget(ctx.caller_number, name)
         # The grader's notes can say what happened on those calls. The call in progress gets no record at all.
         AnalyticsStore(ctx.leads.connection).drop_notes(call_ids)
+    # The links to the caller's CRM records go, and so does an entry that still waits. What the CRM has stays with the owner, as the email does.
+    CrmStore(ctx.leads.connection).forget([*call_ids, ctx.call_control_id])
     ctx.forgotten = True
     ctx.caller_history, ctx.identity_confirmed, ctx.returning_name = "", False, ""
     ctx.identity_verified, ctx.open_calls, ctx.phrase_closed, ctx.held_phrase, ctx.phrase_set = False, [], True, "", False
@@ -872,6 +893,13 @@ def get_call_stats(runtime: ToolRuntime[CallContext, CallState]) -> str:
         lead_saved=bool(state.get("lead")),
         transfer_requested=bool(state.get("transfer_requested")),
     )
+
+
+@tool
+async def crm_lookup(runtime: ToolRuntime[CallContext, CallState]) -> str:
+    """Look up where the caller's own earlier request stands in the owner's CRM, over MCP. Call it when a returning caller asks if the owner got their message, or where their project or role stands.
+    It reads a record only after the passphrase check of this call. The result gives you what to say."""
+    return await request_status(runtime.context)
 
 
 @tool

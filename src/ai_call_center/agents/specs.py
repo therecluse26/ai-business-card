@@ -141,6 +141,7 @@ LEG_COMPANIES: dict[str, str] = {
 
 NAME_QUESTION = "I remember callers, so first: who am I speaking with?"
 WELCOME_QUESTION = "So, do you have a project or a role in mind, or would you like to look around first?"
+RETURNING_QUESTION = "What can I do for you today?"
 
 # A new caller hears one of these, picked at random per call, as "Try asking me <tip>."
 # Each one starts a real feature, so the caller sees the system work in the first minute.
@@ -196,7 +197,7 @@ class Welcome:
     tip: str
     rag: bool = False
 
-    def new_caller(self, name: str = "") -> str:
+    def new_caller(self, name: str = "", ask: str = WELCOME_QUESTION) -> str:
         first = owner_first_name(self.owner)
         hello = f"Nice to meet you, {name.split()[0]}." if name.strip() else "No problem."
         rag = f" and RAG search over {first}'s writing" if self.rag else ""
@@ -204,13 +205,13 @@ class Welcome:
             f"{hello} {first} is a software engineer and architect, available for contract work or a full-time role. "
             f"{first}'s work covers new platforms and APIs, cloud systems, modernizing old code, and AI agents like the ones on this call. "
             f"Right now you're talking to a graph of AI agents {self.companies}, with caller memory{rag}. "
-            f"Interrupt me any time. Try asking me {self.tip}. {WELCOME_QUESTION}"
+            f"Interrupt me any time. Try asking me {self.tip}. {ask}"
         )
 
-    def returning_caller(self, name: str) -> str:
+    def returning_caller(self, name: str, ask: str = RETURNING_QUESTION) -> str:
         """A recognised caller with no passphrase. No detail of an earlier call: a phone number can be faked."""
         first_name = name.split()[0] if name.strip() else name
-        return f"Welcome back, {first_name}. Good to hear from you again. What can I do for you today?"
+        return f"Welcome back, {first_name}. Good to hear from you again. {ask}"
 
 
 # The words of the passphrase check (passphrase.py). The tools give them to the agent word for word.
@@ -232,7 +233,9 @@ PASSPHRASE_OFFER = (
     "One more thing. I can remember your details for next time, if you give me a short word or phrase to identify you. "
     "Make it a made-up one, not a password you use anywhere else. Want to set one?"
 )
-PASSPHRASE_SET = "Done. On your next call, I will ask for that passphrase before I use anything from today."
+# At the start of a call, in place of the welcome's last question, for a caller with no passphrase to check.
+PASSPHRASE_START = "First, so I can verify you next time: give me a short made-up word or phrase, not a password you use anywhere else. Or say skip."
+PASSPHRASE_SET ="Done. On your next call, I will ask for that passphrase before I use anything from today."
 
 
 def passphrase_read_back(phrase: str) -> str:
@@ -334,6 +337,7 @@ def build_specs(
     writing_about: str = "",
     website: WebAddress | None = None,
     tracing: bool = False,
+    crm: bool = False,
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
@@ -352,6 +356,25 @@ def build_specs(
         f'If the caller asks "can you email {o}?" or "can I send {o} a message?", say yes, and take the message.'
         if emailing
         else f"- If the caller asks you to email {o}, say you can pass their message to {o}, and take the message."
+    )
+    # The owner's CRM (crm.py). The agents say what it does only when this server is connected to one.
+    crm_tools = ("crm_lookup",) if crm else ()
+    crm_route = ", or asks where an earlier message or request stands" if crm else ""
+    crm_section = (
+        f"""
+
+An earlier request of the caller (the crm_lookup tool):
+- When the caller asks if {o} got an earlier message, or where their project or role stands, call crm_lookup. It reads {o}'s CRM over MCP.
+- A look in the CRM is part of this demonstration, so the caller hears it. Before you call crm_lookup, say one short sentence, for example: "Let me look in {owner_first_name(o)}'s CRM. One moment." Then call crm_lookup in the same turn.
+- Say only what the result gives. Never guess a status, and never promise a date or an answer.
+- Say MCP as three letters, and CRM as three letters."""
+        if crm
+        else ""
+    )
+    crm_fact = (
+        f"\n- After a call that left a message, code writes it to {o}'s CRM over MCP, the Model Context Protocol: the caller as a person, the call as a timeline entry, a task to follow up, and a deal when the call was about a project or a role. No model chooses those writes, and they run after the caller hangs up, so they add no wait. A caller who passed the passphrase check can ask the contact agent where their request stands; the agent then reads the stage of their own deal from the CRM."
+        if crm
+        else ""
     )
     # One routing line for every agent but the feedback agent. The details are in the feedback agent's role, the handoff tool's description.
     feedback_line = f"- If the caller reports a fault of this phone line or asks for a feature of it, hand off to the feedback agent. A view about {o}, a question, or one answer you can correct is not that."
@@ -375,7 +398,7 @@ At the start of the call:
 - If the caller asks how you knew them: identify_caller matched the name they gave with a name on record for this phone number. If they say they never called, say the match may be wrong, and offer the tour agent, which explains caller memory.
 - Never share who else called, or what another person's call was about.
 - Never say an email address or a phone number aloud.
-- When the identify_caller result tells you to ask for a passphrase, the caller's answer goes to verify_passphrase, in silence. Its result gives you the exact words to say next. Never say a passphrase yourself, and never give a hint about one.
+- When the identify_caller result asks for a passphrase, the caller's answer goes to the tool that it names, in silence. Its result gives you the exact words to say next. Never say a passphrase yourself, and never give a hint about one.
 
 Routing:
 - Questions about {o}: who they are, their experience, skills, past work, or their views on software engineering. Hand off to the profile agent.
@@ -384,13 +407,13 @@ Routing:
 - The caller has a business, a product, or a software project, and wants to know how {o} could help with it. Hand off to the consultant agent.
 - The caller has a role to fill, or is recruiting. Questions about {o}'s experience go to the profile agent. To pass the role to {o}, hand off to the contact agent.
 - The caller wants to look around first. Hand off to the tour agent.
-- The caller wants to leave contact details, get a follow-up, or speak to {o}. Hand off to the contact agent.
+- The caller wants to leave contact details, get a follow-up, or speak to {o}{crm_route}. Hand off to the contact agent.
 {feedback_line}
 - If the intent is unclear, ask one short clarifying question. Do not ask more than two questions in total before you route.
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("identify_caller", "verify_passphrase", "forget_caller", "end_call"),
+        tools=("identify_caller", "verify_passphrase", "set_passphrase", "forget_caller", "end_call"),
         handoffs=SPECIALISTS,
         leg=legs["classifier"],
         voice=voices["classifier"],
@@ -465,11 +488,11 @@ What you know about the system:
 - LangGraph holds the state of the call, decides which agent is active, runs the tools, and routes handoffs.
 - Each agent can run on a different voice provider. A handoff can change the voice and the provider in the middle of the call.
 - The contact agent can save a lead for {o} and transfer the live call to {o}'s phone.
-- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. A match gives a welcome back and nothing more: a phone number can be faked, so a match is not proof. The notes of an earlier call need a passphrase that the caller set on that call. Code checks the passphrase, and the server keeps a salted hash of it, not the passphrase. A caller can set one after they leave a message. With any doubt the caller counts as new, so nobody hears another person's details.
+- Caller memory: every caller is asked who they are. Code, not a model, compares the name with the names on record for the phone number: the same name, a short or long form of it, or a name that sounds the same. A match gives a welcome back and nothing more: a phone number can be faked, so a match is not proof. The notes of an earlier call need a passphrase that the caller set on that call. Code checks the passphrase, and the server keeps a salted hash of it, not the passphrase. A caller can set one at the start of a call, or after they leave a message. With any doubt the caller counts as new, so nobody hears another person's details.
 - A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
 - When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
 - The feedback agent takes a caller's bug report or feature idea about this line. After the call, a report becomes a GitHub issue, a triage agent sorts it, and a coding agent can open a pull request.
-- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}
+- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}{crm_fact}
 
 How to use your tool:
 - Call get_call_stats when the caller asks what has happened on this call, how long it has been, which providers have spoken, how fast the agents answer, how many tokens the call has used, or what the call costs. Then say the facts that answer the question, in one or two sentences.
@@ -514,7 +537,7 @@ Profile summary of {o}:
 
     contact = AgentSpec(
         name="contact",
-        role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner",
+        role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner" + crm_route,
         instructions=f"""{_preamble("contact", o, brand_name, name_hint, website)}
 
 Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
@@ -552,7 +575,7 @@ To connect the caller to {o}, only when they asked to speak to {o} now:
 - The result tells you what to say next. The caller then waits on hold while {o}'s phone rings. Never promise that {o} will answer.
 - If no transfer is possible, or {o} does not pick up, say {o} will call them back.
 
-You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.
+You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.{crm_section}
 
 Keep it short:
 - One or two sentences per turn. Say each thing once.
@@ -564,7 +587,7 @@ Keep it short:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "set_passphrase", "request_owner_transfer", *text_tools, "forget_caller", "end_call"),
+        tools=("save_lead", "set_passphrase", "request_owner_transfer", *crm_tools, *text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "tour", "consultant", "feedback"),
         leg=legs["contact"],
         voice=voices["contact"],

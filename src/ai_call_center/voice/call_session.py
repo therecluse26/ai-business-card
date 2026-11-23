@@ -76,6 +76,7 @@ from ai_call_center.callers import (
 )
 from ai_call_center.config import Settings
 from ai_call_center.decision_grader import default_decision_grader, feedback_chances
+from ai_call_center.crm import default_crm, request_status, sync_call
 from ai_call_center.decisions import default_decider
 from ai_call_center.graph.build import ENTRY_AGENT, default_specs
 from ai_call_center.graph.handoffs import handoff_tool_name
@@ -800,6 +801,7 @@ class CallSession:
             refused_transfer=resume.refused_transfer if resume else None,
             transfer_unavailable=transfers.unavailable,
             decider=default_decider(self.settings),
+            crm=default_crm(self.settings),
             caller_line_type=info.line_type if info else "",
             texter=self.telephony if self.settings.sms_enabled else None,
             portfolio_url=self.settings.portfolio_url,
@@ -1159,6 +1161,13 @@ class CallSession:
             # The query embedding takes a few milliseconds of CPU: keep it off the audio loop.
             await params.result_callback(await asyncio.to_thread(search_result, default_library(), query))
 
+        async def on_crm_lookup(params: FunctionCallParams) -> None:
+            # One read of the owner's CRM over MCP. Code allows it only after the passphrase check (crm.request_status).
+            started_read = time.monotonic()
+            result = await request_status(ctx)
+            log.info("call %s: crm_lookup (verified: %s) in %.0f ms", self.call_control_id, ctx.identity_verified, (time.monotonic() - started_read) * 1000)
+            await params.result_callback(result)
+
         async def on_text_link(params: FunctionCallParams) -> None:
             await params.result_callback(await text_portfolio_link_to_caller(ctx, owner_name=self.settings.owner_name))
 
@@ -1258,6 +1267,7 @@ class CallSession:
             vl.service.register_function("forget_caller", respelled(on_forget_caller))
             vl.service.register_function("get_call_stats", respelled(on_call_stats))
             vl.service.register_function("search_writing", respelled(on_search_writing))
+            vl.service.register_function("crm_lookup", respelled(on_crm_lookup))
             vl.service.register_function("request_owner_transfer", respelled(on_transfer))
             vl.service.register_function("text_portfolio_link", respelled(on_text_link))
             vl.service.register_function("end_call", respelled(on_end_call))
@@ -1351,6 +1361,10 @@ class CallSession:
                     log.info("call %s: what was said:\n%s", self.call_control_id, "\n".join(transcript_lines(self.respell.written_messages(context.messages))) or "(nothing)")
                     summary = await self._finish_call(store, ctx, context.messages, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer")
                     summary_tries, summary_faults = summary.tries, summary.first_faults
+                    # The owner's CRM gets what the call left: after hangup, so the caller waits for nothing (crm.py).
+                    await sync_call(
+                        ctx, summary, visited=[ENTRY_AGENT, *state.handoffs], transferred=state.end_reason == "transfer", test=ctx.caller_number == self.settings.owner_phone
+                    )
             store.close()
         if state.end_reason == "failover":
             call_audio.drop_later(self.call_control_id)  # the next media stream keeps it; with no next stream it is deleted

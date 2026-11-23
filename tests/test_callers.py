@@ -135,7 +135,7 @@ def test_a_matching_name_gets_a_welcome_back_and_no_notes(ctx, leads):
     _call(leads, "call-1", "Steve", "Asked about an after-hours agent.", topic="an after-hours phone agent")
     ctx.welcome = _welcome()
     result = identify(ctx, "Stephen")
-    assert '"Welcome back, Stephen. Good to hear from you again. What can I do for you today?"' in result
+    assert '"Welcome back, Stephen. Good to hear from you again. First, so I can verify you next time:' in result  # no passphrase yet: asked to set one
     # A phone number can be faked: a match of number and name opens no notes. They need the passphrase (test_passphrase.py).
     for detail in ("Acme Roofing", "after-hours", "Last time"):
         assert detail not in result
@@ -188,7 +188,7 @@ async def test_identify_caller_runs_in_the_graph(make_graph, ctx, config, leads)
     model = scripted(tool_call("identify_caller", name="Steve"), "Welcome back, Steve.")
     result = await make_graph(model).ainvoke({"messages": [HumanMessage("It's Steve.")]}, config=config, context=ctx)
     tool_msg = next(m for m in result["messages"] if isinstance(m, ToolMessage))
-    assert "Welcome" in tool_msg.content and "Acme Roofing" not in tool_msg.content and ctx.identity_confirmed
+    assert "Welcome Steve back" in tool_msg.content and "Acme Roofing" not in tool_msg.content and ctx.identity_confirmed
 
 
 # --- forget me ---

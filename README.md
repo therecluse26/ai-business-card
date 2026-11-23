@@ -22,6 +22,8 @@ After hangup a grader scores each call against eleven rules, and the figures and
 see "A grader scores each call after hangup" and "Call analytics and the public report".
 A failed rule starts a job on GitHub that opens a pull request with a fix, with no action from the owner;
 see "The improvement loop: a failed rule opens a pull request".
+With the owner's CRM connected, each call that left a message is written to it after hangup;
+see "The owner's CRM over MCP (off by default)".
 
 Dropped: the local pipeline leg (M7). Its timing spike showed it would answer about 1 s slower; see "Pipeline leg spike (M7)".
 
@@ -368,13 +370,20 @@ number and name is not proof of who calls. The line has two levels (`passphrase.
 | Recognised | A phone number and a name that match an earlier caller | Says "Welcome back". No agent gets a note of an earlier call. |
 | Verified | The passphrase of that earlier caller too | The agents get the notes, and the first agent names the last topic. |
 
-- **The offer.** After a saved message, the contact agent offers one time: "I can remember your details
+- **The ask at the start.** Every named caller with no passphrase to check (a new caller, or a recognised
+  one with none or a locked one) hears, in place of the welcome's last question: "First, so I can verify
+  you next time: give me a short made-up word or phrase, not a password you use anywhere else. Or say
+  skip." The greeting agent passes the answer to `set_passphrase`. A caller who skips it, or asks for
+  something, gets an answer. No ask for a caller with no name or a hidden number.
+- **The offer.** After a saved message, the contact agent offers one time, unless a passphrase was set on the call: "I can remember your details
   for next time, if you give me a short word or phrase to identify you. Make it a made-up one, not a
   password you use anywhere else." The agent says the passphrase back, and keeps it after a yes.
-  `CALLER_PASSPHRASE_OFFER=false` turns the offer off.
+  `CALLER_PASSPHRASE_OFFER=false` turns the offer and the ask at the start off.
 - **The check.** On the next call the first agent says: "Welcome back, <name>. I believe we have talked
   before. Just to verify, may I have the short passphrase that you gave me?" The answer goes to the tool
   `verify_passphrase`. Code compares it. The voice model gets a yes or a no, and never the stored passphrase.
+  The whole reply is the passphrase, even a full sentence. Only "I don't know" or "I don't remember" counts
+  as no passphrase.
 - **Speech is not exact.** The comparison ignores capital letters, spaces and punctuation, and it uses
   how the words sound (Metaphone). "Purple lanturn" is "purple lantern".
 - **Storage.** The table `caller_phrases` holds a salted scrypt hash, not the passphrase.
@@ -1141,6 +1150,58 @@ uv run test-email
 It uses the same code path as a real lead and writes nothing to the lead table. On a failure it
 prints the server's answer and what to check.
 
+### The owner's CRM over MCP (off by default)
+
+With `CRM_MCP_URL` and `CRM_API_TOKEN` set, the line writes to the owner's CRM, and one agent can read it
+(`crm.py`). The CRM is [zepto-crm](https://github.com/therecluse26/zepto-crm). Its MCP server has no session:
+each tool call is one `POST` with a Bearer token, and the answer is one event of an event stream. So the
+client is 60 lines of `httpx`, with no MCP package.
+
+**The writes.** Code makes them after hangup. No model chooses them, and the caller waits for none of them.
+
+- A call counts when the owner got a lead from it: a saved message, a note of a request for a live call, or
+  a talk about a project or a role (the rule of the warm lead email).
+- The caller becomes a person. The line looks for the person first: an earlier call of the same number and
+  name, then a CRM search by the phone number. A hit needs the same name and the same number on the record.
+  The CRM has one unique field, the email address; a person with the caller's address is used, not copied.
+- The call becomes an entry of the kind "call" on the person's timeline: the message, the start, the size, the
+  call summary, how to reach the caller, the agents, the length, and "verified", "recognised" or "new".
+- A project or a role makes a deal in the first stage of the first pipeline. A second call of the same
+  person about work uses their open deal. A message about something else makes no deal.
+- A task "Follow up with <name>" is due on the day of the call (Eastern). A call that went to the owner's
+  phone makes no task.
+- A call from `OWNER_PHONE` is a test: it leaves the person and the entry, marked "Test call", and no deal or task.
+- `uv run chat` writes to the CRM only with `--crm`.
+
+**When the CRM is down.** The entry waits in the table `crm_calls`, and the end of the next call sends it
+again. Each step that worked is kept, so a second try makes no second person. `uv run check-crm --send`
+sends the waiting entries at once. An entry that the CRM refuses for its content is not sent again; the
+log and `uv run check-crm` show the CRM's reason. The lead is in the owner's email in every case.
+
+**The read.** The contact agent has the tool `crm_lookup`: where the caller's own earlier request stands.
+
+- Code allows it only after the passphrase check of the call. A match of number and name reads nothing.
+- It reads only a deal that a call with that passphrase made. A call that joined the deal of an earlier
+  call does not open that deal: the earlier call can be the call of another person.
+- The agent gets the status, the stage ("stage 2 of 5"), and two dates. It gets no name of a deal, no note of
+  the owner, and no contact detail.
+- The agent says aloud that it looks in the CRM, as it does for the RAG search. The read has 4 s; after
+  that the agent says that it cannot check now.
+
+**"Forget me"** deletes the links between the caller's calls and the CRM records, and an entry that still
+waits. What the CRM already has stays with the owner, as the lead email does. A forgotten call writes nothing.
+
+**Setup.**
+
+1. In the CRM, make an API token with the scope "full" (Settings, API tokens). Use a user with the role
+   member, not the admin: the line needs to read and write records, not to change settings.
+2. The CRM is behind Cloudflare Access. The path `ext/*` needs an Access application with the action Bypass,
+   or each request gets a redirect to the sign-in page.
+3. Put `CRM_MCP_URL` (`https://<crm-host>/ext/mcp`) and `CRM_API_TOKEN` in `.env`. Run `uv run check-crm`.
+   It reads only: the tool list, the pipeline and stage of a new deal, and the time of five searches.
+
+Measured on 2026-11-23 from the laptop: 117 to 157 ms for each request, 296 ms for the first one.
+
 ### Pipeline leg spike (M7)
 
 The pipeline leg (dropped on 2026-11-18) was planned as a local speech-to-text model, Claude through LangGraph, and local
@@ -1230,7 +1291,7 @@ src/ai_call_center/
   agents/specs.py                one AgentSpec per agent: instructions, tools, handoffs, voice leg
   graph/state.py                 CallState (checkpointed) and CallContext (per call)
   graph/handoffs.py              transfer_to_<agent> tools
-  graph/tools.py                 save_lead, request_owner_transfer, identify_caller, forget_caller, get_call_stats, text_portfolio_link, end_call
+  graph/tools.py                 save_lead, request_owner_transfer, identify_caller, forget_caller, get_call_stats, text_portfolio_link, crm_lookup, end_call
   graph/build.py                 the agent loop; middleware swaps prompt and tools per active agent
   leads.py                       SQLite store: leads, the call log, cached number lookups
   callers.py                     returning-caller memory: first-name question, history after a yes, summary at hangup
@@ -1239,6 +1300,7 @@ src/ai_call_center/
   writing.py                     RAG over the owner's posts: RSS feed, passages, hybrid search, saved vectors
   names.py                       same_person: does a spoken first name match a name on record (spelling, short form, sound)
   decisions.py                   Jev, a decision model: the probability that a caller asked for a live call; the word list is the fallback
+  crm.py                         the owner's CRM over MCP: the writes after hangup, the entries that wait, and the one read behind the passphrase
   grading.py                     the grader: the rules, the code checks, and the request to the grader model, after hangup
   decision_grader.py             the decision grader: Gemini Decision 1 hears the call audio and answers typed questions; the grader model is the fallback
   analytics.py                   the figures, answer times and scores of each call; the public report (`uv run call-report`)
@@ -1253,6 +1315,7 @@ src/ai_call_center/
   passphrase.py                  the passphrase check: a match of number and name opens no notes of an earlier call; the caller's passphrase does
   proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard on changed files, the pull request text)
   check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
+  check_crm.py                   `uv run check-crm`: a read of the owner's CRM, to check the address, the token and the times; `--send` writes the waiting entries
   check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time
   test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
   check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys

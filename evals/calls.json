@@ -114,6 +114,18 @@
     "expect": {"visits": ["feedback"], "outcome": "none"}
   },
   {
+    "id": "passphrase-at-start",
+    "about": "A new caller is asked for a passphrase right after their name, sets one, and then asks how the line works.",
+    "caller": [
+      "This is Ilse Brandvold.",
+      "Willow compass.",
+      "Yes, that is right.",
+      "I only want to know how this phone line remembers callers.",
+      "Thanks, that is all. Goodbye."
+    ],
+    "expect": {"visits": ["tour"], "outcome": "none"}
+  },
+  {
     "id": "owner-name-after-message",
     "about": "The caller leaves a message. After the save, the contact agent says who has the message, with the owner's real first name and no other.",
     "caller": [
