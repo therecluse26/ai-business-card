@@ -1106,6 +1106,7 @@ thing that starts a job (`issue_queue.py`, `.github/workflows/issues.yml`).
 | `not-actionable` | It waits. No job can act on the text. | The triage agent |
 | `build` | The build job starts for any issue, also for a feature. | Only the owner |
 | `fix-started` | A job started. No second job starts. | The queue |
+| `fix-started`, and the job's pull request closed with no merge | It gets `needs-owner`, with a comment. `fix-started` and the job's label go. | The queue |
 
 **The triage agent** reads one issue and the prompts of the agents. Its only output is one label from
 the list `auto-fix`, `auto-build`, `needs-owner`, `not-actionable`, and one short reason. A plain
@@ -1135,6 +1136,20 @@ The pull request says `Closes #N`, so a merge closes the issue. A job that opens
 writes the reason as a comment on the issue, removes `fix-started` and the label that started it, and
 sets `needs-owner`. To run the build job again, put `build` on the issue again.
 
+A pull request that the owner closes with no merge puts its issue back the same way. The queue reads
+each pull request of the repository, open or closed. A job's branch is `improve/issue-<N>-<run id>`,
+so its name gives the issue. The queue clears an issue with `fix-started` only when all of these hold:
+
+- at least one pull request of a job for the issue exists, and each one is closed with no merge;
+- no job for the issue runs now, and no job for it started after the newest of those pull requests.
+
+Then it sets `needs-owner`, removes each label that starts a job (`auto-fix`, `auto-build`, `build`),
+writes one fixed comment, and removes `fix-started` last. A step that fails leaves `fix-started`, so the
+next run tries again. With no pull request yet, the queue does nothing: the job can still run. Only a
+branch of this repository counts, with exactly that name: a fork can give a branch any name. The queue
+has no `pull_request` trigger, because its token can write. Its run of each morning, or the next change
+of a label, does the work.
+
 **The owner's label wins.** The owner can set `auto-fix`, `auto-build` or `build` on an issue at any time, also on
 an issue that the owner wrote by hand. The queue reads the labels again on each run, and it sorts no
 issue a second time. To have an issue sorted again, remove its triage label.
@@ -1156,7 +1171,8 @@ No count of runs for one day is a limit. Each issue that is ready starts its run
 stops a run that starts again and again:
 
 - The label `fix-started`: one job for an issue. A job that opens no pull request removes the label
-  that started it, so nothing starts that job again by itself.
+  that started it, so nothing starts that job again by itself. After a closed pull request, the
+  queue removes each label of a job for the same reason.
 - A triage run that is not done: the queue starts no second run beside it.
 - 3 failed triage runs for one issue: the issue gets `needs-owner`, with a comment.
 
@@ -1164,7 +1180,8 @@ Each run uses the owner's Claude subscription. The limits of that subscription a
 the cost: one call can give 3 issues, and each new fault starts a triage run and maybe a job.
 
 The queue runs on each new issue, on each change of a label by a person, and each morning. It reads
-all open issues and does only what is not done, so a lost event loses no work. It needs no new secret:
+all open issues, the pull requests and the runs of the two jobs, and does only what is not done, so a
+lost event loses no work. It needs no new secret:
 the token of its own run sets the labels and starts the two other workflows. So the actor of those
 runs is the bot of GitHub Actions, and each agent step names it in `allowed_bots`; the agent action
 refuses a run that another bot started. Optional repository
@@ -1174,10 +1191,10 @@ What this does not promise:
 
 - The triage agent can be wrong. A wrong `auto-fix` or `auto-build` costs one job, whose pull request
   the owner reviews; no job merges its own change. A wrong `needs-owner` costs the owner one label.
-- Each fix adds a made-up call at the end of `evals/calls.json`. Two open pull requests then change
-  the same lines, and the second one needs a merge of `main` before it can merge.
-- A pull request that the owner closes with no merge leaves `fix-started` on its issue. Remove the
-  label to run a job again, or close the issue.
+- A pull request that the owner closes with no merge does not put its issue back at once. The queue
+  does it on its next run: each morning, or at the next change of a label.
+- A job whose own report fails keeps `fix-started` on its issue. The queue sees no closed pull
+  request of that job, so it does nothing. Remove the label by hand to run a job again.
 
 ### A message is saved only after the caller's yes
 
