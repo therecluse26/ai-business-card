@@ -21,6 +21,7 @@ import sqlite3
 import statistics
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -344,10 +345,27 @@ def _public_call(call: CallAnalytics) -> dict[str, Any]:
     }
 
 
-def public_report(calls: list[CallAnalytics], *, tests: bool = False) -> dict[str, Any]:
+def _public_check(check: Any) -> dict[str, Any]:
+    """One check that a merged fix held (`fix_check.FixCheck`): fixed words, versions, and counts. The issue number stays private.
+
+    `new_version` is the first version that held the fix. The `new` counts are over all `new_versions` versions that hold it."""
+    return {
+        "rule": check.rule,
+        "verdict": check.verdict,
+        "pull": check.pull,
+        "fixed_version": check.fixed_version,
+        "new_version": check.new_version,
+        "new_versions": check.new_versions,
+        "fixed": {"failed": check.fixed_failed, "graded": check.fixed_graded},
+        "new": {"failed": check.new_failed, "graded": check.new_graded},
+    }
+
+
+def public_report(calls: list[CallAnalytics], *, tests: bool = False, fix_checks: Iterable[Any] = ()) -> dict[str, Any]:
     """What a public page may show. Test calls are left out unless `tests` is set.
 
-    The report holds no call id, no time of day, no grader's note, and no outcome of a single call."""
+    The report holds no call id, no time of day, no grader's note, and no outcome of a single call.
+    `fix_checks` are the stored checks that a fix held (`fix_check.py`)."""
     shown = [call for call in calls if tests or not call.test]
     versions: dict[str, list[CallAnalytics]] = {}
     for call in shown:
@@ -375,12 +393,14 @@ def public_report(calls: list[CallAnalytics], *, tests: bool = False) -> dict[st
             for version, group in versions.items()
         ],
         "calls": [_public_call(call) for call in shown],
+        # One row for each merged fix of a rule: did the rule fail less often after the fix was deployed?
+        "fix_checks": [_public_check(check) for check in fix_checks if check.rule in {rule.key for rule in RULES} and check.verdict in ("held", "not_held")],
     }
 
 
-def dated_report(calls: list[CallAnalytics], *, tests: bool = False) -> dict[str, Any]:
+def dated_report(calls: list[CallAnalytics], *, tests: bool = False, fix_checks: Iterable[Any] = ()) -> dict[str, Any]:
     """The public report with the US Eastern date it was made on. This is the file that a public page reads."""
-    return {"generated_on": call_day(datetime.now(UTC)), **public_report(calls, tests=tests)}
+    return {"generated_on": call_day(datetime.now(UTC)), **public_report(calls, tests=tests, fix_checks=fix_checks)}
 
 
 def main() -> None:
@@ -412,7 +432,9 @@ def main() -> None:
                 continue
             print(f"{call.seq:>4}  {call.day}  {call.channel:<5}  {call.version:<20}  {' -> '.join(call.agents)}: {describe_scores(call.scores)}")
         return
-    print(json.dumps(dated_report(calls, tests="--tests" in args), indent=2))
+    from ai_call_center.fix_check import stored_checks  # fix_check reads this module, so the import waits until here
+
+    print(json.dumps(dated_report(calls, tests="--tests" in args, fix_checks=stored_checks(get_settings().leads_db)), indent=2))
 
 
 if __name__ == "__main__":

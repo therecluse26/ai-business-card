@@ -41,7 +41,7 @@ No output: the verified code is the same, and the last result still holds. Any o
 From the repository root:
 
 ```sh
-uv run python .claude/skills/formal-verify-caller-memory/check.py            # the search: about 90 seconds
+uv run python .claude/skills/formal-verify-caller-memory/check.py            # the search: about 139 seconds
 uv run python .claude/skills/formal-verify-caller-memory/check.py --mutants  # can the search fail? about 10 minutes
 uv run python .claude/skills/formal-verify-caller-memory/check.py --calls 2  # a quick look: about 5 seconds, a weaker result
 ```

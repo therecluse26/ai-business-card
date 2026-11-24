@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     improve_ref: str = "main"
     # A caller's feedback becomes a GitHub issue (feedback.py). It uses the token above, which then needs "Issues" (read and write) too.
     feedback_issues: bool = True
+    # After a fix is deployed, the server checks that the rule fails less often (fix_check.py). It uses the token above,
+    # which then needs "Contents" (read) and "Pull requests" (read) too. A failed check opens an issue: "Issues" (write).
+    fix_check: bool = True
+    fix_check_calls: int = 5  # graded calls after the merge, over all versions that hold the fix, before the check runs
     # At the start of a call and after a saved message, the agent offers a passphrase. With it, the agents may use the notes of that call on the caller's next call (passphrase.py).
     caller_passphrase_offer: bool = True
     owner_name: str = "the owner"

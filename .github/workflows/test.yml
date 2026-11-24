@@ -1,19 +1,23 @@
-# A pull request runs three checks before a person merges it. A merge to main deploys (fly-deploy.yml).
+# A pull request runs four checks before a person merges it. A merge to main deploys (fly-deploy.yml).
 #   1. The unit tests. One of them is a dry run of the fix job (tests/test_fix_job.py).
 #   2. The scorer: a check that passed on main must not fail on the pull request.
-#   3. actionlint: the workflow files have no fault in their YAML, their expressions, or their shell.
+#   3. The formal check of caller memory (.claude/skills/formal-verify-caller-memory/check.py). It takes
+#      about 2.5 minutes, so it runs only when a file that it covers changed.
+#   4. actionlint: the workflow files have no fault in their YAML, their expressions, or their shell.
 #
 # The run tests the pull request merged into main as main is now, not the branch alone.
-# The three checks are steps of one job, so a run starts one runner only. A failed check does not stop the next one.
+# The four checks are steps of one job, so a run starts one runner only. A failed check does not stop the next one.
 #
 # The fix job (improve.yml) opens its pull request with the owner's token (IMPROVE_PR_TOKEN), so "opened"
 # starts this run at once. With no such token, the fix job uses the token of its own run. GitHub then makes
 # the run, and holds it until a person approves it ("Approve workflows to run" on the pull request).
 # The fix job opens no draft: each pull request is ready for review, so the checks run when it opens.
 #
-# A push to main that changes a workflow file runs the same three checks. Such a push has no pull request,
+# A push to main that changes a workflow file runs the same four checks. Such a push has no pull request,
 # and a change to improve.yml alone starts no deploy, so no other workflow tests it. The checks run after
 # the push: they do not stop it. For a push, the scorer compares the last commit with the commit before it.
+# A push to main that changes a file of the formal check runs them too: a commit by hand has no pull
+# request, and the check of caller memory guards the data of callers.
 #
 # The run has no secret, and its token can only read. No check makes a model request.
 name: Test a change
@@ -25,6 +29,16 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/**"
+      # The files of the formal check: the coverage record in its SKILL.md, and the check itself.
+      - ".claude/skills/formal-verify-caller-memory/**"
+      - "src/ai_call_center/graph/tools.py"
+      - "src/ai_call_center/passphrase.py"
+      - "src/ai_call_center/callers.py"
+      - "src/ai_call_center/leads.py"
+      - "src/ai_call_center/crm.py"
+      - "src/ai_call_center/names.py"
+      - "src/ai_call_center/graph/state.py"
+      - "src/ai_call_center/agents/specs.py"
 
 # One run at a time for each pull request, and one for main. A new commit stops the run of the commit before it.
 # A second run of the same commit waits; it does not stop the first. On 2026-11-22 an approved run and a
@@ -39,7 +53,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20 # the formal check alone can take 5 minutes on a runner
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,6 +85,33 @@ jobs:
             exit 0
           fi
           uv run score-harness --compare "$RUNNER_TEMP/before.json"
+
+      # The search takes about 2.5 minutes, so it runs only when a file that it covers changed. The list of
+      # those files is the coverage record in SKILL.md, so a file added there is covered here too.
+      # For a push, the base is the commit before the push, so each commit of the push counts.
+      - name: The formal check of caller memory
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
+        timeout-minutes: 12
+        env:
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: |
+          set -euo pipefail
+          skill=.claude/skills/formal-verify-caller-memory
+          base=HEAD^1
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+            && git fetch --quiet --no-tags --depth=1 origin "$BEFORE"; then
+            base=$BEFORE
+          fi
+          # The backticks are a part of the pattern in SKILL.md, not a command.
+          # shellcheck disable=SC2016
+          mapfile -t covered < <(grep -oE '^\| `src/[^`]+`' "$skill/SKILL.md" | sed -E 's/^\| `([^`]+)`/\1/')
+          if [ "${#covered[@]}" -eq 0 ]; then
+            echo "::warning::SKILL.md lists no covered file, so the check runs."
+          elif git diff --quiet "$base" HEAD -- "$skill" "${covered[@]}"; then
+            echo "No file of the formal check changed, so it does not run."
+            exit 0
+          fi
+          uv run python "$skill/check.py"
 
       # The fix job starts only when a real call fails a rule, so a fault in its workflow file shows first in production.
       # The image holds shellcheck, so actionlint also checks each shell script in a `run:` step.

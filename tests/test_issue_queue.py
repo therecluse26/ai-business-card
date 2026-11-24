@@ -23,9 +23,13 @@ from ai_call_center.issue_queue import (
     BUILD,
     CODE,
     COMMENTS,
+    FIX_RUN,
+    JOB_BRANCH,
+    JOB_LABELS,
     NEEDS_OWNER,
     NOT_ACTIONABLE,
     PROMPTS,
+    PULL_CLOSED,
     QUEUE_LABELS,
     STARTED,
     TRIAGE,
@@ -44,6 +48,7 @@ from ai_call_center.issue_queue import (
     plan,
     read_issue,
     read_issues,
+    read_pulls,
     triage_issue,
     triage_task,
 )
@@ -91,6 +96,23 @@ def runs(*found: tuple[str, str, str]) -> dict:
 
 def lines(actions: list[Action]) -> list[str]:
     return [action.line() for action in actions]
+
+
+HOME = f"{OWNER}/phone-line"  # the repository, as GitHub names it in a pull request
+
+
+def pull(branch: object, state: str | None = "closed", *, merged: bool = False, repo: str | None = HOME) -> dict:
+    """One pull request as GitHub's REST API gives it. `repo` is the repository of its branch; a fork has another name."""
+    found = {"number": 50, "merged_at": "2026-11-22T17:00:00Z" if merged else None, "head": {"ref": branch, "repo": {"full_name": repo} if repo else None}, "base": {"ref": "main", "repo": {"full_name": HOME}}}
+    return {**found, "state": state} if state else found
+
+
+def jobs(*found: tuple[int, str, str | None]) -> dict:
+    """GitHub's list of the runs of improve.yml: (the id of the run, the name of the run, the conclusion)."""
+    return {"workflow_runs": [{"id": ident, "display_title": name, "conclusion": conclusion, "status": "completed" if conclusion else "in_progress"} for ident, name, conclusion in found]}
+
+
+DONE = jobs((100, "Issue #1 (auto-fix)", "success"))  # the job for issue 1 ran, and it pushed the branch improve/issue-1-100
 
 
 # --- an issue, as GitHub gives it ---
@@ -226,7 +248,7 @@ def test_what_stops_a_run_that_starts_again_and_again():
     assert lines(plan([issue(1)], owner=OWNER, triage_runs=runs(("Triage of issue #1", NOON, "success")))) == ["triage 1"]
     # A job for an issue: the label `fix-started` is the stop. With it, nothing starts; a job that fails removes the label that started it.
     assert plan([issue(1, SLOW, AUTO_FIX, STARTED), issue(2, SLOW, AUTO_BUILD, STARTED), own(3, BUILD, STARTED)], owner=OWNER) == []
-    assert 'for label in $started; do gh api "$labels/$label" --method DELETE' in WORKFLOWS["improve.yml"]
+    assert f'for label in {" ".join(JOB_LABELS)}; do gh api "$labels/$label" --method DELETE' in WORKFLOWS["improve.yml"]
 
 
 def test_a_triage_that_fails_again_and_again_goes_to_the_owner():
@@ -239,23 +261,79 @@ def test_a_run_list_that_is_not_as_expected_counts_nothing():
         assert lines(plan([issue(1)], owner=OWNER, triage_runs=rows)) == ["triage 1"]
 
 
+# --- a job's pull request that the owner closed with no merge ---
+
+
+def test_a_pull_request_closed_with_no_merge_puts_its_issue_back_to_the_owner():
+    closed = [[pull("improve/issue-1-100"), pull("improve/issue-2-101"), pull("improve/issue-3-102")]]
+    done = jobs((100, "Issue #1 (auto-fix)", "success"), (101, "Issue #2 (build)", "success"), (102, "Issue #3 (build)", "success"))
+    started = [issue(1, SLOW, AUTO_FIX, STARTED), issue(2, SLOW, AUTO_FIX, AUTO_BUILD, STARTED), own(3, BUILD, STARTED)]
+    # The detail names each label of a job on the issue: each one goes, so no job starts again by itself.
+    assert lines(plan(started, owner=OWNER, fix_runs=done, pulls=closed)) == ["clear 1 auto-fix", "clear 2 auto-fix,auto-build", "clear 3 build"]
+    # A job whose run is not in the newest 100 runs any more counts as done.
+    assert lines(plan(started[:1], owner=OWNER, fix_runs=jobs(), pulls=closed)) == ["clear 1 auto-fix"]
+    # The detail is empty when the owner removed the job's label already.
+    assert lines(plan([issue(1, SLOW, STARTED)], owner=OWNER, fix_runs=DONE, pulls=closed)) == ["clear 1"]
+    # After `clear` the issue has `needs-owner` and no `fix-started`. The next run does nothing for it.
+    assert plan([issue(1, SLOW, NEEDS_OWNER), own(3, NEEDS_OWNER)], owner=OWNER, fix_runs=done, pulls=closed) == []
+    # A new label of the owner starts a job again, as for each other issue.
+    assert lines(plan([issue(1, SLOW, NEEDS_OWNER, BUILD)], owner=OWNER, fix_runs=done, pulls=closed)) == ["start 1 code"]
+    assert "closed with no merge" in comment(PULL_CLOSED) and "`fix-started`" in comment(PULL_CLOSED) and "@" not in comment(PULL_CLOSED)
+
+
+def test_only_a_closed_pull_request_with_no_merge_and_no_newer_job_clears_an_issue():
+    started = [issue(1, SLOW, AUTO_FIX, STARTED)]
+
+    def clears(pulls, fix_runs=DONE, issues=started) -> list[str]:
+        return lines(plan(issues, owner=OWNER, fix_runs=fix_runs, pulls=pulls))
+
+    assert clears([pull("improve/issue-1-100", "open")]) == []  # the owner reads it
+    assert clears([pull("improve/issue-1-100", merged=True)]) == []  # merged: it closes the issue
+    assert clears([pull("improve/issue-1-100"), pull("improve/issue-1-200", "open")]) == []  # a newer pull request is open
+    assert clears([pull("improve/issue-1-100", None)]) == []  # a state that the queue cannot read counts as open
+    assert clears([]) == []  # no pull request yet: the job can still run, and its own report puts the issue back
+    assert clears([pull("improve/issue-1-100")], issues=[issue(1, SLOW, NEEDS_OWNER)]) == []  # no `fix-started`
+    assert clears([pull("improve/issue-1-100")], issues=[issue(1, SLOW, AUTO_FIX)]) == ["start 1 prompts"]
+    assert clears([pull("improve/issue-1-100")], issues=[issue(1, SLOW, AUTO_FIX, STARTED, author="someone-else")]) == []
+    # The owner started a job again after the pull request closed. That job keeps `fix-started` while it runs.
+    assert clears([pull("improve/issue-1-100")], jobs((100, "Issue #1 (auto-fix)", "success"), (200, "Issue #1 (build)", None))) == []
+    assert clears([pull("improve/issue-1-100")], jobs((100, "Issue #1 (auto-fix)", "success"), (200, "Issue #1 (build)", "success"))) == []
+    assert clears([pull("improve/issue-1-100")], jobs((100, "Issue #1 (auto-fix)", None))) == []  # its report still runs
+    # A job for another issue is not a job for this one.
+    assert clears([pull("improve/issue-1-100")], jobs((100, "Issue #1 (auto-fix)", "success"), (300, "Issue #12 (build)", None))) == ["clear 1 auto-fix"]
+    # With no list of the job runs, the queue cannot tell whether a job runs: it clears nothing.
+    for rows in (None, {"message": "Not Found"}, "text", [DONE]):
+        assert clears([pull("improve/issue-1-100")], rows) == []
+    assert lines(plan(started, owner=OWNER, fix_runs=DONE)) == [] and lines(plan(started, owner=OWNER, fix_runs=DONE, pulls={"message": "Not Found"})) == []
+
+
+def test_a_branch_name_is_data_and_only_a_job_branch_of_this_repository_counts():
+    found = read_pulls([[pull("improve/issue-1-100")]])
+    assert [(job.issue, job.run, job.open, job.merged) for job in found] == [(1, 100, False, False)]
+    # The branch of issue 12 is not a branch of issue 1, and the other way round.
+    other = [pull("improve/issue-12-100"), pull("improve/issue-1200-100")]
+    assert lines(plan([issue(1, SLOW, AUTO_FIX, STARTED)], owner=OWNER, fix_runs=DONE, pulls=other)) == []
+    assert lines(plan([issue(12, SLOW, AUTO_FIX, STARTED)], owner=OWNER, fix_runs=DONE, pulls=[pull("improve/issue-1-100")])) == []
+    # Each name that is not exactly the name that improve.yml gives is not a job's branch.
+    for name in ("improve/issue-1-100\n", "improve/issue-01-100", "improve/issue-1-100-x", "refs/heads/improve/issue-1-100", "improve/issue-1-", "improve/rule-1-100", "improve/issue-1-100 clear 2", 100, None, ["improve/issue-1-100"]):
+        assert read_pulls([pull(name)]) == [], name
+    # A fork can name its branch as a job does. Its pull request is not the job's.
+    assert read_pulls([pull("improve/issue-1-100", repo="someone-else/phone-line"), pull("improve/issue-1-100", repo=None)]) == []
+    assert read_pulls([None, "text", {"head": "improve/issue-1-100"}, {"head": {"ref": "improve/issue-1-100"}}]) == []
+    assert read_pulls({"message": "Not Found"}) is None and read_pulls(None) is None
+
+
 # --- a job that opened no pull request ---
 
 
 def test_a_job_with_a_pull_request_says_nothing_and_each_other_end_says_why():
-    base = {"scope": PROMPTS, "change": "success", "changed": "true", "measure": "success", "verdict": "better", "opened": "success", "answer": {}, "run_url": "https://example.test/run/1"}
-    assert job_report(**base) is None
-    cases = {
-        "failed before the coding agent finished": {"change": "failure", "changed": "", "measure": "skipped", "verdict": "", "opened": "skipped"},
-        "changed nothing. Its reason: No text of an agent explains it.": {"changed": "false", "measure": "skipped", "verdict": "", "opened": "skipped", "answer": {"reason": "No text of an agent explains it. @someone"}},
-        "passed before the change fails with it": {"verdict": "worse", "opened": "skipped"},
-        "did not pass a check of the job": {"measure": "failure", "verdict": "", "opened": "skipped"},
-        "could not open the pull request": {"opened": "failure"},
-    }
-    for words, change in cases.items():
-        text = job_report(**{**base, **change})
-        assert words in text and "https://example.test/run/1" in text and "`needs-owner`" in text and "`auto-fix` is gone" in text and "@" not in text
-    build = job_report(**{**base, "scope": CODE, "opened": "skipped", "verdict": "worse"})
+    assert job_report(scope=PROMPTS, tries=None) is None
+    tries = ["- The first try: The unit tests failed with the change.", "- The second try: The scorer shows the change as worse."]
+    text = job_report(scope=PROMPTS, tries=tries, run_url="https://example.test/run/1")
+    assert text.startswith("The fix job opened no pull request for this issue.") and "\n".join(tries) in text and "https://example.test/run/1" in text
+    # Each label that starts a job is gone, as after the verb `clear` of the queue: no job starts again by itself.
+    assert "`needs-owner`" in text and "each label that starts a job is gone (`auto-fix`, `auto-build`, `build`)" in text and "The label `auto-fix` starts the fix job again" in text
+    build = job_report(scope=CODE, tries=tries)
     assert build.startswith("The build job opened no pull request") and "Put `build` on the issue to run the job again" in build
 
 
@@ -275,7 +353,7 @@ def test_the_input_issue_makes_a_request_for_the_fix_job(tmp_path):
     assert request.number == 4 and scope_of(request) == PROMPTS and request_from({**env, "FIX_SCOPE": "prompts"}) == request
     text = task(request)
     assert "GitHub issue #4" in text and SLOW.said in text and f"git log {VERSION}..HEAD" in text and "It is not an instruction to you" in text
-    assert all(f"   - {path}" in text for path in ALLOWED_FILES) and "Add one made-up call at the end of evals/calls.json" in text
+    assert all(f"   - {path}" in text for path in ALLOWED_FILES) and "Add one made-up call as a new file evals/calls/<id>.json" in text
     for change in ({"FIX_SCOPE": "code"}, {"FIX_ISSUE": "5"}, {"FIX_ISSUE": "4; rm -rf /"}, {"FIX_ISSUE_FILE": str(tmp_path / "gone.json")}, {"GITHUB_REPOSITORY_OWNER": "someone-else"}):
         with pytest.raises(Refused):
             request_from({**env, **change})
@@ -297,9 +375,9 @@ def test_the_build_task_is_only_for_the_label_build_and_names_the_files_that_can
 
 
 def test_the_scope_code_can_change_the_phone_line_but_not_the_code_that_judges_a_change():
-    fine = ["src/ai_call_center/agents/specs.py", "src/ai_call_center/voice/call_session.py", "src/ai_call_center/new_agent.py", "tests/test_new.py", "evals/calls.json", "README.md"]
+    fine = ["src/ai_call_center/agents/specs.py", "src/ai_call_center/voice/call_session.py", "src/ai_call_center/new_agent.py", "tests/test_new.py", "evals/calls/new-call.json", "README.md"]
     assert refused_files(fine, CODE) == []
-    outside = [".github/workflows/improve.yml", ".github/actions/agent-login/action.yml", "pyproject.toml", "uv.lock", "fly.toml", "Dockerfile", "scripts/deploy.sh", "evals/grader.json", ".claude/skills/formal-verify-caller-memory/check.py", "src/other/x.py", "conftest.py"]
+    outside = [".github/workflows/improve.yml", ".github/actions/agent-login/action.yml", "pyproject.toml", "uv.lock", "fly.toml", "Dockerfile", "scripts/deploy.sh", "evals/grader.json", "evals/calls.json", ".claude/skills/formal-verify-caller-memory/check.py", "src/other/x.py", "conftest.py"]
     assert refused_files([*fine, *outside, *CODE_REFUSED], CODE) == [*outside, *CODE_REFUSED]
     # The files of the queue, the guard, the scorer, the grader and the scrub are in the list.
     for name in ("issue_queue.py", "proposal.py", "score.py", "grading.py", "decision_grader.py", "fault_report.py", "feedback.py", "improve.py"):
@@ -352,21 +430,25 @@ def run(words: list[str], monkeypatch: pytest.MonkeyPatch, outputs: Path) -> dic
 
 def test_each_command_of_the_queue_runs_as_the_workflow_calls_it(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("GITHUB_REPOSITORY_OWNER", OWNER)
-    labels, plan_cmd, label_comment, giveup_comment = commands("issues.yml", tmp_path)
-    assert [words[1] for words in (labels, plan_cmd, label_comment, giveup_comment)] == ["labels", "plan", "comment", "comment"]
+    labels, plan_cmd, label_comment, giveup_comment, clear_comment = commands("issues.yml", tmp_path)
+    assert [words[1] for words in (labels, plan_cmd, label_comment, giveup_comment, clear_comment)] == ["labels", "plan", "comment", "comment", "comment"]
 
     run(labels, monkeypatch, tmp_path / "outputs")
     printed = [line.split("\t") for line in capsys.readouterr().out.splitlines()]
     assert [name for name, _, _ in printed] == list(QUEUE_LABELS) and all(re.fullmatch(r"[0-9a-f]{6}", color) and len(text) <= 100 for _, color, text in printed)  # GitHub: 100 characters at most
 
-    (tmp_path / "issues.json").write_text(json.dumps([[row(1), row(2, SPANISH), row(3, SLOW, AUTO_FIX), row(4, SLOW, BUILD)]]), encoding="utf-8")
+    (tmp_path / "issues.json").write_text(json.dumps([[row(1), row(2, SPANISH), row(3, SLOW, AUTO_FIX), row(4, SLOW, BUILD), row(5, SLOW, AUTO_FIX, AUTO_BUILD, STARTED)]]), encoding="utf-8")
     (tmp_path / "triage-runs.json").write_text(json.dumps(runs()), encoding="utf-8")
+    (tmp_path / "fix-runs.json").write_text(json.dumps(jobs((100, "Issue #5 (build)", "success"))), encoding="utf-8")
+    (tmp_path / "pulls.json").write_text(json.dumps([[pull("improve/issue-5-100")]]), encoding="utf-8")
     run(plan_cmd, monkeypatch, tmp_path / "outputs")
     planned = capsys.readouterr().out.splitlines()
-    assert planned == ["triage 1", "label 2 needs-owner", "start 3 prompts", "start 4 code"]
+    assert planned == ["triage 1", "label 2 needs-owner", "start 3 prompts", "start 4 code", "clear 5 auto-fix,auto-build"]
     # The step "Do it" reads a verb, a number and a detail from each line, and it knows each verb.
     verbs = set(re.findall(r"^ {14}(\w+)\)$", WORKFLOWS["issues.yml"], re.MULTILINE))
-    assert verbs == {"triage", "label", "giveup", "start", "wait"} and all(line.split()[0] in verbs and line.split()[1].isdigit() for line in planned)
+    assert verbs == {"triage", "label", "giveup", "start", "clear", "wait"} and all(line.split()[0] in verbs and line.split()[1].isdigit() for line in planned)
+    # `clear` removes only a label of a job from the fixed list, and `fix-started` last.
+    assert f"for label in {' '.join(JOB_LABELS)}; do" in WORKFLOWS["issues.yml"] and 'say "$number" "$RUNNER_TEMP/comment.md" && drop_label "$number" fix-started; }' in WORKFLOWS["issues.yml"]
 
     (tmp_path / "issues.json").write_text("[]", encoding="utf-8")
     run(plan_cmd, monkeypatch, tmp_path / "outputs")
@@ -376,6 +458,17 @@ def test_each_command_of_the_queue_runs_as_the_workflow_calls_it(tmp_path, monke
     assert (tmp_path / "comment.md").read_text(encoding="utf-8") == comment(NEEDS_OWNER)
     run(giveup_comment, monkeypatch, tmp_path / "outputs")
     assert (tmp_path / "comment.md").read_text(encoding="utf-8") == comment(TRIAGE_FAILED)
+    run(clear_comment, monkeypatch, tmp_path / "outputs")
+    assert (tmp_path / "comment.md").read_text(encoding="utf-8") == comment(PULL_CLOSED)
+
+
+def test_the_queue_reads_the_pull_requests_and_starts_from_no_pull_request():
+    """A workflow with a token that can write must not start from a pull request. The run of each morning and the next label event clear an issue."""
+    text = WORKFLOWS["issues.yml"]
+    on = text[text.index("\non:") : text.index("\nconcurrency:")]
+    assert "pull_request" not in on and "workflow_run" not in on
+    assert "      pull-requests: read #" in text and "pull-requests: write" not in text
+    assert '"repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100"' in text and "actions/workflows/improve.yml/runs?per_page=100" in text
 
 
 def test_each_command_of_the_triage_runs_as_the_workflow_calls_it(tmp_path, monkeypatch, capsys):
@@ -409,13 +502,19 @@ def test_each_command_of_the_triage_runs_as_the_workflow_calls_it(tmp_path, monk
 
 def test_the_report_command_of_the_fix_job_runs_as_the_workflow_calls_it(tmp_path, monkeypatch):
     (report,) = commands("improve.yml", tmp_path)
-    for name, value in {"FIX_SCOPE": "code", "CHANGE_RESULT": "success", "CHANGED": "false", "MEASURE_RESULT": "skipped", "VERDICT": "", "OPEN_RESULT": "skipped", "AGENT_ANSWER": json.dumps({"reason": "The issue does not say which agent."}), "RUN_URL": "https://example.test/run/1"}.items():
+    nothing = {"changed": "false", "answer": json.dumps({"reason": "The issue does not say which agent."})}
+    jobs = {"try1": {"result": "success", "outputs": nothing}, "decide": {"result": "skipped", "outputs": {}}, "try2": {"result": "skipped", "outputs": {}}, "push": {"result": "skipped", "outputs": {}}, "open": {"result": "skipped", "outputs": {}}}
+    for name, value in {"FIX_SCOPE": "code", "JOBS": json.dumps(jobs), "TRIES": "", "RUN_URL": "https://example.test/run/1"}.items():
         monkeypatch.setenv(name, value)
     assert run(report, monkeypatch, tmp_path / "outputs") == {"opened": "false"}
-    assert "The build job opened no pull request" in (tmp_path / "report.md").read_text(encoding="utf-8")
-    monkeypatch.setenv("OPEN_RESULT", "success")
+    text = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "The build job opened no pull request" in text and "- The first try: The coding agent changed nothing. Its reason: The issue does not say which agent." in text
+    assert "- No second try: The coding agent changed nothing in the first try." in text
+    monkeypatch.setenv("JOBS", json.dumps({**jobs, "open": {"result": "success", "outputs": {}}}))
     assert run(report, monkeypatch, tmp_path / "outputs") == {"opened": "true"}
     assert set(re.findall(r"steps\.report\.outputs\.(\w+)", WORKFLOWS["improve.yml"])) == {"opened"}
+    # The job `report` gives the command each job before it, so the text can cover both tries.
+    assert "needs: [try1, decide, try2, push, open]" in WORKFLOWS["improve.yml"] and WORKFLOWS["improve.yml"].count("JOBS: ${{ toJSON(needs) }}") == 4
 
 
 def test_the_names_of_the_runs_are_the_names_that_the_queue_counts():
@@ -425,10 +524,15 @@ def test_the_names_of_the_runs_are_the_names_that_the_queue_counts():
     fix = re.search(r'^run-name: "(.*)"$', WORKFLOWS["improve.yml"], re.MULTILINE).group(1)
     assert "format('Issue #{0} ({1})', inputs.issue, inputs.scope == 'code' && 'build' || 'auto-fix')" in fix
     assert not TRIAGE_RUN.match("Triage of issue #12 and more") and not TRIAGE_RUN.match("Issue #12 (build)")
+    assert all(FIX_RUN.fullmatch(f"Issue #12 ({scope})").group(1) == "12" for scope in ("build", "auto-fix"))
+    assert not FIX_RUN.fullmatch("Rule greeting") and not FIX_RUN.fullmatch("Issue #12 (build) and more")
+    # The queue finds a job's pull request by the name of its branch.
+    assert 'branch="improve/issue-${FIX_ISSUE}-${GITHUB_RUN_ID}"' in WORKFLOWS["improve.yml"]
+    assert JOB_BRANCH.fullmatch("improve/issue-12-19483726152").groups() == ("12", "19483726152")
 
 
 def test_each_label_that_a_workflow_sets_is_a_label_of_the_queue():
-    known = {*QUEUE_LABELS, TRIAGE_FAILED}
+    known = {*QUEUE_LABELS, TRIAGE_FAILED, PULL_CLOSED}
     for name, text in WORKFLOWS.items():
         used = set(re.findall(r"labels\[\]=([a-z-]+)", text)) | set(re.findall(r"/labels/([a-z-]+)", text)) | set(re.findall(r"--label ([a-z-]+)", text)) | set(re.findall(r"started=([a-z-]+)", text))
         assert used <= known, f"{name} names a label that the queue does not know: {used - known}"
@@ -440,12 +544,21 @@ def test_each_label_that_a_workflow_sets_is_a_label_of_the_queue():
 def test_each_agent_that_the_queue_starts_allows_the_bot_of_the_queue_and_no_other():
     """On 2026-11-22 each triage run failed: "Workflow initiated by non-human actor: github-actions (type: Bot)".
     The queue starts a workflow with the token of its own run, and the agent action refuses a bot that is not named."""
-    for name in ("triage.yml", "improve.yml"):
-        text = WORKFLOWS[name]
+    # improve.yml runs its coding agent in improve-try.yml, which only improve.yml calls.
+    try_file = (REPO / ".github/workflows/improve-try.yml").read_text(encoding="utf-8")
+    for name, text in (("triage.yml", WORKFLOWS["triage.yml"]), ("improve.yml", try_file)):
         assert f"gh workflow run {name}" in WORKFLOWS["issues.yml"] and text.count("uses: anthropics/claude-code-action@") == 1
         assert re.findall(r"^\s+allowed_bots: (.*)$", text, re.MULTILINE) == ['"github-actions[bot]"'], name
-        # Only a dispatch starts these workflows, and a dispatch needs the right to write. No event of an outside person does.
-        assert re.search(r"^on:\n  workflow_dispatch:\n", text, re.MULTILINE) and not re.search(r"^  (issues|issue_comment|pull_request|pull_request_target|push|schedule):", text, re.MULTILINE)
+    # Only a dispatch starts these workflows, and a dispatch needs the right to write. No event of an outside person does.
+    def triggers(text: str) -> list[str]:
+        """The events under `on:`. A job can have the name of an event (improve.yml has a job `push`)."""
+        block = re.search(r"^on:\n((?:  .*\n|\n)*)", text, re.MULTILINE).group(1)
+        return re.findall(r"^  ([a-z_]+):", block, re.MULTILINE)
+
+    assert triggers(WORKFLOWS["triage.yml"]) == triggers(WORKFLOWS["improve.yml"]) == ["workflow_dispatch"]
+    # A workflow of another repository can call a public reusable workflow. It runs there, with that repository's token and secrets.
+    assert triggers(try_file) == ["workflow_call"]
+    assert "claude-code-action" not in WORKFLOWS["improve.yml"] and WORKFLOWS["improve.yml"].count("uses: ./.github/workflows/improve-try.yml") == 2
 
 
 def test_the_agent_of_the_triage_has_no_tool_that_writes_and_no_token_that_writes():
@@ -477,4 +590,4 @@ def test_a_clear_fault_that_needs_code_starts_the_build_job_with_no_word_of_the_
     assert "A fault is not a case\nfor the owner only because its repair needs code" in task and "Use it only for these cases" in task
     # The workflows know the label: the triage sets it and starts the queue, and a job that fails removes it.
     assert "auto-fix|auto-build|needs-owner|not-actionable)" in WORKFLOWS["triage.yml"] and '[ "$label" = auto-build ]' in WORKFLOWS["triage.yml"]
-    assert 'started="build auto-build"' in WORKFLOWS["improve.yml"]
+    assert f'for label in {" ".join(JOB_LABELS)}; do' in WORKFLOWS["improve.yml"] and AUTO_BUILD in JOB_LABELS

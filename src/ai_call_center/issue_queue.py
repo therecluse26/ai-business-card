@@ -15,8 +15,10 @@ Who sets a label: a triage agent sorts each new fault (`.github/workflows/triage
 new idea (`needs-owner`, with no agent), and the owner can change each label. The owner's label wins:
 the queue reads the labels again on each run, and it sorts no issue a second time.
 
-A job that opens no pull request puts its issue back: it removes `fix-started` and the label that
-started it, sets `needs-owner`, and writes a comment that says why (`issue-queue report`).
+A job that opens no pull request puts its issue back: it removes `fix-started` and each label that
+starts a job, sets `needs-owner`, and writes a comment that says why (`issue-queue report`). A pull
+request that the owner closes with no merge puts its issue back the same way: the queue does it on
+its next run (the verb `clear`).
 
 Only a person with rights on the repository can set a label, and the queue acts only on an issue that
 the owner of the repository wrote. The server opens a caller's issue with the owner's token. So a person
@@ -24,7 +26,8 @@ who opens an issue on GitHub by hand starts nothing.
 
 The commands, for the three workflows (`issues.yml`, `triage.yml`, `improve.yml`):
 
-- `issue-queue plan`: read the open issues and the runs of today, and print what the queue must do now.
+- `issue-queue plan`: read the open issues, the pull requests and the runs of the two other workflows,
+  and print what the queue must do now.
   It is safe to run at any time: it prints only what is still open to do.
 - `issue-queue task`: check one issue and write the task for the triage agent.
 - `issue-queue schema`: print the JSON schema of the triage agent's answer.
@@ -76,8 +79,13 @@ OWNER_TEXT = 6000  # characters of an issue that the owner wrote, for the build 
 REASON_WORDS = 60  # the triage agent's own words in its comment
 TRIAGE_TRIES = 3  # failed triage runs for one issue; then the issue goes to the owner
 TRIAGE_FAILED = "triage-failed"  # not a label: the name of the comment for such an issue
+PULL_CLOSED = "pull-closed"  # not a label: the name of the comment for an issue whose pull request closed with no merge
+JOB_LABELS = (AUTO_FIX, AUTO_BUILD, BUILD)  # each label that starts a job; `clear` removes each one, so no job starts again by itself
 
 TRIAGE_RUN = re.compile(r"^Triage of issue #(\d+)$")  # `run-name` of triage.yml
+FIX_RUN = re.compile(r"Issue #([1-9][0-9]{0,8}) \((?:build|auto-fix)\)")  # `run-name` of improve.yml for an issue; used with fullmatch
+# The branch of a job for an issue (improve.yml): the issue, then the id of the run. Used with fullmatch: a name comes from GitHub.
+JOB_BRANCH = re.compile(r"improve/issue-([1-9][0-9]{0,8})-([1-9][0-9]{0,19})")
 _CALLERS = re.compile(r"\*\*Callers who (?:reported|asked for) this: (\d+)\*\*")
 _VERSION = re.compile(r"^Harness version of the call \(git commit\): `([0-9a-f]{7,40})`$")
 
@@ -119,9 +127,16 @@ def read_issue(row: Any) -> QueueIssue | None:
     return QueueIssue(number=row["number"], title=str(row.get("title") or ""), body=str(row.get("body") or ""), labels=labels, author=str(user.get("login") or ""), open=row.get("state") == "open")
 
 
+def flat_rows(rows: Any) -> list[Any] | None:
+    """The rows of a list. `gh api --paginate --slurp` gives a list of lists. None when it is not a list."""
+    if not isinstance(rows, list):
+        return None
+    return [row for part in rows for row in (part if isinstance(part, list) else [part])]
+
+
 def read_issues(rows: Any) -> list[QueueIssue]:
     """The issues in a list of rows, oldest first. `gh api --paginate --slurp` gives a list of lists; both forms are read."""
-    flat = [row for part in rows for row in (part if isinstance(part, list) else [part])] if isinstance(rows, list) else []
+    flat = flat_rows(rows) or []
     return sorted((issue for issue in map(read_issue, flat) if issue is not None), key=lambda issue: issue.number)
 
 
@@ -270,6 +285,7 @@ COMMENTS = {
     NEEDS_OWNER: "Triage: `needs-owner`. The owner decides before a job starts: this is a feature, a large change, a report that is not clear, or a fault that no change in this repository can repair. The label `build` starts a job that can change the code of the phone line.",
     NOT_ACTIONABLE: "Triage: `not-actionable`. No job can act on this text as it is. The issue stays open for the owner.",
     TRIAGE_FAILED: f"Triage: `needs-owner`. The triage agent failed {TRIAGE_TRIES} times on this issue, so no agent sorted it. The owner decides: the label `auto-fix` starts the fix job, and the label `build` starts a job that can change the code of the phone line.",
+    PULL_CLOSED: "Queue: `needs-owner`. The pull request of the job for this issue was closed with no merge. The queue removed `fix-started` and the label that started the job. The label `auto-fix` starts the fix job again. The label `build` starts the build job, which can change the code of the phone line.",
 }
 OWNER_WINS = "The owner can change the label at any time. The queue reads the labels again on each run."
 
@@ -306,9 +322,9 @@ def decide(answer: dict[str, Any], issue: QueueIssue) -> tuple[str, str]:
 
 @dataclass(frozen=True)
 class Action:
-    verb: str  # "triage", "label", "giveup", "start" or "wait"
+    verb: str  # "triage", "label", "giveup", "start", "clear" or "wait"
     number: int
-    detail: str = ""  # label: the label; start: the scope; wait: the reason
+    detail: str = ""  # label: the label; start: the scope; clear: the labels of a job on the issue, with commas; wait: the reason
 
     def line(self) -> str:
         return f"{self.verb} {self.number} {self.detail}".strip()
@@ -331,16 +347,85 @@ def _triage_runs(rows: Any) -> tuple[set[int], dict[int, int]]:
     return running, failed
 
 
-def plan(issues: list[QueueIssue], *, owner: str, triage_runs: Any = None) -> list[Action]:
+@dataclass(frozen=True)
+class JobPull:
+    """A pull request of a job for an issue, as its branch names it."""
+
+    issue: int
+    run: int  # the id of the run of improve.yml that pushed the branch
+    open: bool
+    merged: bool
+
+
+def read_pulls(rows: Any) -> list[JobPull] | None:
+    """The pull requests of the jobs, from GitHub's list of pull requests. None when it is not a list: then nothing is cleared."""
+    flat = flat_rows(rows)
+    if flat is None:
+        return None
+    found: list[JobPull] = []
+    for row in flat:
+        head = row.get("head") if isinstance(row, dict) else None
+        base = row.get("base") if isinstance(row, dict) else None
+        if not isinstance(head, dict) or not isinstance(base, dict):
+            continue
+        ref, home, into = head.get("ref"), head.get("repo"), base.get("repo")
+        name = JOB_BRANCH.fullmatch(ref) if isinstance(ref, str) else None
+        # A fork can give its branch the same name. Only a branch in this repository is a job's branch.
+        same = isinstance(home, dict) and isinstance(into, dict) and bool(home.get("full_name")) and home.get("full_name") == into.get("full_name")
+        if name and same:
+            # A state that is not "closed" counts as open: then the queue clears nothing.
+            found.append(JobPull(int(name.group(1)), int(name.group(2)), row.get("state") != "closed", bool(row.get("merged_at"))))
+    return found
+
+
+def _fix_runs(rows: Any) -> dict[int, tuple[int, bool]] | None:
+    """For each issue: (the id of its newest job run, a job run of it is not done). None when the list cannot be read."""
+    runs = rows.get("workflow_runs") if isinstance(rows, dict) else None
+    if not isinstance(runs, list):
+        return None
+    found: dict[int, tuple[int, bool]] = {}
+    for run in runs:
+        title, ident = (run.get("display_title"), run.get("id")) if isinstance(run, dict) else (None, None)
+        name = FIX_RUN.fullmatch(title) if isinstance(title, str) else None
+        if not name or not isinstance(ident, int) or isinstance(ident, bool):
+            continue
+        newest, running = found.get(int(name.group(1)), (0, False))
+        found[int(name.group(1))] = (max(newest, ident), running or run.get("status") != "completed")
+    return found
+
+
+def _closed_with_no_merge(number: int, pulls: list[JobPull] | None, jobs: dict[int, tuple[int, bool]] | None) -> bool:
+    """True when each pull request of a job for the issue is closed with no merge, and no newer job runs for it."""
+    if pulls is None or jobs is None:
+        return False  # the queue cannot tell: it clears nothing
+    mine = [pull for pull in pulls if pull.issue == number]
+    if not mine or any(pull.open or pull.merged for pull in mine):
+        # With no pull request yet, the job can still run, and its own report puts the issue back.
+        return False
+    newest, running = jobs.get(number, (0, False))
+    # The owner can start a job again after a closed pull request. That new job keeps its label while it runs.
+    return not running and newest <= max(pull.run for pull in mine)
+
+
+def plan(issues: list[QueueIssue], *, owner: str, triage_runs: Any = None, fix_runs: Any = None, pulls: Any = None) -> list[Action]:
     """What to do for each open issue of the owner, oldest first. An issue with nothing to do gives no action.
 
     No count of runs for one day is a limit: each issue that is ready starts its run now. The label
     `fix-started` stops a second job for an issue. A triage run that is not done stops a second triage
-    run beside it, and `TRIAGE_TRIES` failed triage runs send the issue to the owner."""
+    run beside it, and `TRIAGE_TRIES` failed triage runs send the issue to the owner.
+
+    An issue with `fix-started` whose job's pull request closed with no merge gets `clear`. `fix_runs` is
+    GitHub's list of the runs of improve.yml, and `pulls` its list of the pull requests. With no such
+    list, the queue clears nothing."""
     running, failed = _triage_runs(triage_runs)
+    jobs, job_pulls = _fix_runs(fix_runs), read_pulls(pulls)
     actions: list[Action] = []
     for issue in sorted(issues, key=lambda issue: issue.number):
-        if not issue.open or not _is_owner(issue, owner) or STARTED in issue.labels:
+        if not issue.open or not _is_owner(issue, owner):
+            continue
+        if STARTED in issue.labels:
+            if _closed_with_no_merge(issue.number, job_pulls, jobs):
+                actions.append(Action("clear", issue.number, ",".join(label for label in JOB_LABELS if label in issue.labels)))
             continue
         if BUILD in issue.labels or AUTO_BUILD in issue.labels:
             actions.append(Action("start", issue.number, CODE))  # with `auto-fix` too, the wider job
@@ -362,29 +447,22 @@ def plan(issues: list[QueueIssue], *, owner: str, triage_runs: Any = None) -> li
 # --- the report of a job that opened no pull request ---
 
 
-def job_report(*, scope: str, change: str, changed: str, measure: str, verdict: str, opened: str, answer: dict[str, Any], run_url: str = "") -> str | None:
-    """The comment for the issue, or None when the job opened a pull request. Each result is a word of GitHub: "success", "failure", "skipped"."""
-    if opened == "success":
+def job_report(*, scope: str, tries: list[str] | None, run_url: str = "") -> str | None:
+    """The comment for the issue, or None when the job opened a pull request.
+
+    `tries` holds one line for each try of the coding agent, from `proposal.no_pull_request_lines`. Each line
+    is fixed text, a word from a fixed list, or the agent's own words cut by `plain`."""
+    if tries is None:
         return None
     job = "build job" if scope == CODE else "fix job"
-    lines = [f"The {job} opened no pull request for this issue."]
-    if change != "success":
-        lines.append("The job failed before the coding agent finished its change.")
-    elif changed != "true":
-        said = plain(answer.get("reason"), REASON_WORDS)
-        lines.append("The coding agent changed nothing." + (f" Its reason: {said}" if said else ""))
-    elif verdict == "worse":
-        lines.append("A check of the scorer that passed before the change fails with it.")
-    elif measure != "success":
-        lines.append("The change did not pass a check of the job: the guard of the files, the unit tests, or the scorer.")
-    else:
-        lines.append("The change is on a branch, but the job could not open the pull request.")
+    lines = [f"The {job} opened no pull request for this issue.", "\n".join(tries)]
     if run_url:
         lines.append(f"The run: {run_url}")
+    gone = "The issue now has the label `needs-owner`, and each label that starts a job is gone (`auto-fix`, `auto-build`, `build`)."
     if scope == CODE:
-        lines.append("The issue now has the label `needs-owner`, and the label that started the job is gone. Put `build` on the issue to run the job again.")
+        lines.append(f"{gone} Put `build` on the issue to run the job again.")
     else:
-        lines.append("The issue now has the label `needs-owner`, and the label `auto-fix` is gone. The label `build` starts a job that can change the code of the phone line.")
+        lines.append(f"{gone} The label `auto-fix` starts the fix job again. The label `build` starts a job that can change the code of the phone line.")
     return "\n\n".join(lines) + "\n"
 
 
@@ -424,6 +502,8 @@ def main() -> None:
     plan_cmd = commands.add_parser("plan", help="print what the queue must do now, one action on a line")
     plan_cmd.add_argument("--issues", required=True, metavar="FILE", help="the open issues, as GitHub's REST API gives them")
     plan_cmd.add_argument("--triage-runs", required=True, metavar="FILE", help="the runs of triage.yml")
+    plan_cmd.add_argument("--fix-runs", required=True, metavar="FILE", help="the runs of improve.yml")
+    plan_cmd.add_argument("--pulls", required=True, metavar="FILE", help="the pull requests of the repository, each state")
     for name, text in (("task", "check one issue and write the task for the triage agent"), ("decide", "give the label and the comment for the triage agent's answer")):
         command = commands.add_parser(name, help=text)
         command.add_argument("--issue-file", required=True, metavar="FILE")
@@ -446,21 +526,13 @@ def main() -> None:
         elif args.command == "comment":
             Path(args.out).write_text(comment(args.label), encoding="utf-8")
         elif args.command == "report":
+            # proposal.py imports this module, so this import waits until a report is asked for.
+            from ai_call_center.proposal import jobs_from, no_pull_request_lines
+
             env = os.environ
-            try:
-                answer = json.loads(env.get("AGENT_ANSWER", "") or "{}")
-            except ValueError:
-                answer = {}
-            text = job_report(
-                scope=CODE if env.get("FIX_SCOPE") == CODE else PROMPTS,
-                change=env.get("CHANGE_RESULT", ""),
-                changed=env.get("CHANGED", ""),
-                measure=env.get("MEASURE_RESULT", ""),
-                verdict=env.get("VERDICT", ""),
-                opened=env.get("OPEN_RESULT", ""),
-                answer=answer if isinstance(answer, dict) else {},
-                run_url=env.get("RUN_URL", ""),
-            )
+            scope = CODE if env.get("FIX_SCOPE") == CODE else PROMPTS
+            tries = no_pull_request_lines(jobs_from(env.get("JOBS", "")), scope=scope, setting=env.get("TRIES", ""))
+            text = job_report(scope=scope, tries=tries, run_url=env.get("RUN_URL", ""))
             Path(args.out).write_text(text or "", encoding="utf-8")
             _output("opened", "false" if text else "true")
         elif args.command == "plan":
@@ -468,6 +540,8 @@ def main() -> None:
                 read_issues(_load(args.issues)),
                 owner=owner,
                 triage_runs=_load(args.triage_runs),
+                fix_runs=_load(args.fix_runs),
+                pulls=_load(args.pulls),
             )
             if actions:
                 print("\n".join(action.line() for action in actions))

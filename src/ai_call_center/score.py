@@ -7,17 +7,17 @@ The test set is the folder `evals/`. Each line in it is made up; no caller's wor
 
 - `evals/live_call.json`: caller lines, each with the answer to "does this caller want a live call?".
   The word list of the transfer check must give that answer. This part makes no model request.
-- `evals/calls.json`: made-up calls. Each one has the caller's lines and what the call must do. The
-  agents answer the lines in the text mode, then the grader scores the call against its rules. This
-  part makes model requests that cost money, so it runs only with `--calls`.
+- `evals/calls/<id>.json`: made-up calls, one file for each. Each one has the caller's lines and what
+  the call must do. The agents answer the lines in the text mode, then the grader scores the call
+  against its rules. This part makes model requests that cost money, so it runs only with `--calls`.
 
 In a made-up call the caller's lines are fixed: the caller does not react to the agent. No email is
 sent, no phone rings, and nothing is stored: the lead store is in memory. Jev is off, so the word
 list alone decides a transfer. The agents' answers change from run to run, so one check of a made-up
 call can pass in one run and fail in the next. The word list part gives the same result each time.
 
-Add a new sample or a new call at the end of its file. Do not change or remove an old one: the result
-of each check is compared by its name.
+Add a new sample at the end of `live_call.json`, and a new call as a new file. Do not change or remove
+an old one: the result of each check is compared by its name.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -54,6 +55,10 @@ from ai_call_center.telephony import RecordingTelephony
 from ai_call_center.writing import default_library
 
 TEST_SET = Path("evals")
+CALLS = "calls"  # the folder of the made-up calls in the test set: one file for each call
+# The id of a made-up call is its file name and a part of each check's name, so it has one fixed form.
+CALL_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+CALL_ID_LENGTH = 60
 CALLER_NUMBER = "+15555550123"  # made up: 555 numbers are not in use
 OWNER_PHONE = "+15555550199"  # made up; a transfer in a made-up call is recorded, never dialed
 CALL_CONNECTED = "[The call connects. Greet the caller.]"  # the same first line as chat.py
@@ -108,31 +113,51 @@ def load_live_call(directory: Path = TEST_SET) -> list[LiveCallSample]:
     return samples
 
 
+def is_call_id(name: str) -> bool:
+    return len(name) <= CALL_ID_LENGTH and CALL_ID.fullmatch(name) is not None
+
+
+def call_from(item: Any, file_name: str) -> MadeUpCall:
+    """One made-up call from its file. The id must have the fixed form, and the file must be `<id>.json`."""
+    if not isinstance(item, dict):
+        raise ValueError(f"{file_name}: a made-up call is one JSON object")
+    name = str(item.get("id", "")).strip()
+    expect = item.get("expect", {})
+    if not is_call_id(name):
+        raise ValueError(f"{file_name}: the id {name!r} must be lower-case letters, digits and single hyphens, {CALL_ID_LENGTH} characters at most")
+    if file_name != f"{name}.json":
+        raise ValueError(f"{file_name}: the file of the call {name!r} must be {name}.json")
+    if not item.get("caller") or not isinstance(item["caller"], list):
+        raise ValueError(f"{file_name}: the caller says nothing")
+    if not isinstance(expect, dict) or set(expect) - EXPECT_KEYS:
+        raise ValueError(f"{file_name}: expect must be an object with only the keys {sorted(EXPECT_KEYS)}")
+    if set(expect.get("visits", [])) - set(SPECIALISTS):
+        raise ValueError(f"{file_name}: visits must hold names from {SPECIALISTS}")
+    if expect.get("outcome", NO_OUTCOME) not in OUTCOMES:
+        raise ValueError(f"{file_name}: outcome must be one of {OUTCOMES}")
+    return MadeUpCall(
+        id=name,
+        about=str(item.get("about", "")),
+        caller=tuple(str(line) for line in item["caller"]),
+        visits=tuple(expect.get("visits", [])),
+        outcome=expect.get("outcome", ""),
+        forgotten=expect.get("forgotten"),
+    )
+
+
 def load_calls(directory: Path = TEST_SET) -> list[MadeUpCall]:
-    calls: list[MadeUpCall] = []
-    for item in _read(directory / "calls.json"):
-        name = str(item.get("id", "")).strip()
-        expect = item.get("expect", {})
-        if not name or "/" in name or any(call.id == name for call in calls):
-            raise ValueError(f"calls.json: the id {name!r} is empty, holds a '/', or is used two times")
-        if not item.get("caller"):
-            raise ValueError(f"calls.json, {name}: the caller says nothing")
-        if set(expect) - EXPECT_KEYS:
-            raise ValueError(f"calls.json, {name}: unknown key in expect: {sorted(set(expect) - EXPECT_KEYS)}")
-        if set(expect.get("visits", [])) - set(SPECIALISTS):
-            raise ValueError(f"calls.json, {name}: visits must hold names from {SPECIALISTS}")
-        if expect.get("outcome", NO_OUTCOME) not in OUTCOMES:
-            raise ValueError(f"calls.json, {name}: outcome must be one of {OUTCOMES}")
-        calls.append(
-            MadeUpCall(
-                id=name,
-                about=str(item.get("about", "")),
-                caller=tuple(str(line) for line in item["caller"]),
-                visits=tuple(expect.get("visits", [])),
-                outcome=expect.get("outcome", ""),
-                forgotten=expect.get("forgotten"),
-            )
-        )
+    """Each made-up call of the folder, in the order of the file names. So `--limit N` gives the same calls each time.
+    The id is the file name, so two calls cannot have one id."""
+    folder = directory / CALLS
+    if not folder.is_dir():
+        raise ValueError(f"{folder} is not a folder")
+    calls = []
+    for path in sorted(folder.iterdir(), key=lambda path: path.name):
+        if path.name.startswith("."):
+            continue  # a file that an editor or the system keeps there
+        if path.suffix != ".json" or not path.is_file():
+            raise ValueError(f"{path}: the folder holds only made-up calls, as <id>.json")
+        calls.append(call_from(json.loads(path.read_text(encoding="utf-8")), path.name))
     return calls
 
 
@@ -248,6 +273,30 @@ def compare(old: dict[str, Any], new: dict[str, Any]) -> tuple[list[str], list[s
     before, after = old.get("checks", {}), new.get("checks", {})
     both = sorted(set(before) & set(after))
     return [name for name in both if before[name] and not after[name]], [name for name in both if not before[name] and after[name]]
+
+
+def changed_calls(old: dict[str, Any], new: dict[str, Any]) -> list[str]:
+    """The ids of the made-up calls that have a check whose result differs between the two results."""
+    worse, better = compare(old, new)
+    return sorted({name.split("/")[1] for name in worse + better if name.startswith("call/")})
+
+
+def vote(results: list[dict[str, Any]], calls: list[str]) -> dict[str, Any]:
+    """One result from a first run and the runs again of some made-up calls.
+
+    One run can flip a check with no cause, so for each check of those calls the majority of the runs
+    wins. A run that has no result for the check gives no vote. An even split is a failed check: a
+    doubt must not make the score better. Each other check keeps its result from the first run. The
+    key `votes` keeps each run's result of each voted check, in run order (null: no result)."""
+    first = results[0]
+    checks: dict[str, bool] = dict(first.get("checks", {}))
+    prefixes = tuple(f"call/{name}/" for name in calls)
+    votes: dict[str, list[bool | None]] = {}
+    for name in sorted({name for result in results for name in result.get("checks", {}) if name.startswith(prefixes)}):
+        runs = [result.get("checks", {}).get(name) for result in results]
+        checks[name] = runs.count(True) > runs.count(False)
+        votes[name] = runs
+    return {**result_of(checks, version=first.get("version", ""), calls=bool(first.get("calls"))), "votes": votes}
 
 
 def describe(result: dict[str, Any]) -> str:

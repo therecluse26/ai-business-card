@@ -13,6 +13,8 @@ from ai_call_center.grading import FAIL, NA, PASS, RULES, Score
 from ai_call_center.graph.build import build_graph
 from ai_call_center.graph.handoffs import handoff_tool_name
 from ai_call_center.score import (
+    CALLS,
+    TEST_SET,
     CallRun,
     LiveCallSample,
     MadeUpCall,
@@ -57,17 +59,28 @@ def test_the_word_list_gets_one_check_for_each_sample():
 
 
 def write_set(tmp_path, *, live=None, calls=None):
+    """A test set in a folder. Each call goes in a file named by its id, or by "file" when the call has that key."""
     (tmp_path / "live_call.json").write_text(json.dumps(live if live is not None else [{"lines": ["Hi."], "wants_live_call": False}]))
-    (tmp_path / "calls.json").write_text(json.dumps(calls if calls is not None else []))
+    (tmp_path / "calls").mkdir()
+    for call in calls or []:
+        call = dict(call)
+        (tmp_path / "calls" / call.pop("file", f"{call.get('id', 'x')}.json")).write_text(json.dumps(call))
     return tmp_path
 
 
 @pytest.mark.parametrize(
     "call",
     [
-        {"id": "", "caller": ["Hi."]},
-        {"id": "a/b", "caller": ["Hi."]},
+        {"id": "", "caller": ["Hi."], "file": "empty.json"},
+        {"id": "a b", "caller": ["Hi."], "file": "a b.json"},
+        {"id": "A", "caller": ["Hi."]},
+        {"id": "a--b", "caller": ["Hi."]},
+        {"id": "-a", "caller": ["Hi."]},
+        {"id": "a" * 61, "caller": ["Hi."]},
+        {"id": "a", "caller": ["Hi."], "file": "b.json"},  # the file name is not the id
+        {"id": "a", "caller": ["Hi."], "file": "a.txt"},
         {"id": "a", "caller": []},
+        {"id": "a", "caller": "Hi."},
         {"id": "a", "caller": ["Hi."], "expect": {"visit": ["contact"]}},
         {"id": "a", "caller": ["Hi."], "expect": {"visits": ["sales"]}},
         {"id": "a", "caller": ["Hi."], "expect": {"outcome": "sold"}},
@@ -78,9 +91,22 @@ def test_a_call_with_a_fault_in_the_test_set_is_an_error(tmp_path, call):
         load_calls(write_set(tmp_path, calls=[call]))
 
 
-def test_two_calls_with_one_id_are_an_error(tmp_path):
+def test_a_file_that_is_not_one_call_is_an_error(tmp_path):
+    folder = write_set(tmp_path)
+    (folder / "calls" / "a.json").write_text(json.dumps([{"id": "a", "caller": ["Hi."]}]))
     with pytest.raises(ValueError):
-        load_calls(write_set(tmp_path, calls=[{"id": "a", "caller": ["Hi."]}, {"id": "a", "caller": ["Hello."]}]))
+        load_calls(folder)
+
+
+def test_the_calls_load_in_the_order_of_their_file_names(tmp_path):
+    folder = write_set(tmp_path, calls=[{"id": name, "caller": ["Hi."]} for name in ("b-2", "a", "b-10", "c1")])
+    (folder / "calls" / ".DS_Store").write_text("")  # a file that the system keeps there is not a call
+    assert [call.id for call in load_calls(folder)] == ["a", "b-10", "b-2", "c1"]
+
+
+def test_each_file_of_the_test_set_in_the_repository_is_named_by_its_id():
+    files = sorted(path.name for path in (TEST_SET / CALLS).iterdir())
+    assert files == [f"{call.id}.json" for call in load_calls()] and not (TEST_SET / "calls.json").exists()
 
 
 def test_a_sample_with_no_caller_line_is_an_error(tmp_path):

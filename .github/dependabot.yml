@@ -1,0 +1,35 @@
+# Dependabot opens one pull request each week for the Python packages (uv.lock) and one for the actions.
+# Each pull request runs test.yml with a token that can only read, and with no secret.
+# A merge of a change to uv.lock deploys (fly-deploy.yml), so read the tests of each one before you merge.
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "07:00"
+      timezone: "America/New_York"
+    # A new release waits 7 days: a broken or bad release is often pulled in that time.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      python-packages:
+        applies-to: version-updates
+        patterns: ["*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "07:00"
+      timezone: "America/New_York"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns: ["*"]

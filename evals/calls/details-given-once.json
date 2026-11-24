@@ -1,0 +1,12 @@
+{
+  "id": "details-given-once",
+  "about": "The caller gives a name, a company and a project at the start. No agent must ask for them again.",
+  "caller": [
+    "This is Priya Nair from Northwind Clinics.",
+    "We need someone to rebuild our patient booking platform. Can I leave him a message?",
+    "Tell him I would like a call back this week about the rebuild. This number is fine.",
+    "Yes, that is right.",
+    "No, thank you. Goodbye."
+  ],
+  "expect": {"visits": ["contact"], "outcome": "message"}
+}

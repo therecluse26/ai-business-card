@@ -1,0 +1,12 @@
+{
+  "id": "project-message",
+  "about": "A caller with a project asks one question, then leaves a message.",
+  "caller": [
+    "This is Dana Reyes.",
+    "I run a dental clinic and I need a booking platform. Has he built platforms like that?",
+    "Good. Please take a message for him: Dana Reyes wants a call back next week about a booking platform for a dental clinic. This number is fine.",
+    "Yes, that is right.",
+    "No, that is all. Goodbye."
+  ],
+  "expect": {"visits": ["contact"], "outcome": "message"}
+}

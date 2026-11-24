@@ -12,7 +12,8 @@
 #   `build` (the owner's label)    starts the build job for any issue, also for a feature.
 #
 # The label `fix-started` says that a job started for the issue. A job that opens no pull request removes
-# it, and puts the issue back to `needs-owner` with a comment.
+# it, and puts the issue back to `needs-owner` with a comment. When the owner closes the job's pull request
+# with no merge, this workflow does the same on its next run (the verb `clear`).
 #
 # The workflow is safe to run at any time: it reads all open issues and acts only on what is not done. So an
 # event that GitHub drops, or a run that fails, loses nothing: the next event or the run of each morning
@@ -53,7 +54,8 @@ jobs:
     permissions:
       contents: read
       issues: write # set a label, write the comment for a new idea
-      actions: write # read the runs of today, start triage.yml and improve.yml
+      actions: write # read the runs of triage.yml and improve.yml, start them
+      pull-requests: read # find a job's pull request that the owner closed with no merge
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -78,7 +80,11 @@ jobs:
           gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues?state=open&creator=${GITHUB_REPOSITORY_OWNER}&per_page=100" > "$RUNNER_TEMP/issues.json"
           # The newest 100 triage runs: a run that is not done, and the failed runs of each issue.
           gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/triage.yml/runs?per_page=100" > "$RUNNER_TEMP/triage-runs.json"
-          uv run issue-queue plan --issues "$RUNNER_TEMP/issues.json" --triage-runs "$RUNNER_TEMP/triage-runs.json" > "$RUNNER_TEMP/plan.txt"
+          # The newest 100 job runs: a job that runs again after a closed pull request keeps `fix-started`.
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/improve.yml/runs?per_page=100" > "$RUNNER_TEMP/fix-runs.json"
+          # Each pull request, open or closed: the branch of a job names its issue.
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100" > "$RUNNER_TEMP/pulls.json"
+          uv run issue-queue plan --issues "$RUNNER_TEMP/issues.json" --triage-runs "$RUNNER_TEMP/triage-runs.json" --fix-runs "$RUNNER_TEMP/fix-runs.json" --pulls "$RUNNER_TEMP/pulls.json" > "$RUNNER_TEMP/plan.txt"
           if [ -s "$RUNNER_TEMP/plan.txt" ]; then cat "$RUNNER_TEMP/plan.txt"; else echo "Nothing to do."; fi | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Do it
@@ -86,6 +92,14 @@ jobs:
           set -euo pipefail
           add_label() { gh api "repos/${GITHUB_REPOSITORY}/issues/$1/labels" --method POST -f "labels[]=$2" --silent; }
           say() { gh api "repos/${GITHUB_REPOSITORY}/issues/$1/comments" --method POST -F body=@"$2" --silent; }
+          drop_label() { gh api "repos/${GITHUB_REPOSITORY}/issues/$1/labels/$2" --method DELETE --silent; }
+          # The labels of a job that the plan named for an issue. A name that is not in the fixed list is never used.
+          drop_job_labels() {
+            local label
+            for label in auto-fix auto-build build; do
+              case ",$2," in *",$label,"*) drop_label "$1" "$label" || return 1 ;; esac
+            done
+          }
           failed=0
           # Each line is: a verb, the number of an issue, and a detail. Code wrote each word (issue-queue plan).
           # The plan comes in on its own channel (3), so a command in the loop cannot read a line of it.
@@ -110,6 +124,12 @@ jobs:
                 else
                   failed=1
                 fi ;;
+              clear)
+                # The job's pull request closed with no merge. As the report of improve.yml: the issue goes back to the owner.
+                # `fix-started` goes last: when a step before it fails, the next run tries again.
+                uv run issue-queue comment --label pull-closed --out "$RUNNER_TEMP/comment.md"
+                { add_label "$number" needs-owner && drop_job_labels "$number" "$detail" \
+                    && say "$number" "$RUNNER_TEMP/comment.md" && drop_label "$number" fix-started; } || failed=1 ;;
               wait)
                 echo "Issue #${number} waits: ${detail}" ;;
             esac

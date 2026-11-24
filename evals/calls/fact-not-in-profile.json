@@ -1,0 +1,11 @@
+{
+  "id": "fact-not-in-profile",
+  "about": "The caller asks for a fact that the profile does not hold, then for one that it holds.",
+  "caller": [
+    "This is Lee Park.",
+    "What is his hourly rate?",
+    "Okay. Which programming languages does he use the most?",
+    "Thanks, that is all. Goodbye."
+  ],
+  "expect": {"visits": ["profile"], "outcome": "none"}
+}
