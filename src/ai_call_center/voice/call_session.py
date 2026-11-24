@@ -84,6 +84,7 @@ from ai_call_center.graph.state import CallContext
 from ai_call_center.grading import describe_scores, differences, grade_call, rule_of
 from ai_call_center.fault_report import FaultReport, summary_report, write_report
 from ai_call_center.feedback import report_feedback
+from ai_call_center.fix_check import check_fixes
 from ai_call_center.improve import FixRequest, request_fixes
 from ai_call_center.publish import publish_report
 from ai_call_center.graph.tools import (
@@ -702,6 +703,10 @@ class CallSession:
 
             # A failed rule starts the job that proposes a fix. A test call can start it too: it shows the loop with no caller.
             await request_fixes(self.settings, self.settings.leads_db, record, report=fault_of)
+            # After a deploy: did the fix of a failed rule hold at this version (fix_check.py)?
+            # A new check goes into the public report now, not after the next call.
+            if await check_fixes(self.settings, self.settings.leads_db, record) and not record.test:
+                await publish_report(self.settings)
             # What the caller said aloud about the line: a fault or a wish for a feature. It becomes a GitHub issue (feedback.py).
             # A report that the feedback agent filed counts as certain, also with no answer from the decision grader.
             answers = decider.last_answers if decider is not None else {}

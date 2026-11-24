@@ -24,6 +24,7 @@ from urllib.parse import quote
 
 from ai_call_center.analytics import AnalyticsStore, dated_report
 from ai_call_center.config import Settings
+from ai_call_center.fix_check import stored_checks
 
 log = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def report_body(settings: Settings) -> bytes:
         calls = store.calls()
     finally:
         store.close()
-    return json.dumps(dated_report(calls), separators=(",", ":")).encode()
+    return json.dumps(dated_report(calls, fix_checks=stored_checks(settings.leads_db)), separators=(",", ":")).encode()
 
 
 async def publish_report(settings: Settings, *, send: Callable[[urllib.request.Request], int] = _send) -> bool:

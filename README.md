@@ -948,6 +948,64 @@ Optional repository variables: `IMPROVE_MODEL` (the coding agent's model), `IMPR
 (`all`, `new` or `none`: which made-up calls the scorer runs; these cost money), and `OWNER_NAME`.
 The workflow runs on a public repository, where the standard runners use no paid minutes.
 
+### After the deploy: a check that the fix held
+
+A merged fix deploys a new harness version. This step reads the calls after the merge and says if
+the rule now fails less often (`fix_check.py`). It runs after each graded call, right after the fix
+requests. Like them, it never stops the end of a call.
+
+The unit is a merged fix, not a version. The server deploys many times in a day, so one version
+rarely takes 5 calls. For each rule with a fix request that no check answered yet:
+
+1. **It finds the fix.** It asks GitHub for the newest merged pull request on a branch
+   `improve/<rule>-<run id>`. One list of pull requests serves all rules of a call. With no rule
+   waiting, GitHub is not asked. One check for each merged fix.
+2. **It asks if the version holds the fix.** GitHub's compare says if the version of the call holds
+   the merge commit. The table `fix_holds` keeps each answer, so each pair of pull request and
+   version costs one compare at most.
+3. **It counts the calls after the fix**: the graded calls at each version that holds it. At least
+   `FIX_CHECK_CALLS` (default 5) must have checked the rule. A call where the rule did not apply
+   (`na`) does not count. A version before the merge does not count.
+4. **The baseline** is the newest fix request of the rule at a version that does not hold the fix.
+   A fix request at a version that holds it is a failure after the fix, and is skipped.
+   It looks at 3 versions at most.
+5. **The verdict.** `held`: the fail share after the fix is at most half the fail share at the
+   baseline. Else `not_held`. Example: 2 of 3 calls failed before; 1 of 5 after is `held`, 3 of 5 is `not_held`.
+6. **A fix that did not hold opens one issue**, titled "The fix for the rule `<rule>` did not hold",
+   with the label `needs-owner`. The text holds fixed words, the versions, the counts, and the link
+   of the pull request. No word of a call. An issue of the owner with only `needs-owner` starts no job
+   and no triage (`issue_queue.plan`). The owner's label `build` starts the build job for it.
+
+When a newer fix for the rule merges before the check of an older fix fired, the older check is
+dropped. The newer fix gets the check. A fix request after the baseline, at a version that holds
+the fix, waits for a fix of its own.
+
+The table `fix_checks` keeps each verdict, one row for each rule and merged pull request. Each
+verdict is one line in the log. `uv run call-report` shows the checks in the field `fix_checks`: the
+rule, the verdict, the pull request, the baseline version, the counts, `new_version`, and
+`new_versions`. `new_version` is the first version that held the fix, by the order of calls. The
+"new" counts are over all `new_versions` versions that hold it. They are counts and fixed words only,
+so the public report has them too. The counts include test calls, as the counts of a fix request do.
+
+Only a failed rule gets this check. A fix that an issue started needs none: when the fault of a
+closed issue comes back, a caller's report opens a new issue.
+
+Limits:
+
+- Few calls give a weak share. With 5 calls, one failure more or less can change the verdict.
+- The grader can be wrong about a call, before the fix and after it.
+- Only the baseline version and the versions after the merge are compared. A version between the
+  fix request and the merge is not.
+- A version is asked only at a call of its own. When GitHub failed at the last call of a version,
+  the calls of that version are not counted.
+- The check reads the newest 100 closed pull requests. An older merged fix is not found.
+
+Set up: it uses the token `IMPROVE_GITHUB_TOKEN`. Add the repository permissions **Contents** (read)
+and **Pull requests** (read): the list of pull requests and the compare need them. The issue needs
+**Issues** (write), as a caller's feedback does. `FIX_CHECK=false` turns the step off. With no token or
+no repository, nothing is sent. Without a permission, the server log says "fix check for <rule>: GitHub
+did not answer" with HTTP 403, and nothing is stored.
+
 ### Feedback from a caller: a GitHub issue with a count
 
 A caller can say a fault aloud ("the line was silent for a long time, that is a bug"), or ask for a

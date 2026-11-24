@@ -63,6 +63,7 @@ async def test_the_file_is_the_public_report_with_no_test_call_and_nothing_priva
     [request] = sent
     report = json.loads(request.data)
     assert report["totals"]["calls"] == 1 and len(report["calls"]) == 1 and report["generated_on"]
+    assert report["fix_checks"] == []  # no fix was checked yet; the field is there all the same
     text = request.data.decode()
     assert CALL_ID not in text and SECRET_NOTE not in text and "mine" not in text
 
