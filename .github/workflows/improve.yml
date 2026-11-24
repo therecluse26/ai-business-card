@@ -293,9 +293,11 @@ jobs:
           retention-days: 14
 
   # A job of its own: this runner ran no line of the agent's change, so nothing here can read the owner's token.
+  # `!cancelled()` is necessary: with no status function, GitHub skips this job each time that a job before `push`
+  # was skipped. The job `try2` is skipped in each run with one try, so no such run opened a pull request.
   open:
     needs: push
-    if: needs.push.outputs.branch != ''
+    if: ${{ !cancelled() && needs.push.result == 'success' && needs.push.outputs.branch != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -420,3 +420,25 @@ def test_the_flags_of_the_made_up_calls_are_flags_of_the_scorer(tmp_path: Path, 
     with pytest.raises(SystemExit) as stop:
         score.main()
     assert stop.value.code == 0 and seen[0].calls is True and seen[0].only == ["a", "b"]
+
+
+def test_a_job_after_a_job_that_can_be_skipped_has_a_status_function_in_its_condition():
+    """GitHub skips a job when a job before it, at any distance, was skipped. Only a status function in the job's own
+    `if` stops that. The job `open` had none, so a fix job with no second try pushed its branch and opened no pull
+    request (the run 45427327894, 2026-11-24)."""
+    import yaml
+
+    for text in (WORKFLOW, TRY):
+        jobs = yaml.safe_load(text)["jobs"]
+
+        def before(name: str) -> set[str]:
+            needs = jobs[name].get("needs", [])
+            direct = [needs] if isinstance(needs, str) else list(needs)
+            return set(direct).union(*(before(job) for job in direct))
+
+        for name, job in jobs.items():
+            can_be_skipped = sorted(other for other in before(name) if "if" in jobs[other])
+            if can_be_skipped:
+                assert re.search(r"always\(\)|!cancelled\(\)", str(job.get("if", ""))), f"the job `{name}` is skipped each time that one of {can_be_skipped} is skipped"
+    # The job `open` runs only after a push that worked and that gave a branch.
+    assert "if: ${{ !cancelled() && needs.push.result == 'success' && needs.push.outputs.branch != '' }}" in WORKFLOW
