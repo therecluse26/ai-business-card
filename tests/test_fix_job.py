@@ -442,3 +442,12 @@ def test_a_job_after_a_job_that_can_be_skipped_has_a_status_function_in_its_cond
                 assert re.search(r"always\(\)|!cancelled\(\)", str(job.get("if", ""))), f"the job `{name}` is skipped each time that one of {can_be_skipped} is skipped"
     # The job `open` runs only after a push that worked and that gave a branch.
     assert "if: ${{ !cancelled() && needs.push.result == 'success' && needs.push.outputs.branch != '' }}" in WORKFLOW
+
+
+def test_the_made_up_calls_of_the_fix_job_run_on_a_small_model():
+    """One scorer run makes about 125 requests, each with the full prompt of an agent. On the default LLM_MODEL
+    (claude-opus-5-5) one fix job with two tries cost about 14 dollars (the run 45457766996, 2026-11-24)."""
+    step = TRY.split("- name: Score before the change and after it", 1)[1].split("\n      - name:", 1)[0]
+    assert "LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}" in step
+    # Only the scorer step sets it: the unit tests and the formal check make no model request.
+    assert TRY.count("LLM_MODEL:") == 1 and "LLM_MODEL" not in WORKFLOW

@@ -57,6 +57,9 @@
 #                          "new": only the made-up call that the agent added. "none": the word list only.
 #                          The made-up calls are model requests that cost money. A call with a
 #                          changed check runs 2 more times on each side.
+#   - IMPROVE_SCORE_MODEL  the model of the agents in a made-up call (default: anthropic:claude-haiku-5-5).
+#                          It is small on purpose, like the voice models of a real call. A large model
+#                          costs about 40 times more: about 3 dollars for one scorer run on claude-opus-5-5.
 #   - IMPROVE_TRIES        2 (default): a second try when the first falls short. 1: one try only.
 #                          The second try runs the agent and the scorer again, so it can double their cost.
 #   - OWNER_NAME           the owner's name, as the agents say it

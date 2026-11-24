@@ -1064,6 +1064,9 @@ Optional repository variables:
 - `IMPROVE_MODEL`: the coding agent's model (default `claude-opus-5-5`).
 - `BUILD_MODEL`: the coding agent's model for the scope `code` (default: `IMPROVE_MODEL`).
 - `IMPROVE_SCORE_CALLS`: `all`, `new` or `none`, the made-up calls that the scorer runs. These cost money.
+- `IMPROVE_SCORE_MODEL`: the model of the agents in a made-up call of the fix job. The default is
+  `anthropic:claude-haiku-5-5`, a small model like the voice models of a real call. One scorer run makes about
+  125 requests, each with the full prompt of an agent. On `claude-opus-5-5` that is about 3 dollars for one run.
 - `IMPROVE_TRIES`: `2` (default) or `1`. A second try can double the cost of the agent and the scorer.
 - `OWNER_NAME`: the owner's name, as the agents say it.
 - `TRIAGE_MODEL`: the triage agent's model (see "From an issue to a pull request").

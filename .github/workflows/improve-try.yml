@@ -303,6 +303,10 @@ jobs:
         id: score
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # The agents of a made-up call run on a small model. Each request sends the full prompt of an agent,
+          # 3,100 to 5,900 tokens, and one scorer run makes about 125 requests. On claude-opus-5-5 that was
+          # about 3 dollars for one scorer run, and one try runs the scorer two times or more.
+          LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}
           SCORE_CALLS: ${{ vars.IMPROVE_SCORE_CALLS || 'all' }}
           NEW_CALLS: ${{ steps.guard.outputs.new_calls }}
         run: |
