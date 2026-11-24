@@ -164,7 +164,7 @@ def set_phrase(ctx: CallContext, phrase: str) -> str:
     if key != ctx.held_phrase:
         ctx.held_phrase = key
         return (
-            f"{_say(passphrase_read_back(phrase))} After a yes, call set_passphrase again with the same passphrase. "
+            f"{_say(passphrase_read_back(phrase))} After a yes, call set_passphrase again with the same passphrase, in silence. "
             "If the caller corrects it, call set_passphrase with the corrected one."
         )
     store = PhraseStore(ctx.leads.connection)

@@ -1,0 +1,12 @@
+{
+  "id": "confirmed-passphrase-at-start",
+  "about": "A new caller sets a made-up passphrase at the start and confirms the read-back. The agent keeps it in silence and says only the short confirmation, not its instructions.",
+  "caller": [
+    "Hi, this is Renata Okonkwo-Sill.",
+    "Purple harbor kettle.",
+    "Yes, that's it.",
+    "I'd like to know what kind of work he does.",
+    "Great, thanks. Goodbye."
+  ],
+  "expect": {"visits": ["profile"], "outcome": "none"}
+}
