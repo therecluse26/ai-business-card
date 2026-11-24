@@ -776,8 +776,29 @@ grader it prints the probability of the most probable cause too. Run it after yo
 Each call there has known verdicts. The run counts the failures found and the false alarms. For the
 decision grader it shows the same counts at other limits too. Run it before you trust a change to a
 question (`ASKS` in `decision_grader.py`), to a rule, or to `GRADER_FAIL_AT`. Write a new call and its
-verdicts before you run a grader on it. `--only decision` costs less than one cent for the 41 calls;
+verdicts before you run a grader on it. `--only decision` costs less than one cent for the 63 calls;
 the grader model costs about 1 to 2 cents for each call. The job that proposes a fix cannot change this file.
+
+Without a floor, the exit code is 1 for each miss and each false alarm. Two flags give the run a floor:
+
+- `--min-found N`: the run fails when fewer than N are found. N counts planted failures and kinds of feedback.
+- `--max-false-alarms N`: the run fails when there are more than N false alarms of both kinds.
+- The line `the floor:` shows both counts and the verdict.
+
+**The weekly check** (`.github/workflows/grader-check.yml`). Google can change the model behind
+`GRADER_DECISION_MODEL` with no notice. So each Monday, a runner measures the decision grader.
+It starts at 6:41 AM US Eastern in winter, and at 7:41 AM in summer.
+
+- It runs `uv run check-grader --set --only decision --min-found 33 --max-false-alarms 2`.
+- It runs too on a push to `main` that changes `decision_grader.py`, `grading.py`, `check_grader.py` or the set.
+- The floor comes from the newest figures: 28 of 30 planted failures and 6 of 6 kinds of feedback found
+  (34 of 36), and 1 false alarm. The margin is 1 for each count.
+- The repository variables `GRADER_MIN_FOUND` and `GRADER_MAX_FALSE_ALARMS` change the floor.
+- With no secret `GOOGLE_API_KEY`, the run writes a notice and passes.
+- A failed run of the schedule opens an issue with the label `needs-owner`, or adds a comment to the open one.
+  The Actions bot writes it, so the queue starts no job for it.
+- It never runs for a pull request: it holds `GOOGLE_API_KEY`, and an agent can write a pull request.
+- The log is public. It holds only the made-up calls: their ids, the rule names, the verdicts and the probabilities.
 
 **The public page.** After each call, the server writes the public report as `calls.json` to a
 Cloudflare R2 bucket (`publish.py`). The page `/calls` on the owner's site reads that file, so a
@@ -1355,6 +1376,68 @@ a container image should include that folder. With `WRITING_EMBEDDING_MODEL=` em
 
 This machine runs NixOS. `uv.toml` pins `python-preference = "only-managed"`, because prebuilt wheels
 (numpy, onnxruntime) load only under a Python that runs through nix-ld.
+
+### Checks that run with no person
+
+The repository is public, and agents write some of its code. These checks need no person to start them.
+
+**The grader each week.** See "The weekly check" in the grader section above (`grader-check.yml`).
+
+**The formal check of caller memory** (`test.yml`). The search of the skill `formal-verify-caller-memory`
+makes no model request.
+
+- It is a step of the one job of `test.yml`, after the scorer. A failed step does not stop the next one.
+- It took 139 s on the laptop, so it runs only when a file that it covers changed.
+- The covered files are the coverage record in the skill's `SKILL.md`, and the skill's own folder.
+- A push to `main` that changes a covered file starts `test.yml` too. A commit by hand has no pull request.
+  The check runs after such a push: it does not stop the push or the deploy.
+- For a push, each commit of the push counts: the base is the commit before the push.
+- The job may take 20 minutes, and the step 12.
+
+**A scan before each push** (`scripts/git-hooks/pre-push`). It scans only the added lines of the
+commits that the push sends. A deleted branch sends nothing. A new branch sends only what the remote does not have.
+
+- Scan 1: each value of `.env` that can be a secret. A match stops the push. The message names the
+  key of `.env`, the file, the line and the commit, never the value.
+- It reads the `.env` of this checkout, and the `.env` of the main checkout when the push is from a worktree.
+- With no `.env`, it says so, and the push goes on.
+- Scan 2: `gitleaks`, when it is on PATH. Without it, the hook says so in one line and goes on.
+  On NixOS, `nix shell nixpkgs#gitleaks` gives it for one shell. The hook does not call nix: it is slow.
+- A false alarm: push with `git push --no-verify`.
+- The hook needs `python3` (or `uv`) and the standard library only. `tests/test_push_scan.py` tests it on throwaway repositories.
+
+The filter of scan 1: a value is skipped when one of these is true.
+
+- It is shorter than 8 characters.
+- It is a word of a setting: `true`, `false`, `yes`, `no`, `on`, `off`, `enabled`, `disabled`, `none`, `null`.
+- It is a plain number shorter than 8 digits. A longer number can be a phone number, so it is scanned.
+- It is a value in the tracked `.env.example`, so it is public already.
+- Its key has the word `MODEL`, or ends in `_PATH`, `_DIR`, `_DB` or `_LOG`: a name or a place.
+- Its key is `OWNER_NAME`, `OWNER_NAME_PRONUNCIATION`, `BRAND_NAME` or `RESPELLINGS`: the card shows the name.
+- It is a web address with no user, no password, no query, and no path segment of 20 characters or more.
+  A long segment can be a token, as in a webhook address.
+
+**Dependency updates each week** (`.github/dependabot.yml`). Each Tuesday, Dependabot can open one pull
+request for the Python packages (`uv.lock`) and one for the actions.
+
+- Each one is a group, and at most 2 pull requests of each kind are open.
+- A new release waits 7 days before a pull request takes it.
+- A Dependabot pull request runs `test.yml` with a token that can only read, and with no secret.
+- A merge of a change to `uv.lock` deploys (`fly-deploy.yml`). Read its checks before you merge.
+
+**One-time set-up by the owner.**
+
+```sh
+gh secret set GOOGLE_API_KEY                  # the weekly check of the grader; use a paid tier
+git config core.hooksPath scripts/git-hooks   # the scan before each push, in each clone
+gh api -X PATCH repos/{owner}/{repo} \
+  -f 'security_and_analysis[secret_scanning][status]=enabled' \
+  -f 'security_and_analysis[secret_scanning_push_protection][status]=enabled'
+```
+
+The last command turns on GitHub push protection: GitHub refuses a push that holds a known kind of key.
+The same switch is in the repository's Settings, under Advanced Security (once "Code security"): Push protection.
+The repository variables `OWNER_NAME`, `GRADER_MIN_FOUND` and `GRADER_MAX_FALSE_ALARMS` are optional.
 
 ## Hosting on Fly.io
 

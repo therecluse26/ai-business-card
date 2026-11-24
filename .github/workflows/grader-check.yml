@@ -1,0 +1,135 @@
+# The decision grader is measured each week on the made-up calls of evals/grader_calls.json.
+# Google can change the model behind GRADER_DECISION_MODEL with no notice. This run shows when the grader got worse.
+#
+#   measure  runs `uv run check-grader --set --only decision` with a floor. It costs less than one cent.
+#            Below the floor, the run fails. Its token can only read.
+#   report   only for a failed run of the schedule: it opens an issue with the label `needs-owner`, or adds a
+#            comment to the one that is open. It has no secret, and its token can write issues only.
+#
+# The job token writes the issue, so its author is the Actions bot. The queue (issues.yml, issue_queue.py)
+# acts only on an issue that the owner wrote, so the issue starts no job. It waits for the owner.
+#
+# The output holds only made-up calls, rule names, verdicts and probabilities, so the public log is safe.
+#
+# Never add a `pull_request` trigger: this job holds GOOGLE_API_KEY, and a pull request can hold code that
+# a coding agent wrote. A push to main is code that the owner merged.
+#
+# Needs:
+#   - the repository secret GOOGLE_API_KEY (use a paid tier). With none, the run writes a notice and passes.
+# Optional repository variables:
+#   - GRADER_MIN_FOUND         the floor: planted failures and kinds of feedback found (default 33 of 36)
+#   - GRADER_MAX_FALSE_ALARMS  the floor: false alarms allowed (default 2)
+#   - GRADER_DECISION_MODEL    the model to measure (default: gemini-decision-1, as in .env.example)
+#   - GRADER_FAIL_AT           the limit of a failure (default 0.8, as in .env.example)
+#   - OWNER_NAME               the owner's name, as in .env. The made-up calls and the profile use it.
+name: Check the grader
+
+on:
+  schedule:
+    - cron: "41 11 * * 1" # each Monday: 6:41 AM or 7:41 AM US Eastern
+  push:
+    branches: [main]
+    paths:
+      - "src/ai_call_center/decision_grader.py"
+      - "src/ai_call_center/grading.py"
+      - "src/ai_call_center/check_grader.py"
+      - "evals/grader_calls.json"
+  workflow_dispatch:
+
+# One run at a time. A second run waits: each run is a measure, and none replaces another.
+concurrency:
+  group: grader-check
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      counts: ${{ steps.grade.outputs.counts }}
+    steps:
+      - id: key
+        env:
+          HAS_KEY: ${{ secrets.GOOGLE_API_KEY != '' }}
+        run: |
+          echo "present=$HAS_KEY" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_KEY" != true ]; then
+            echo "::notice::No secret GOOGLE_API_KEY, so the grader was not measured."
+            echo "No secret GOOGLE_API_KEY, so the grader was not measured. Set it with \`gh secret set GOOGLE_API_KEY\`." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - if: steps.key.outputs.present == 'true'
+        uses: astral-sh/setup-uv@v6
+      - if: steps.key.outputs.present == 'true'
+        run: uv sync --frozen
+
+      # The settings are named here: the runner has no .env, and a default in config.py can change.
+      - id: grade
+        if: steps.key.outputs.present == 'true'
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GRADER_DECISION_MODEL: ${{ vars.GRADER_DECISION_MODEL || 'gemini-decision-1' }}
+          GRADER_FAIL_AT: ${{ vars.GRADER_FAIL_AT || '0.8' }}
+          OWNER_NAME: ${{ vars.OWNER_NAME || 'the owner' }}
+          LANGSMITH_TRACING: "false" # no trace of a made-up call
+          MIN_FOUND: ${{ vars.GRADER_MIN_FOUND || '33' }}
+          MAX_ALARMS: ${{ vars.GRADER_MAX_FALSE_ALARMS || '2' }}
+        run: |
+          set -uo pipefail
+          uv run check-grader --set --only decision --min-found "$MIN_FOUND" --max-false-alarms "$MAX_ALARMS" | tee "$RUNNER_TEMP/grader.txt"
+          result=$?
+          # The counts go to the issue of a failed run: the lines of the head, not the rows of each call.
+          {
+            echo "counts<<COUNTS_END"
+            grep -E '^The decision grader|^  (failures found|false alarms|feedback from|the floor|[0-9]+ check)' "$RUNNER_TEMP/grader.txt" || echo "The run gave no counts: read the log of the run."
+            echo "COUNTS_END"
+          } >> "$GITHUB_OUTPUT"
+          { echo '```'; cat "$RUNNER_TEMP/grader.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+
+  report:
+    needs: measure
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write # open the issue, or add a comment to it
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      COUNTS: ${{ needs.measure.outputs.counts }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      TITLE: The weekly check of the decision grader failed
+    steps:
+      - name: Open the issue, or add a comment to it
+        run: |
+          set -euo pipefail
+          {
+            echo "The decision grader is below its floor on the made-up calls of \`evals/grader_calls.json\`."
+            echo "Google may have changed the model, or a run failed before its counts."
+            echo
+            echo '```'
+            echo "${COUNTS:-The run gave no counts: read the log of the run.}"
+            echo '```'
+            echo
+            echo "The run: $RUN_URL"
+            echo
+            echo "Run \`uv run check-grader --set --only decision\` to read each call. The floor is in the repository variables GRADER_MIN_FOUND and GRADER_MAX_FALSE_ALARMS."
+          } > "$RUNNER_TEMP/body.md"
+          # The queue makes this label each morning. A first run can come before that, so it is made here when it is missing.
+          gh label create needs-owner --color fbca04 >/dev/null 2>&1 || true
+          # Only a person with rights on the repository can set a label, so a stranger's issue with this title is not found.
+          number=$(gh issue list --state open --label needs-owner --limit 100 --json number,title --jq 'map(select(.title == env.TITLE)) | .[0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$TITLE" --label needs-owner --body-file "$RUNNER_TEMP/body.md"
+          fi

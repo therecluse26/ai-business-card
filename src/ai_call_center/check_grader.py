@@ -11,6 +11,8 @@ GRADER_MODEL, or GRADER_DECISION_MODEL.
 - `--only decision` or `--only model` asks one grader.
 - `--set` sends each made-up call of `evals/grader_calls.json`, and counts the failures that a grader found
   and its false alarms. Run it before you trust a change to a question, a rule, or the limit GRADER_FAIL_AT.
+- `--min-found N` and `--max-false-alarms N` give `--set` a floor. The exit code is then 1 only below the floor.
+  Without them, each miss and each false alarm gives 1. The weekly check (grader-check.yml) uses the floor.
 
 The transcript is made up; no caller's words are sent. A file that you name with `--audio` is sent to Google.
 """
@@ -136,6 +138,19 @@ async def run(args: argparse.Namespace) -> int:
     return 1 if bad else 0
 
 
+def floor_faults(found: int, alarms: int, *, min_found: int | None, max_alarms: int | None) -> list[str]:
+    """Why a run of `--set` is below its floor; [] = the floor holds.
+
+    `found` counts the planted failures and the kinds of feedback that the grader found. `alarms` counts
+    both kinds of false alarm. None = no floor for that count."""
+    faults = []
+    if min_found is not None and found < min_found:
+        faults.append(f"{found} found, and the floor is {min_found}")
+    if max_alarms is not None and alarms > max_alarms:
+        faults.append(f"{alarms} false alarm(s), and the floor allows {max_alarms}")
+    return faults
+
+
 async def run_set(args: argparse.Namespace) -> int:
     """Each made-up call of the set goes to each grader. The count: failures found, false alarms, and the right agent and cause."""
     settings = get_settings()
@@ -216,8 +231,14 @@ async def run_set(args: argparse.Namespace) -> int:
             lowest, highest = min((chance for must, chance in chances if must), default=0.0), max((chance for must, chance in chances if not must), default=0.0)
             print(f"  the lowest probability of a planted failure: {lowest:.2f}; the highest of a check that must not fail: {highest:.2f}")
             print("  at another limit:  " + "   ".join(f"{limit:.1f}: {sum(must and chance >= limit for must, chance in chances)} found, {sum(not must and chance >= limit for must, chance in chances)} false" for limit in (0.5, 0.6, 0.7, 0.8, 0.9)))
+        if args.min_found is None and args.max_false_alarms is None:
+            bad += (planted - found) + alarms + missing + (said - said_found) + quiet_alarms
+        else:
+            # A floor allows a few misses: a probability near the limit is not stable from one run to the next.
+            faults = floor_faults(found + said_found, alarms + quiet_alarms, min_found=args.min_found, max_alarms=args.max_false_alarms)
+            print(f"  the floor: {found + said_found} found (failures and feedback), {alarms + quiet_alarms} false alarm(s): " + ("; ".join(faults) if faults else "it holds"))
+            bad += len(faults)
         print("\n".join(rows) + "\n")
-        bad += (planted - found) + alarms + missing + (said - said_found) + quiet_alarms
     return 1 if bad else 0
 
 
@@ -229,7 +250,11 @@ def main() -> None:
     parser.add_argument("--audio", metavar="FILE", help="a WAV file for the decision grader to hear; it is sent to Google")
     parser.add_argument("--calls", metavar="IDS", help="with --set: only these calls, as ids with commas between them")
     parser.add_argument("--set", action="store_true", help="send each made-up call of evals/grader_calls.json, and count what each grader found")
+    parser.add_argument("--min-found", type=int, metavar="N", help="with --set: fail only when fewer than N failures and kinds of feedback are found")
+    parser.add_argument("--max-false-alarms", type=int, metavar="N", help="with --set: fail only when there are more than N false alarms")
     args = parser.parse_args()
+    if (args.min_found is not None or args.max_false_alarms is not None) and not args.set:
+        parser.error("--min-found and --max-false-alarms need --set")
     logging.basicConfig(level=logging.WARNING, format="%(message)s")
     sys.exit(asyncio.run(run_set(args) if args.set else run(args)))
 

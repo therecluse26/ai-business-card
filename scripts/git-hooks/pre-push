@@ -1,0 +1,15 @@
+#!/bin/sh
+# The scan before each push (push_scan.py, next to this file). The repository is public.
+# Turn it on one time: git config core.hooksPath scripts/git-hooks
+# A finding stops the push. `git push --no-verify` goes past a false alarm.
+here=$(dirname "$0")
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -u "$here/push_scan.py" "$@"
+fi
+# No python3 on PATH: uv brings its own Python. The scan needs no package of the project.
+if command -v uv >/dev/null 2>&1; then
+  exec uv run --no-project --quiet python -u "$here/push_scan.py" "$@"
+fi
+echo "push scan: no python3 and no uv, so nothing was scanned. The push is stopped."
+echo "push scan: install python3, or push with \`git push --no-verify\` after a scan by hand."
+exit 1
