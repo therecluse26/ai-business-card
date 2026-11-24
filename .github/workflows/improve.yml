@@ -14,19 +14,27 @@
 #    has the label for the scope. So a person who dispatches this workflow with a number gets no more than
 #    the labels allow.
 #
-# Four jobs, so the coding agent never has a token that can write:
-#   change   the agent makes one change. Its token can only read. The change leaves this job as a patch.
-#            The task names the earlier pull requests for the same rule or issue, and what became of them.
-#   measure  code that the agent cannot edit checks the patch, runs the new tests on the old code, runs
-#            the tests, and runs the scorer before the change and after it. A made-up call with a
-#            changed check runs 2 more times on each side. Then it pushes the change as a branch.
+# Six jobs, so the coding agent never has a token that can write:
+#   try1     one try of the coding agent: the jobs `change` and `measure` of improve-try.yml.
+#            change   the agent makes one change. Its token can only read. The change leaves this job as a patch.
+#            measure  code that the agent cannot edit checks the patch, runs the new tests on the old code,
+#                     runs the tests, and runs the scorer before the change and after it.
+#   decide   code reads the result of the first try and decides on a second try (`proposal retry`).
+#            Yes: the guard, the unit tests or the formal check failed, the score got worse, the scorer
+#            did not show a change of prompts, or no new test of a change of code fails on the old code.
+#   try2     the second try: the same task, a section on the first try, and a checkout with the first
+#            change in place. Never a third try.
+#   push     code picks the try for the pull request (`proposal winner`), checks its patch again, and
+#            pushes it as a branch. This runner runs no line of the agent's change.
 #   open     opens the pull request with the evidence. This runner never ran the agent's change,
 #            so the owner's token (IMPROVE_PR_TOKEN) is safe here.
 #            A person reviews the pull request. A merge to main deploys (fly-deploy.yml).
-#   report   when the job opened no pull request. For an issue: a comment on the issue says why, and
-#            the issue goes back to the label `needs-owner`. For a failed rule: an issue for the rule
-#            says why (one issue for each rule, with the label `needs-owner`), or a comment on it when
-#            it is open. This runner ran no line of the agent's change.
+#   report   when the job opened no pull request, it says why, for each try. For an issue: a comment on
+#            the issue, and the issue goes back to the label `needs-owner`. For a failed rule: an issue for
+#            the rule (one issue for each rule, with the label `needs-owner`), or a comment on it when it
+#            is open. This runner ran no line of the agent's change.
+#
+# Cost: a second try can double the paid scorer calls and the coding agent's usage. IMPROVE_TRIES=1 turns it off.
 #
 # Needs:
 #   - one repository secret for the coding agent:
@@ -49,9 +57,12 @@
 #                          "new": only the made-up call that the agent added. "none": the word list only.
 #                          The made-up calls are model requests that cost money. A call with a
 #                          changed check runs 2 more times on each side.
+#   - IMPROVE_TRIES        2 (default): a second try when the first falls short. 1: one try only.
+#                          The second try runs the agent and the scorer again, so it can double their cost.
 #   - OWNER_NAME           the owner's name, as the agents say it
 name: Propose a fix for a failed rule
-# The queue counts the jobs of one day by this name (FIX_RUN in issue_queue.py).
+# The queue finds the runs of one issue by this name (FIX_RUN in issue_queue.py). It puts an issue back
+# after a closed pull request only when no run for that issue is still going.
 run-name: "${{ inputs.issue != '' && format('Issue #{0} ({1})', inputs.issue, inputs.scope == 'code' && 'build' || 'auto-fix') || format('Rule {0}', inputs.rule) }}"
 
 on:
@@ -140,153 +151,84 @@ env:
   OWNER_NAME: ${{ vars.OWNER_NAME }}
 
 jobs:
-  change:
-    runs-on: ubuntu-latest
-    timeout-minutes: ${{ inputs.issue != '' && inputs.scope == 'code' && 60 || 25 }}
+  # The two tries run the same jobs from one file, so that they cannot drift apart. The caller's `env` does
+  # not reach a called workflow: the inputs of the dispatch go as one JSON text, and only the two named secrets.
+  try1:
+    uses: ./.github/workflows/improve-try.yml
     permissions:
       contents: read
       issues: read
       pull-requests: read # the earlier proposals for the same rule or issue
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      try: 1
+      request: ${{ toJSON(inputs) }}
+
+  # Code decides, on a runner that ran no line of the agent's change. The outputs of the first try come from
+  # a runner that did, so `proposal retry` takes only a word from a fixed list from each.
+  decide:
+    needs: try1
+    if: ${{ !cancelled() && needs.try1.outputs.changed == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
-      changed: ${{ steps.patch.outputs.changed }}
-      answer: ${{ steps.agent.outputs.structured_output }}
+      again: ${{ steps.retry.outputs.again }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # the agent reads what changed after the version of the call
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
-
-      - name: Read the issue
-        if: inputs.issue != ''
+      - name: Decide on a second try
+        id: retry
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          case "$FIX_ISSUE" in *[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
-          gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}" > "$RUNNER_TEMP/issue.json"
-          echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"
+          JOBS: ${{ toJSON(needs) }}
+          TRIES: ${{ vars.IMPROVE_TRIES }}
+        run: uv run proposal retry >> "$GITHUB_STEP_SUMMARY"
 
-      # An earlier coding agent wrote the titles and the diffs. They go to the task through files, and code
-      # picks the pull requests and cuts each part to a fixed length (`proposal earlier`, `earlier_text`).
-      - name: Read the earlier proposals
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/earlier"
-          # The 100 newest pull requests of the repository, in each state.
-          gh api "repos/${GITHUB_REPOSITORY}/pulls?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/earlier/pulls.json"
-          numbers="$(uv run proposal earlier --pulls "$RUNNER_TEMP/earlier/pulls.json")"
-          for number in $numbers; do
-            case "$number" in *[!0-9]*) echo "::error::A pull request number is not a number."; exit 1 ;; esac
-            gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/files?per_page=30" > "$RUNNER_TEMP/earlier/${number}.json"
-          done
-          echo "FIX_EARLIER_DIR=$RUNNER_TEMP/earlier" >> "$GITHUB_ENV"
+  try2:
+    needs: [try1, decide]
+    if: ${{ !cancelled() && needs.decide.outputs.again == 'true' }}
+    uses: ./.github/workflows/improve-try.yml
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    with:
+      try: 2
+      request: ${{ toJSON(inputs) }}
+      first: ${{ toJSON(needs.try1.outputs) }}
 
-      - name: Check the fix request and write the task
-        id: task
-        run: |
-          uv run proposal task --out "$RUNNER_TEMP/task.md" >> "$GITHUB_STEP_SUMMARY"
-          {
-            echo 'text<<END_OF_TASK_7c1e52'
-            cat "$RUNNER_TEMP/task.md"
-            echo
-            echo 'END_OF_TASK_7c1e52'
-            echo "schema=$(uv run proposal schema)"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Check the login of the coding agent
-        id: login
-        uses: ./.github/actions/agent-login
-        with:
-          token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          key: ${{ secrets.ANTHROPIC_API_KEY }}
-
-      - name: The coding agent makes one change
-        id: agent
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ steps.login.outputs.token }}
-          # Claude Code uses an API key before a subscription token. So the key is given only when there is no token.
-          anthropic_api_key: ${{ !secrets.CLAUDE_CODE_OAUTH_TOKEN && secrets.ANTHROPIC_API_KEY || '' }}
-          github_token: ${{ github.token }}
-          # The queue starts this workflow with the token of its own run, so the actor is the bot of GitHub Actions.
-          # The action refuses a run that a bot started, unless the bot is named here. Only a workflow of this
-          # repository with the permission `actions: write` can start a run as this bot (issues.yml, triage.yml).
-          allowed_bots: "github-actions[bot]"
-          prompt: ${{ steps.task.outputs.text }}
-          claude_args: |
-            --model ${{ env.FIX_SCOPE == 'code' && vars.BUILD_MODEL || vars.IMPROVE_MODEL || 'claude-opus-5-5' }}
-            --max-turns ${{ env.FIX_SCOPE == 'code' && '150' || '40' }}
-            --permission-mode acceptEdits
-            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(uv run pytest:*),Bash(uv run score-harness),Bash(uv run python .claude/skills/formal-verify-caller-memory/check.py),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
-            --disallowedTools "WebFetch,WebSearch"
-            --json-schema '${{ steps.task.outputs.schema }}'
-
-      # The action hides what the coding agent printed. This step shows only the end result: the error text of a
-      # refused login or a reached usage limit is there. It holds no secret.
-      - name: Why the coding agent failed
-        if: failure() && steps.agent.conclusion == 'failure'
-        run: |
-          file="$RUNNER_TEMP/claude-execution-output.json"
-          if [ ! -f "$file" ]; then echo "The coding agent wrote no output file." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0; fi
-          jq -rs 'flatten | .[] | if .type == "result" then "result: \(.subtype), error: \(.is_error), turns: \(.num_turns)\n\((.result // "") | tostring | .[0:800])" elif (.type == "assistant" and .error != null) then "error of the model request: \(.error)" else empty end' "$file" | tee -a "$GITHUB_STEP_SUMMARY"
-      - name: Make a patch of the change
-        id: patch
-        run: |
-          # Only src, tests and evals go into the patch; for the scope `code`, README.md too.
-          # The next job refuses a file that the agent must not change.
-          paths=(src tests evals)
-          if [ "$FIX_SCOPE" = code ]; then paths+=(README.md); fi
-          git add -A -- "${paths[@]}"
-          git diff --cached --binary HEAD > "$RUNNER_TEMP/change.patch"
-          if [ -s "$RUNNER_TEMP/change.patch" ]; then echo "changed=true" >> "$GITHUB_OUTPUT"; else echo "changed=false" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Nothing to propose
-        if: steps.patch.outputs.changed != 'true'
-        run: echo "The coding agent changed nothing, so there is no pull request." >> "$GITHUB_STEP_SUMMARY"
-
-      - uses: actions/upload-artifact@v4
-        if: steps.patch.outputs.changed == 'true'
-        with:
-          name: change
-          path: ${{ runner.temp }}/change.patch
-          retention-days: 14
-
-  measure:
-    needs: change
-    if: needs.change.outputs.changed == 'true'
+  # Only the winning try is pushed. This runner runs no line of the agent's change: `proposal guard` imports
+  # each module before it applies the patch, and after the patch only git runs. No test, no scorer.
+  push:
+    needs: [try1, decide, try2]
+    if: ${{ !cancelled() && (needs.try1.outputs.finished == 'true' || needs.try2.outputs.finished == 'true') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45 # the made-up calls with a changed check run 4 more times
+    timeout-minutes: 10
     permissions:
       contents: write
       issues: read
     outputs:
       branch: ${{ steps.push.outputs.branch }}
-      title: ${{ steps.body.outputs.title }}
-      verdict: ${{ steps.body.outputs.verdict }}
-      # red, not-red or no-test: did a new or changed test fail on the old code (`proposal red`)
-      red: ${{ steps.proof.outputs.red }}
-      # The result of each step that can stop the job, so that the report can say which one did.
-      guard: ${{ steps.guard.outcome }}
-      proof: ${{ steps.proof.outcome }}
-      tests: ${{ steps.tests.outcome }}
-      score: ${{ steps.score.outcome }}
+      title: ${{ steps.winner.outputs.title }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }} # the same commit that the agent changed
+          ref: ${{ github.sha }} # the same commit that both tries changed
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
-      - uses: actions/download-artifact@v4
-        with:
-          name: change
-          path: ${{ runner.temp }}
 
-      # The runner of the job `change` ran the agent's commands, so this job reads the issue again from GitHub.
+      # The runners of the tries ran the agent's commands, so this job reads the issue again from GitHub.
       - name: Read the issue
         if: inputs.issue != ''
         env:
@@ -297,88 +239,41 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}" > "$RUNNER_TEMP/issue.json"
           echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "*-[12]" # change-1, measure-1, change-2, measure-2: one folder each
+          path: ${{ runner.temp }}/tries
+
+      # `better` beats `same`; then, for the scope `code`, a new test that fails on the old code; a tie goes
+      # to the second try. The text of the pull request says which try it is, and what became of the other.
+      - name: Pick the try for the pull request
+        id: winner
+        env:
+          JOBS: ${{ toJSON(needs) }}
+          TRIES: ${{ vars.IMPROVE_TRIES }}
+        run: uv run proposal winner --tries "$RUNNER_TEMP/tries" --patch "$RUNNER_TEMP/change.patch" --body "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # The same checks as in the job `measure`: its runner ran the agent's change, so its result is not proof.
       - name: Check the patch, then apply it
         id: guard
+        if: steps.winner.outputs.try != ''
         run: uv run proposal guard --patch "$RUNNER_TEMP/change.patch"
-
-      # The scorer runs only the text mode, so for a change of code a test is the only measure. A test that
-      # passes on the old code too proves nothing. This step puts back the old src/ for a moment, runs the
-      # new and changed test files, then puts the change back. Its result does not stop the job.
-      - name: A new test fails on the old code
-        id: proof
-        run: uv run proposal red
-
-      - name: Unit tests
-        id: tests
-        run: uv run pytest -q
-
-      # A change of code can change how the line knows a caller. The search runs the real functions; it makes no model request.
-      - name: Formal check of caller memory
-        if: env.FIX_SCOPE == 'code'
-        run: uv run python .claude/skills/formal-verify-caller-memory/check.py
-
-      - name: Score before the change and after it
-        id: score
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          SCORE_CALLS: ${{ vars.IMPROVE_SCORE_CALLS || 'all' }}
-          NEW_CALLS: ${{ steps.guard.outputs.new_calls }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ "$SCORE_CALLS" != "none" ]; then
-            echo "No secret ANTHROPIC_API_KEY, so the scorer ran no made-up call. The scores are from the code checks only." >> "$GITHUB_STEP_SUMMARY"
-            SCORE_CALLS=none
-          fi
-          flags=()
-          case "$SCORE_CALLS" in
-            all) flags+=(--calls) ;;
-            new)
-              if [ -n "$NEW_CALLS" ]; then
-                flags+=(--calls)
-                for id in $NEW_CALLS; do flags+=(--only "$id"); done
-              fi ;;
-            none) ;;
-            *) echo "IMPROVE_SCORE_CALLS must be all, new or none"; exit 1 ;;
-          esac
-          # Before: the old prompts and word lists, with the new made-up call. So the two scores have the same checks.
-          git diff HEAD -- src tests > "$RUNNER_TEMP/code.patch"
-          if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply -R "$RUNNER_TEMP/code.patch"; fi
-          uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/before.json"
-          if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply "$RUNNER_TEMP/code.patch"; fi
-          uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/after.json"
-          # One run can flip a check with no cause. Each made-up call with a changed check runs 2 more times
-          # on each side, and the majority of 3 decides. Only when the made-up calls ran: the word list gives
-          # the same result each time.
-          uv run proposal again --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json"
-
-      - name: Write the pull request text
-        id: body
-        env:
-          RED: ${{ steps.proof.outputs.red }}
-          AGENT_ANSWER: ${{ needs.change.outputs.answer }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          uv run proposal body --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json" --out "$RUNNER_TEMP/body.md"
-          cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: The score got worse, so there is no pull request
-        if: steps.body.outputs.verdict == 'worse'
-        run: echo "A check that passed before the change now fails. The job opens no pull request." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Push the change as a branch
         id: push
-        if: steps.body.outputs.verdict != 'worse'
+        if: steps.winner.outputs.try != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TITLE: ${{ steps.body.outputs.title }}
+          TITLE: ${{ steps.winner.outputs.title }}
+          TRY: ${{ steps.winner.outputs.try }}
         run: |
           set -euo pipefail
           if [ -n "$FIX_ISSUE" ]; then
             branch="improve/issue-${FIX_ISSUE}-${GITHUB_RUN_ID}"
-            why="A change for issue #${FIX_ISSUE} (scope: ${FIX_SCOPE}). The pull request holds the evidence."
+            why="A change for issue #${FIX_ISSUE} (scope: ${FIX_SCOPE}), from try ${TRY} of the coding agent. The pull request holds the evidence."
           else
             branch="improve/${FIX_RULE}-${GITHUB_RUN_ID}"
-            why="A fix request for the rule ${FIX_RULE} (agent: ${FIX_AGENT:-not known}, cause: ${FIX_CAUSE}). The pull request holds the evidence."
+            why="A fix request for the rule ${FIX_RULE} (agent: ${FIX_AGENT:-not known}, cause: ${FIX_CAUSE}), from try ${TRY} of the coding agent. The pull request holds the evidence."
           fi
           paths=(src tests evals)
           if [ "$FIX_SCOPE" = code ]; then paths+=(README.md); fi
@@ -399,8 +294,8 @@ jobs:
 
   # A job of its own: this runner ran no line of the agent's change, so nothing here can read the owner's token.
   open:
-    needs: measure
-    if: needs.measure.outputs.branch != ''
+    needs: push
+    if: needs.push.outputs.branch != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -415,9 +310,8 @@ jobs:
         env:
           OWNER_TOKEN: ${{ secrets.IMPROVE_PR_TOKEN }}
           JOB_TOKEN: ${{ github.token }}
-          BRANCH: ${{ needs.measure.outputs.branch }}
-          TITLE: ${{ needs.measure.outputs.title }}
-          VERDICT: ${{ needs.measure.outputs.verdict }}
+          BRANCH: ${{ needs.push.outputs.branch }}
+          TITLE: ${{ needs.push.outputs.title }}
         run: |
           set -euo pipefail
           # No pull request is a draft (the owner's rule, 2026-11-23): each one is ready for review, and its
@@ -437,8 +331,9 @@ jobs:
 
   # When the job opened no pull request. An issue must not stay in "a job started" for ever. A failed rule
   # gets no second fix request at this harness version, so without a trace its reason is only in this run.
+  # `toJSON(needs)` gives code the result and the outputs of each job before this one, as one value.
   report:
-    needs: [change, measure, open]
+    needs: [try1, decide, try2, push, open]
     if: always() && (inputs.issue != '' || inputs.rule != '')
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -448,6 +343,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
@@ -456,12 +352,8 @@ jobs:
         if: inputs.issue != ''
         id: report
         env:
-          CHANGE_RESULT: ${{ needs.change.result }}
-          CHANGED: ${{ needs.change.outputs.changed }}
-          MEASURE_RESULT: ${{ needs.measure.result }}
-          VERDICT: ${{ needs.measure.outputs.verdict }}
-          OPEN_RESULT: ${{ needs.open.result }}
-          AGENT_ANSWER: ${{ needs.change.outputs.answer }}
+          JOBS: ${{ toJSON(needs) }}
+          TRIES: ${{ vars.IMPROVE_TRIES }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: uv run issue-queue report --out "$RUNNER_TEMP/report.md"
 
@@ -476,34 +368,26 @@ jobs:
           labels="repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}/labels"
           gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}/comments" --method POST -F body=@"$RUNNER_TEMP/report.md" --silent
           gh api "$labels" --method POST -f "labels[]=needs-owner" --silent
-          # The label that started the job goes, so the queue starts no second job by itself.
-          started="auto-fix"
-          if [ "$FIX_SCOPE" = code ]; then started="build auto-build"; fi
-          for label in $started; do gh api "$labels/$label" --method DELETE --silent || true; done
+          # Each label that starts a job goes, as the queue's verb `clear` does (issues.yml). So no job starts
+          # again by itself. A label that the issue does not have gives an error, and that is fine.
+          for label in auto-fix auto-build build; do gh api "$labels/$label" --method DELETE --silent || true; done
           gh api "$labels/fix-started" --method DELETE --silent || true
 
       # The open issues, so that the trace of a rule goes on its open issue and not on a new one each time.
+      # With --slurp, more than one page is still one JSON value: a list of pages.
       - name: Read the open issues
         if: inputs.issue == ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" > "$RUNNER_TEMP/open-issues.json"
+        run: gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" > "$RUNNER_TEMP/open-issues.json"
 
       # `proposal report` checks each input again with the checks of `proposal task`, before any of it is shown.
       - name: Write why there is no pull request for the rule
         if: inputs.issue == ''
         id: trace
         env:
-          CHANGE_RESULT: ${{ needs.change.result }}
-          CHANGED: ${{ needs.change.outputs.changed }}
-          MEASURE_RESULT: ${{ needs.measure.result }}
-          VERDICT: ${{ needs.measure.outputs.verdict }}
-          GUARD_RESULT: ${{ needs.measure.outputs.guard }}
-          PROOF_RESULT: ${{ needs.measure.outputs.proof }}
-          TESTS_RESULT: ${{ needs.measure.outputs.tests }}
-          SCORE_RESULT: ${{ needs.measure.outputs.score }}
-          OPEN_RESULT: ${{ needs.open.result }}
-          AGENT_ANSWER: ${{ needs.change.outputs.answer }}
+          JOBS: ${{ toJSON(needs) }}
+          TRIES: ${{ vars.IMPROVE_TRIES }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: uv run proposal report --issues "$RUNNER_TEMP/open-issues.json" --out "$RUNNER_TEMP/trace.md"
 

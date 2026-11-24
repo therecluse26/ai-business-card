@@ -102,6 +102,8 @@ jobs:
             && git fetch --quiet --no-tags --depth=1 origin "$BEFORE"; then
             base=$BEFORE
           fi
+          # The backticks are a part of the pattern in SKILL.md, not a command.
+          # shellcheck disable=SC2016
           mapfile -t covered < <(grep -oE '^\| `src/[^`]+`' "$skill/SKILL.md" | sed -E 's/^\| `([^`]+)`/\1/')
           if [ "${#covered[@]}" -eq 0 ]; then
             echo "::warning::SKILL.md lists no covered file, so the check runs."

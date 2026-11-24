@@ -15,8 +15,8 @@ Who sets a label: a triage agent sorts each new fault (`.github/workflows/triage
 new idea (`needs-owner`, with no agent), and the owner can change each label. The owner's label wins:
 the queue reads the labels again on each run, and it sorts no issue a second time.
 
-A job that opens no pull request puts its issue back: it removes `fix-started` and the label that
-started it, sets `needs-owner`, and writes a comment that says why (`issue-queue report`). A pull
+A job that opens no pull request puts its issue back: it removes `fix-started` and each label that
+starts a job, sets `needs-owner`, and writes a comment that says why (`issue-queue report`). A pull
 request that the owner closes with no merge puts its issue back the same way: the queue does it on
 its next run (the verb `clear`).
 
@@ -127,7 +127,7 @@ def read_issue(row: Any) -> QueueIssue | None:
     return QueueIssue(number=row["number"], title=str(row.get("title") or ""), body=str(row.get("body") or ""), labels=labels, author=str(user.get("login") or ""), open=row.get("state") == "open")
 
 
-def _flat(rows: Any) -> list[Any] | None:
+def flat_rows(rows: Any) -> list[Any] | None:
     """The rows of a list. `gh api --paginate --slurp` gives a list of lists. None when it is not a list."""
     if not isinstance(rows, list):
         return None
@@ -136,7 +136,7 @@ def _flat(rows: Any) -> list[Any] | None:
 
 def read_issues(rows: Any) -> list[QueueIssue]:
     """The issues in a list of rows, oldest first. `gh api --paginate --slurp` gives a list of lists; both forms are read."""
-    flat = _flat(rows) or []
+    flat = flat_rows(rows) or []
     return sorted((issue for issue in map(read_issue, flat) if issue is not None), key=lambda issue: issue.number)
 
 
@@ -359,7 +359,7 @@ class JobPull:
 
 def read_pulls(rows: Any) -> list[JobPull] | None:
     """The pull requests of the jobs, from GitHub's list of pull requests. None when it is not a list: then nothing is cleared."""
-    flat = _flat(rows)
+    flat = flat_rows(rows)
     if flat is None:
         return None
     found: list[JobPull] = []
@@ -447,29 +447,22 @@ def plan(issues: list[QueueIssue], *, owner: str, triage_runs: Any = None, fix_r
 # --- the report of a job that opened no pull request ---
 
 
-def job_report(*, scope: str, change: str, changed: str, measure: str, verdict: str, opened: str, answer: dict[str, Any], run_url: str = "") -> str | None:
-    """The comment for the issue, or None when the job opened a pull request. Each result is a word of GitHub: "success", "failure", "skipped"."""
-    if opened == "success":
+def job_report(*, scope: str, tries: list[str] | None, run_url: str = "") -> str | None:
+    """The comment for the issue, or None when the job opened a pull request.
+
+    `tries` holds one line for each try of the coding agent, from `proposal.no_pull_request_lines`. Each line
+    is fixed text, a word from a fixed list, or the agent's own words cut by `plain`."""
+    if tries is None:
         return None
     job = "build job" if scope == CODE else "fix job"
-    lines = [f"The {job} opened no pull request for this issue."]
-    if change != "success":
-        lines.append("The job failed before the coding agent finished its change.")
-    elif changed != "true":
-        said = plain(answer.get("reason"), REASON_WORDS)
-        lines.append("The coding agent changed nothing." + (f" Its reason: {said}" if said else ""))
-    elif verdict == "worse":
-        lines.append("A check of the scorer that passed before the change fails with it.")
-    elif measure != "success":
-        lines.append("The change did not pass a check of the job: the guard of the files, the unit tests, or the scorer.")
-    else:
-        lines.append("The change is on a branch, but the job could not open the pull request.")
+    lines = [f"The {job} opened no pull request for this issue.", "\n".join(tries)]
     if run_url:
         lines.append(f"The run: {run_url}")
+    gone = "The issue now has the label `needs-owner`, and each label that starts a job is gone (`auto-fix`, `auto-build`, `build`)."
     if scope == CODE:
-        lines.append("The issue now has the label `needs-owner`, and the label that started the job is gone. Put `build` on the issue to run the job again.")
+        lines.append(f"{gone} Put `build` on the issue to run the job again.")
     else:
-        lines.append("The issue now has the label `needs-owner`, and the label `auto-fix` is gone. The label `build` starts a job that can change the code of the phone line.")
+        lines.append(f"{gone} The label `auto-fix` starts the fix job again. The label `build` starts a job that can change the code of the phone line.")
     return "\n\n".join(lines) + "\n"
 
 
@@ -533,21 +526,13 @@ def main() -> None:
         elif args.command == "comment":
             Path(args.out).write_text(comment(args.label), encoding="utf-8")
         elif args.command == "report":
+            # proposal.py imports this module, so this import waits until a report is asked for.
+            from ai_call_center.proposal import jobs_from, no_pull_request_lines
+
             env = os.environ
-            try:
-                answer = json.loads(env.get("AGENT_ANSWER", "") or "{}")
-            except ValueError:
-                answer = {}
-            text = job_report(
-                scope=CODE if env.get("FIX_SCOPE") == CODE else PROMPTS,
-                change=env.get("CHANGE_RESULT", ""),
-                changed=env.get("CHANGED", ""),
-                measure=env.get("MEASURE_RESULT", ""),
-                verdict=env.get("VERDICT", ""),
-                opened=env.get("OPEN_RESULT", ""),
-                answer=answer if isinstance(answer, dict) else {},
-                run_url=env.get("RUN_URL", ""),
-            )
+            scope = CODE if env.get("FIX_SCOPE") == CODE else PROMPTS
+            tries = no_pull_request_lines(jobs_from(env.get("JOBS", "")), scope=scope, setting=env.get("TRIES", ""))
+            text = job_report(scope=scope, tries=tries, run_url=env.get("RUN_URL", ""))
             Path(args.out).write_text(text or "", encoding="utf-8")
             _output("opened", "false" if text else "true")
         elif args.command == "plan":

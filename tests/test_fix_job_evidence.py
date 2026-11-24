@@ -26,7 +26,6 @@ from ai_call_center.proposal import (
     earlier_pulls,
     earlier_text,
     json_values,
-    no_pull_request_reason,
     old_src,
     open_trace,
     pr_body,
@@ -261,37 +260,16 @@ def test_the_task_holds_the_earlier_proposals_as_data(tmp_path):
 
 
 # --- a trace for a failed rule with no pull request ---
-
-OPENED = {"change": "success", "changed": "true", "measure": "success", "verdict": "better", "open": "success"}
-
-
-@pytest.mark.parametrize(
-    ("results", "reason"),
-    [
-        ({**OPENED, "change": "failure", "changed": "", "measure": "skipped", "open": "skipped"}, "The job failed before the coding agent finished its change"),
-        ({**OPENED, "changed": "false", "measure": "skipped", "open": "skipped"}, "The coding agent changed nothing. Its reason: The later commit fixed it."),
-        ({**OPENED, "verdict": "worse", "open": "skipped"}, "The scorer shows the change as worse"),
-        ({**OPENED, "measure": "failure", "verdict": "", "guard": "failure", "open": "skipped"}, "The guard refused the change"),
-        ({**OPENED, "measure": "failure", "verdict": "", "guard": "success", "proof": "success", "tests": "failure", "open": "skipped"}, "The unit tests failed with the change."),
-        ({**OPENED, "measure": "cancelled", "verdict": "", "open": "skipped"}, "The job that measures the change failed or was stopped."),
-        ({**OPENED, "open": "failure"}, "The change is on a branch, but the job could not open the pull request."),
-    ],
-)
-def test_the_trace_says_why_the_job_opened_no_pull_request(results, reason):
-    assert reason in no_pull_request_reason(results, {"reason": "The later commit fixed it."})
-
-
-def test_no_trace_when_the_pull_request_opened():
-    assert no_pull_request_reason(OPENED, {}) is None
+# The reason for each try is in test_fix_tries.py.
 
 
 def test_the_trace_holds_the_fix_request_and_a_fixed_title():
     request = request_from(ENV)
-    text = trace_text(request, "The unit tests failed with the change.", run_url="https://github.com/owner-x/voice-card/actions/runs/123")
+    text = trace_text(request, ["- The first try: The unit tests failed with the change.", "- No second try: x"], run_url="https://github.com/owner-x/voice-card/actions/runs/123")
     for part in ("Rule: `name_asked_once`", "Agent at fault: contact", "Cause: `asked_again_after_handoff`", "`6e77d417184e`", "2 of 5 graded call(s)", "The unit tests failed", "actions/runs/123"):
         assert part in text
     assert trace_title(request) == "No pull request for the rule `name_asked_once`"
-    assert "javascript" not in trace_text(request, "x", run_url="javascript:alert(1)//actions/runs/1")
+    assert "javascript" not in trace_text(request, ["x"], run_url="javascript:alert(1)//actions/runs/1")
     # The inputs pass the same checks as for the task, before any of them is shown.
     for bad in ({"FIX_RULE": "no_such_rule"}, {"FIX_AGENT": "someone"}, {"FIX_VERSION": "main; rm"}, {"FIX_FAILED_CALLS": "two"}):
         with pytest.raises(Refused):

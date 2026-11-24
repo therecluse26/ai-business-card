@@ -20,7 +20,8 @@ A small model on the server hears how the caller sounds; see "The server hears h
 With LangSmith set up, every call is traced; see "Tracing with LangSmith (M6)".
 After hangup a grader scores each call against eleven rules, and the figures and the scores are stored for a public report;
 see "A grader scores each call after hangup" and "Call analytics and the public report".
-A failed rule starts a job on GitHub that opens a pull request with a fix, with no action from the owner;
+A failed rule starts a job on GitHub that opens a pull request with a fix, with no action from the owner.
+When the first try falls short, the coding agent gets one second try;
 see "The improvement loop: a failed rule opens a pull request".
 With the owner's CRM connected, each call that left a message is written to it after hangup;
 see "The owner's CRM over MCP (off by default)".
@@ -871,9 +872,11 @@ No person starts this loop. A call ends, and the rest runs with no action from t
    call that shows the fault, as a new file in `evals/calls/`. Then it changes one prompt or one word list.
 5. **Fixed code measures the change** (`proposal.py`, `score.py`). It checks which files changed, runs
    the new tests on the old code, runs the unit tests, and runs the scorer before the change and after it.
-6. **The job opens a pull request**. It starts with what went wrong in the call. Then it shows the
-   rule, the change, and both scores. With no pull request, an issue for the rule says why.
-7. **The owner reviews it.** A merge to `main` deploys the server. The next calls have a new harness
+6. **A second try, when the first falls short.** Code decides it from the measure. The second agent
+   starts from the first change and sees what the measure showed. Never a third try.
+7. **The job opens a pull request** for the better try. It starts with what went wrong in the call. Then it shows the
+   rule, the change, and both scores. With no pull request, an issue for the rule says why, for each try.
+8. **The owner reviews it.** A merge to `main` deploys the server. The next calls have a new harness
    version, and their scores show if the change helped. "After the deploy: a check that the fix held" says how.
 
 What a fix request holds: the rule, the agent, the cause code, the harness version, two counts, and
@@ -959,7 +962,8 @@ What the pull request shows, and its limits:
 - **Better:** a check that failed now passes, and no check got worse. The pull request is ready for review.
 - **Same:** no check changed. The pull request says that the scorer does not show the change. The scorer runs the agents in the text mode. A fault that only a voice model makes,
   for example a tool name said aloud, does not happen there.
-- **Worse:** a check that passed now fails. The job opens no pull request; its summary shows the scores.
+- **Worse:** a check that passed now fails. This try opens no pull request; its summary shows the scores.
+  A second try runs (below).
 - The agents' answers change from run to run, so one check of a made-up call can change with no cause.
   So each made-up call with a changed check runs 2 more times before the change and 2 more after it
   (`proposal again`). The majority of the 3 runs decides each check of that call.
@@ -984,6 +988,40 @@ files that the patch added or changed, then it puts the change back. The result 
 - A test that fails on the old code for another reason, for example a typo, also counts as `red`.
 - The task of the scope `code` tells the coding agent to add a test that fails before its change.
 
+**A second try** (`proposal retry`, `.github/workflows/improve-try.yml`). One try is the jobs `change`
+and `measure`. `improve.yml` calls that file once, and a second time when code says so:
+
+- A second try runs when the guard refused the patch, or the unit tests or the formal check failed.
+- It also runs when the verdict is `worse`, or `same` for the scope `prompts` when the made-up calls ran.
+- For the scope `code`, it runs when no new test fails on the old code (`not-red`, `no-test`).
+- No second try when the agent changed nothing, or the job `change` failed (a login, a usage limit).
+- No second try when the first result is good: `better`, `same` with no made-up call, or `red`.
+- The repository variable `IMPROVE_TRIES=1` turns the second try off. There is never a third try.
+
+What the second agent gets:
+
+- The same task, and a section on the first try. It says: keep the first change, change it, or undo
+  it, and give one complete change.
+- A checkout with the first patch in place, after the guard's checks. A refused patch: a clean checkout.
+- `.first-try/` in the checkout: the first patch, and `result.md`. That text holds the verdict, the
+  checks that now fail or pass, the proof, the step that failed, and the last lines of the unit tests.
+- The runner of the first measure ran the agent's code, so the task marks `result.md` as data.
+  Each part has a fixed form or a length limit: 20 check names, 60 lines and 4000 characters of output.
+- The patch takes only `src`, `tests` and `evals` (and `README.md` for the scope `code`), so
+  `.first-try/` never gets into it. A second patch that equals the first gives no second measure.
+
+Which try opens the pull request (`proposal winner`, the job `push`):
+
+- A try can open when its measure finished and its verdict is not `worse`.
+- `better` beats `same`. Then, for the scope `code`, `red` beats the rest. A tie goes to the second try.
+- The pull request says which try it is, and in one line what became of the other try.
+- The job `push` downloads the patch of that try, checks it again with `proposal guard`, and pushes it.
+  It runs no line of the agent's change: `uv run` loads each module before `git apply`, and after
+  it only git runs. The job `open` gets the owner's token and runs no code of the change either.
+
+Cost: a second try runs the coding agent and the scorer again. It can double the paid made-up calls
+and the agent's use of the subscription. `IMPROVE_TRIES=1` keeps one try.
+
 **A failed rule with no pull request leaves a trace.** The server sends one fix request for each
 failure at one harness version. When its job opens no pull request, the reason must not stay only in
 the run summary. So the job `report` also runs for a failed rule (`proposal report`):
@@ -993,9 +1031,10 @@ the run summary. So the job `report` also runs for a failed rule (`proposal repo
 - The text holds the rule, the agent at fault, the cause code, the harness version, the two counts,
   the reason in plain words, and the link to the run.
 - The command checks each input again with the checks of `proposal task` before it shows any of it.
-- The reason comes from a fixed list. The job `change` failed, or the agent changed nothing (with its
-  own reason). The score got worse, or a step of `measure` failed: it names the step. Or the pull
-  request did not open.
+- It gives one reason for each try, from a fixed list. The job `change` failed, or the agent changed
+  nothing (with its own reason). The score got worse, or a step of `measure` failed: it names the step.
+  Then the reason for no second try, or a line when the branch or the pull request did not get to GitHub.
+- The results come to the command as one value, `toJSON(needs)`. It takes only a word from a fixed list from each.
 - The job's own token writes the issue, so its author is the bot of GitHub Actions. The queue starts a
   job only for an issue that the owner wrote, so the trace starts nothing. The owner decides.
 - Only an open issue that the bot wrote gets the comment. An issue that another person opened with the same title is not used.
@@ -1018,10 +1057,18 @@ To turn the loop on:
    (`test.yml`) start at once. GitHub holds each run of a pull request that a job's own token opened, until
    a person selects "Approve workflows to run". With no `IMPROVE_PR_TOKEN`, or with one that is not valid
    any more, the job's own token opens the pull request, and that approval is necessary again.
-   Only the last job of the workflow gets this token. That job runs no line of the coding agent's change.
+   Only the job `open` gets this token. That job runs no line of the coding agent's change.
 
-Optional repository variables: `IMPROVE_MODEL` (the coding agent's model), `IMPROVE_SCORE_CALLS`
-(`all`, `new` or `none`: which made-up calls the scorer runs; these cost money), and `OWNER_NAME`.
+Optional repository variables:
+
+- `IMPROVE_MODEL`: the coding agent's model (default `claude-opus-5-5`).
+- `BUILD_MODEL`: the coding agent's model for the scope `code` (default: `IMPROVE_MODEL`).
+- `IMPROVE_SCORE_CALLS`: `all`, `new` or `none`, the made-up calls that the scorer runs. These cost money.
+- `IMPROVE_TRIES`: `2` (default) or `1`. A second try can double the cost of the agent and the scorer.
+- `OWNER_NAME`: the owner's name, as the agents say it.
+- `TRIAGE_MODEL`: the triage agent's model (see "From an issue to a pull request").
+
+A called workflow (`improve-try.yml`) reads the same repository variables, but none of the caller's `env`.
 The workflow runs on a public repository, where the standard runners use no paid minutes.
 
 ### After the deploy: a check that the fix held
@@ -1209,8 +1256,9 @@ it has no tool that changes a file or runs a command.
   that the scorer measures the agents' words and not new code.
 
 The pull request says `Closes #N`, so a merge closes the issue. A job that opens no pull request
-writes the reason as a comment on the issue, removes `fix-started` and the label that started it, and
-sets `needs-owner`. To run the build job again, put `build` on the issue again.
+writes the reason for each try as a comment on the issue. It removes `fix-started` and each label that
+starts a job (`auto-fix`, `auto-build`, `build`), and sets `needs-owner`. To run the build job again,
+put `build` on the issue again.
 
 A pull request that the owner closes with no merge puts its issue back the same way. The queue reads
 each pull request of the repository, open or closed. A job's branch is `improve/issue-<N>-<run id>`,
@@ -1246,14 +1294,15 @@ No count of runs for one day is a limit. Each issue that is ready starts its run
 2026-11-23 the queue started 10 triage runs and 2 jobs in one day, and a later issue waited. What
 stops a run that starts again and again:
 
-- The label `fix-started`: one job for an issue. A job that opens no pull request removes the label
-  that started it, so nothing starts that job again by itself. After a closed pull request, the
+- The label `fix-started`: one job for an issue. A job that opens no pull request removes each label
+  that starts a job, so nothing starts a job again by itself. After a closed pull request, the
   queue removes each label of a job for the same reason.
 - A triage run that is not done: the queue starts no second run beside it.
 - 3 failed triage runs for one issue: the issue gets `needs-owner`, with a comment.
 
 Each run uses the owner's Claude subscription. The limits of that subscription are the only limit on
-the cost: one call can give 3 issues, and each new fault starts a triage run and maybe a job.
+the cost: one call can give 3 issues, and each new fault starts a triage run and maybe a job. A job
+with a second try runs the coding agent two times (`IMPROVE_TRIES`).
 
 The queue runs on each new issue, on each change of a label by a person, and each morning. It reads
 all open issues, the pull requests and the runs of the two jobs, and does only what is not done, so a
@@ -1530,15 +1579,18 @@ src/ai_call_center/
   decision_grader.py             the decision grader: Gemini Decision 1 hears the call audio and answers typed questions; the grader model is the fallback
   analytics.py                   the figures, answer times and scores of each call; the public report (`uv run call-report`)
   publish.py                     the upload of the public report to a Cloudflare R2 bucket, for the page on the owner's site
-  check_grader.py                `uv run check-grader`: one made-up call to each grader, to check the keys, the questions and the verdicts
+  check_grader.py                `uv run check-grader`: one made-up call to each grader; `--set` runs the made-up calls of evals/grader_calls.json, with a floor
   caller_voice.py                a voice reading for each caller turn, and the texts for the tour agent and the lead email
   score.py                       `uv run score-harness`: the fixed score of the prompts and the word lists, against the made-up test set in evals/
   improve.py                     a fix request: a failed rule starts the GitHub workflow that proposes a fix
+  fix_check.py                   after the deploy: did a merged fix of a failed rule hold; an issue when it did not
+  issue_queue.py                 `uv run issue-queue`: the labels of the issues, the triage agent's answer, the report of a job with no pull request
   fault_report.py                what went wrong in a call, with each private word removed by code
   english_words.txt              the plain English words that the scrub keeps (SCOWL; licence in english_words.LICENSE.txt)
   feedback.py                    a caller's fault report or feature idea becomes a GitHub issue, with a count of the callers
   passphrase.py                  the passphrase check: a match of number and name opens no notes of an earlier call; the caller's passphrase does
-  proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard on changed files, the pull request text)
+  proposal.py                    `uv run proposal`: the fixed steps of that workflow (the task, the guard, the proof, the second try, the winner, the pull request text)
+  tracing.py                     LangSmith tracing for calls and for the text mode
   check_jev.py                   `uv run check-jev`: made-up caller lines to Jev, to check the key, the question and the time limit
   check_crm.py                   `uv run check-crm`: a read of the owner's CRM, to check the address, the token and the times; `--send` writes the waiting entries
   check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time
@@ -1559,7 +1611,29 @@ src/ai_call_center/
   voice/call_session.py          one phone call: pipeline, switcher, tool handlers, transfer gate, time limit
   app.py                         FastAPI server (uv run serve)
   chat.py                        terminal simulator
+evals/
+  live_call.json                 made-up caller lines for the word list of the transfer check
+  calls/<id>.json                one made-up call for each file, for `score-harness --calls`
+  grader_calls.json              made-up calls with known verdicts, for `check-grader --set`
 tests/                           scripted fake model, no network
+  test_fix_job.py                a dry run of both workflows of the fix job: each command, two tries, no model request
+  test_fix_job_evidence.py       the vote of the runs again, the proof on the old code, the earlier proposals, the trace
+  test_fix_tries.py              the second try: when it runs, what it gets, which try wins, and the report
+  test_fix_check.py              the check after the deploy, with a fake GitHub
+  test_check_grader.py           the floor of `check-grader --set`, with a fake grader
+  test_push_scan.py              the scan before each push
+scripts/git-hooks/
+  pre-push                       runs push_scan.py before each push; turn it on with `git config core.hooksPath scripts/git-hooks`
+  push_scan.py                   stops a push that holds a value of .env or a key that gitleaks knows
+.github/
+  dependabot.yml                 one pull request each week for the Python packages, one for the actions
+  workflows/test.yml             the checks of a pull request: unit tests, the scorer, the formal check, actionlint
+  workflows/improve.yml          the fix job and the build job: the tries, then push, open and report
+  workflows/improve-try.yml      one try of the coding agent (the jobs change and measure); only improve.yml calls it
+  workflows/issues.yml           the queue: the labels of the issues start the triage agent or a job
+  workflows/triage.yml           the triage agent: one label for one issue
+  workflows/grader-check.yml     each week, the decision grader on the made-up calls, with a floor
+  workflows/fly-deploy.yml       a push to main deploys to Fly.io
 ```
 
 ## How routing works
