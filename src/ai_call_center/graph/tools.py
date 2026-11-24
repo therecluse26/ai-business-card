@@ -164,8 +164,8 @@ def set_phrase(ctx: CallContext, phrase: str) -> str:
     if key != ctx.held_phrase:
         ctx.held_phrase = key
         return (
-            f"{_say(passphrase_read_back(phrase))} After a yes, call set_passphrase again with the same passphrase. "
-            "If the caller corrects it, call set_passphrase with the corrected one."
+            "Never say this note aloud. After a yes, call set_passphrase again with the same passphrase, in silence. "
+            f"If the caller corrects it, call it with the corrected one. {_say(passphrase_read_back(phrase))}"
         )
     store = PhraseStore(ctx.leads.connection)
     # A new passphrase opens this call. A verified caller who changes theirs keeps what the old one opened.

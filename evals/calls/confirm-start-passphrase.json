@@ -1,0 +1,12 @@
+{
+  "id": "confirm-start-passphrase",
+  "about": "A new caller sets a made-up passphrase at the start and confirms the read-back. The agent must say only the short confirmation, never its tool instructions, and then go on with the call.",
+  "caller": [
+    "Hi, it's Marisol Quenby.",
+    "Purple harbor kettle.",
+    "Yes, that's it.",
+    "I'd like to hear how the agents hand a call to each other.",
+    "That's all, thanks. Bye."
+  ],
+  "expect": {"visits": ["tour"], "outcome": "none"}
+}
