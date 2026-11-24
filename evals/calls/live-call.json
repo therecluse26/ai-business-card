@@ -1,0 +1,10 @@
+{
+  "id": "live-call",
+  "about": "The caller asks, in their own words, for a live call with the owner.",
+  "caller": [
+    "This is Sam Ortiz.",
+    "I have a contract to discuss. Can I speak to him right now?",
+    "Connect me to him now, please."
+  ],
+  "expect": {"visits": ["contact"], "outcome": "transfer"}
+}

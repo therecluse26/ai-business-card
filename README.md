@@ -832,10 +832,12 @@ a real call.
 - `evals/live_call.json`: caller lines, each with the answer to "does this caller want a live call?".
   The word list of the transfer check must give that answer. This part makes no model request, and it
   gives the same result each time. `uv run check-jev` reads the same file.
-- `evals/calls.json`: made-up calls. Each one has the caller's lines and what the call must do: the
-  agents that take part, the outcome, and if the caller is forgotten. The agents answer the lines in
-  the text mode. Then the grader scores the call against its rules. This part makes model requests
-  that cost money, so it runs only with `--calls`.
+- `evals/calls/<id>.json`: made-up calls, one file for each. Each one has the caller's lines and what
+  the call must do: the agents that take part, the outcome, and if the caller is forgotten. The agents
+  answer the lines in the text mode. Then the grader scores the call against its rules. This part
+  makes model requests that cost money, so it runs only with `--calls`.
+- The id of a call is its file name: lower-case letters, digits and single hyphens, 60 characters at
+  most. The scorer refuses another file in the folder. It runs the calls in the order of their file names.
 
 ```
 uv run score-harness                                  # the word list only: no model request
@@ -850,8 +852,9 @@ uv run score-harness --calls                          # each made-up call (paid)
 - The agents' answers change from run to run. Thus one check of a made-up call can pass in one run
   and fail in the next. Read the checks that changed before you trust a small difference.
 - A rule that does not apply to a call gives no check. A model rule with no verdict is a failed check.
-- Add a new sample or a new call at the end of its file. Do not change or remove an old one: two
-  results are compared by the name of each check.
+- Add a new sample at the end of `live_call.json`, and a new call as a new file. Do not change or
+  remove an old one: two results are compared by the name of each check. One file for each call
+  means that two open pull requests never change the same lines of the test set.
 
 ### The improvement loop: a failed rule opens a pull request
 
@@ -864,14 +867,14 @@ No person starts this loop. A call ends, and the rest runs with no action from t
 3. **The server sends a fix request** (`improve.py`) with the fault report. It starts the workflow
    `.github/workflows/improve.yml` with GitHub's REST API.
 4. **A coding agent makes one change** (the Claude Code GitHub Action). It reads the fault report, the
-   rule and the agent's instructions. It adds one made-up call to `evals/calls.json` that shows the
-   fault. Then it changes one prompt or one word list.
+   rule, the agent's instructions, and the earlier proposals for the same rule. It adds one made-up
+   call that shows the fault, as a new file in `evals/calls/`. Then it changes one prompt or one word list.
 5. **Fixed code measures the change** (`proposal.py`, `score.py`). It checks which files changed, runs
-   the unit tests, and runs the scorer before the change and after it.
+   the new tests on the old code, runs the unit tests, and runs the scorer before the change and after it.
 6. **The job opens a pull request**. It starts with what went wrong in the call. Then it shows the
-   rule, the change, and both scores.
+   rule, the change, and both scores. With no pull request, an issue for the rule says why.
 7. **The owner reviews it.** A merge to `main` deploys the server. The next calls have a new harness
-   version, and their scores show if the change helped.
+   version, and their scores show if the change helped. "After the deploy: a check that the fix held" says how.
 
 What a fix request holds: the rule, the agent, the cause code, the harness version, two counts, and
 the fault report. Each name is a word from a fixed list in `grading.py`; a value that is not in its
@@ -931,10 +934,25 @@ What the coding agent can and cannot do:
   the tool words and the word lists (`graph/tools.py`), the summary prompt (`callers.py`), the tests,
   and the test set. The job refuses a patch that changes another file: the grader, the scorer, a
   workflow, or a script.
-- It can add an entry at the end of a test set file. It cannot change or remove an old entry.
+- It can add a sample at the end of `evals/live_call.json`, and a made-up call as a new file in
+  `evals/calls/`. It cannot change or remove an old sample or an old call file. The guard checks a
+  new call with the scorer's own checks, and the file name must be the call's id.
 - This list is the scope `prompts`: a failed rule, and an issue with the label `auto-fix`. The triage
   agent's label `auto-build` and the owner's label `build` on an issue give the wider scope `code` (see
   "From an issue to a pull request").
+
+**Earlier proposals.** Before the task, the job `change` reads the pull requests of earlier fix jobs for
+the same rule, or for the same issue (`proposal earlier`). It knows them by the head branch:
+`improve/<rule>-<run id>` or `improve/issue-<N>-<run id>`.
+
+- The task holds the 5 newest, in each state: the title, the state, the date, the changed files, and
+  the first 1500 characters of the diff.
+- Closed with no merge means that the owner refused it: the agent must not propose it again. Merged
+  means it did not repair the fault, when the call came after it. Open means it waits for review.
+- An earlier coding agent wrote each title and diff. The task marks them as data, not instructions.
+  They reach the task through files, never inside a command, and code cuts each part to a fixed length.
+- Only a branch of this repository counts. Anyone can open a pull request from a fork with the same branch name.
+- The job reads the 100 newest pull requests of the repository. An older proposal is not in the task.
 
 What the pull request shows, and its limits:
 
@@ -943,7 +961,44 @@ What the pull request shows, and its limits:
   for example a tool name said aloud, does not happen there.
 - **Worse:** a check that passed now fails. The job opens no pull request; its summary shows the scores.
 - The agents' answers change from run to run, so one check of a made-up call can change with no cause.
+  So each made-up call with a changed check runs 2 more times before the change and 2 more after it
+  (`proposal again`). The majority of the 3 runs decides each check of that call.
+- A run with no result for a check gives no vote. An even split is a fail. The pull request names
+  each call that ran again, and the votes on each side ("passed 2 of 3").
+- The runs again happen only when the made-up calls ran: `IMPROVE_SCORE_CALLS` is `all` or `new`,
+  with the API key. Each such call costs 4 more runs. A call with no changed check runs once.
+- Three runs make a flip with no cause less likely. They do not rule it out.
 - The grader can be wrong about a call. Then the coding agent is told to change nothing when it finds no reason.
+
+**A test that fails first** (`proposal red`). For a change of code, the unit test is the only measure:
+the scorer runs only the text mode. A new test that also passes on the old code proves nothing. So
+after the guard applied the patch, the job puts back the old `src/` file by file. It runs only the test
+files that the patch added or changed, then it puts the change back. The result goes into the pull request:
+
+- `red`: at least one of them fails on the old code. An error of import or collection counts as a fail.
+- `not-red`: each of them passes on the old code too.
+- `no-test`: the patch adds or changes no test file (`test_*.py` or `*_test.py` in `tests/`). A changed
+  helper or `conftest.py` is not a test file.
+- For the scope `code`, `not-red` and `no-test` get a bold warning. No result stops the pull request.
+  The result is an output of the job `measure` (`red`), so that a later step can use it.
+- A test that fails on the old code for another reason, for example a typo, also counts as `red`.
+- The task of the scope `code` tells the coding agent to add a test that fails before its change.
+
+**A failed rule with no pull request leaves a trace.** The server sends one fix request for each
+failure at one harness version. When its job opens no pull request, the reason must not stay only in
+the run summary. So the job `report` also runs for a failed rule (`proposal report`):
+
+- It opens one issue for each rule, with the title "No pull request for the rule `<rule>`" and the
+  label `needs-owner`. When an open issue with that title is there, it adds a comment to it instead.
+- The text holds the rule, the agent at fault, the cause code, the harness version, the two counts,
+  the reason in plain words, and the link to the run.
+- The command checks each input again with the checks of `proposal task` before it shows any of it.
+- The reason comes from a fixed list. The job `change` failed, or the agent changed nothing (with its
+  own reason). The score got worse, or a step of `measure` failed: it names the step. Or the pull
+  request did not open.
+- The job's own token writes the issue, so its author is the bot of GitHub Actions. The queue starts a
+  job only for an issue that the owner wrote, so the trace starts nothing. The owner decides.
+- Only an open issue that the bot wrote gets the comment. An issue that another person opened with the same title is not used.
 
 To turn the loop on:
 

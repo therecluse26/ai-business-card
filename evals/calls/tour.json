@@ -1,0 +1,11 @@
+{
+  "id": "tour",
+  "about": "The caller has no project and asks how the phone line works.",
+  "caller": [
+    "I'm Alex Chen.",
+    "I am not hiring. I only want to know how this phone line works.",
+    "Which models answer the calls?",
+    "That is all. Goodbye."
+  ],
+  "expect": {"visits": ["tour"], "outcome": "none"}
+}

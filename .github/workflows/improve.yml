@@ -16,13 +16,17 @@
 #
 # Four jobs, so the coding agent never has a token that can write:
 #   change   the agent makes one change. Its token can only read. The change leaves this job as a patch.
-#   measure  code that the agent cannot edit checks the patch, runs the tests, and runs the scorer
-#            before the change and after it. Then it pushes the change as a branch.
+#            The task names the earlier pull requests for the same rule or issue, and what became of them.
+#   measure  code that the agent cannot edit checks the patch, runs the new tests on the old code, runs
+#            the tests, and runs the scorer before the change and after it. A made-up call with a
+#            changed check runs 2 more times on each side. Then it pushes the change as a branch.
 #   open     opens the pull request with the evidence. This runner never ran the agent's change,
 #            so the owner's token (IMPROVE_PR_TOKEN) is safe here.
 #            A person reviews the pull request. A merge to main deploys (fly-deploy.yml).
-#   report   only for an issue whose job opened no pull request: a comment on the issue says why, and
-#            the issue goes back to the label `needs-owner`. This runner ran no line of the agent's change.
+#   report   when the job opened no pull request. For an issue: a comment on the issue says why, and
+#            the issue goes back to the label `needs-owner`. For a failed rule: an issue for the rule
+#            says why (one issue for each rule, with the label `needs-owner`), or a comment on it when
+#            it is open. This runner ran no line of the agent's change.
 #
 # Needs:
 #   - one repository secret for the coding agent:
@@ -43,7 +47,8 @@
 #   - BUILD_MODEL          the model of the coding agent for the scope `code` (default: IMPROVE_MODEL)
 #   - IMPROVE_SCORE_CALLS  "all" (default): the scorer runs each made-up call, before and after.
 #                          "new": only the made-up call that the agent added. "none": the word list only.
-#                          The made-up calls are model requests that cost money.
+#                          The made-up calls are model requests that cost money. A call with a
+#                          changed check runs 2 more times on each side.
 #   - OWNER_NAME           the owner's name, as the agents say it
 name: Propose a fix for a failed rule
 # The queue counts the jobs of one day by this name (FIX_RUN in issue_queue.py).
@@ -141,6 +146,7 @@ jobs:
     permissions:
       contents: read
       issues: read
+      pull-requests: read # the earlier proposals for the same rule or issue
     outputs:
       changed: ${{ steps.patch.outputs.changed }}
       answer: ${{ steps.agent.outputs.structured_output }}
@@ -161,6 +167,23 @@ jobs:
           case "$FIX_ISSUE" in *[!0-9]*) echo "::error::The input issue is not a number."; exit 1 ;; esac
           gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}" > "$RUNNER_TEMP/issue.json"
           echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"
+
+      # An earlier coding agent wrote the titles and the diffs. They go to the task through files, and code
+      # picks the pull requests and cuts each part to a fixed length (`proposal earlier`, `earlier_text`).
+      - name: Read the earlier proposals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/earlier"
+          # The 100 newest pull requests of the repository, in each state.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls?state=all&sort=created&direction=desc&per_page=100" > "$RUNNER_TEMP/earlier/pulls.json"
+          numbers="$(uv run proposal earlier --pulls "$RUNNER_TEMP/earlier/pulls.json")"
+          for number in $numbers; do
+            case "$number" in *[!0-9]*) echo "::error::A pull request number is not a number."; exit 1 ;; esac
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${number}/files?per_page=30" > "$RUNNER_TEMP/earlier/${number}.json"
+          done
+          echo "FIX_EARLIER_DIR=$RUNNER_TEMP/earlier" >> "$GITHUB_ENV"
 
       - name: Check the fix request and write the task
         id: task
@@ -236,7 +259,7 @@ jobs:
     needs: change
     if: needs.change.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45 # the made-up calls with a changed check run 4 more times
     permissions:
       contents: write
       issues: read
@@ -244,6 +267,13 @@ jobs:
       branch: ${{ steps.push.outputs.branch }}
       title: ${{ steps.body.outputs.title }}
       verdict: ${{ steps.body.outputs.verdict }}
+      # red, not-red or no-test: did a new or changed test fail on the old code (`proposal red`)
+      red: ${{ steps.proof.outputs.red }}
+      # The result of each step that can stop the job, so that the report can say which one did.
+      guard: ${{ steps.guard.outcome }}
+      proof: ${{ steps.proof.outcome }}
+      tests: ${{ steps.tests.outcome }}
+      score: ${{ steps.score.outcome }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -271,7 +301,15 @@ jobs:
         id: guard
         run: uv run proposal guard --patch "$RUNNER_TEMP/change.patch"
 
+      # The scorer runs only the text mode, so for a change of code a test is the only measure. A test that
+      # passes on the old code too proves nothing. This step puts back the old src/ for a moment, runs the
+      # new and changed test files, then puts the change back. Its result does not stop the job.
+      - name: A new test fails on the old code
+        id: proof
+        run: uv run proposal red
+
       - name: Unit tests
+        id: tests
         run: uv run pytest -q
 
       # A change of code can change how the line knows a caller. The search runs the real functions; it makes no model request.
@@ -280,6 +318,7 @@ jobs:
         run: uv run python .claude/skills/formal-verify-caller-memory/check.py
 
       - name: Score before the change and after it
+        id: score
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SCORE_CALLS: ${{ vars.IMPROVE_SCORE_CALLS || 'all' }}
@@ -307,10 +346,15 @@ jobs:
           uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/before.json"
           if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply "$RUNNER_TEMP/code.patch"; fi
           uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/after.json"
+          # One run can flip a check with no cause. Each made-up call with a changed check runs 2 more times
+          # on each side, and the majority of 3 decides. Only when the made-up calls ran: the word list gives
+          # the same result each time.
+          uv run proposal again --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json"
 
       - name: Write the pull request text
         id: body
         env:
+          RED: ${{ steps.proof.outputs.red }}
           AGENT_ANSWER: ${{ needs.change.outputs.answer }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -391,10 +435,11 @@ jobs:
           fi
           open_as "$JOB_TOKEN" >> "$GITHUB_STEP_SUMMARY"
 
-  # For an issue only. When the job opened no pull request, the issue must not stay in "a job started" for ever.
+  # When the job opened no pull request. An issue must not stay in "a job started" for ever. A failed rule
+  # gets no second fix request at this harness version, so without a trace its reason is only in this run.
   report:
     needs: [change, measure, open]
-    if: always() && inputs.issue != ''
+    if: always() && (inputs.issue != '' || inputs.rule != '')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -408,6 +453,7 @@ jobs:
       - run: uv sync --frozen
 
       - name: Write why there is no pull request
+        if: inputs.issue != ''
         id: report
         env:
           CHANGE_RESULT: ${{ needs.change.result }}
@@ -435,3 +481,47 @@ jobs:
           if [ "$FIX_SCOPE" = code ]; then started="build auto-build"; fi
           for label in $started; do gh api "$labels/$label" --method DELETE --silent || true; done
           gh api "$labels/fix-started" --method DELETE --silent || true
+
+      # The open issues, so that the trace of a rule goes on its open issue and not on a new one each time.
+      - name: Read the open issues
+        if: inputs.issue == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --paginate "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" > "$RUNNER_TEMP/open-issues.json"
+
+      # `proposal report` checks each input again with the checks of `proposal task`, before any of it is shown.
+      - name: Write why there is no pull request for the rule
+        if: inputs.issue == ''
+        id: trace
+        env:
+          CHANGE_RESULT: ${{ needs.change.result }}
+          CHANGED: ${{ needs.change.outputs.changed }}
+          MEASURE_RESULT: ${{ needs.measure.result }}
+          VERDICT: ${{ needs.measure.outputs.verdict }}
+          GUARD_RESULT: ${{ needs.measure.outputs.guard }}
+          PROOF_RESULT: ${{ needs.measure.outputs.proof }}
+          TESTS_RESULT: ${{ needs.measure.outputs.tests }}
+          SCORE_RESULT: ${{ needs.measure.outputs.score }}
+          OPEN_RESULT: ${{ needs.open.result }}
+          AGENT_ANSWER: ${{ needs.change.outputs.answer }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: uv run proposal report --issues "$RUNNER_TEMP/open-issues.json" --out "$RUNNER_TEMP/trace.md"
+
+      # The job's token writes the issue, so its author is the bot of GitHub Actions. The queue starts no job
+      # for an issue that the owner did not write (issue_queue.py), so the trace only waits for the owner.
+      - name: Leave a trace in the issue for the rule
+        if: steps.trace.outputs.opened == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ steps.trace.outputs.title }}
+          ISSUE: ${{ steps.trace.outputs.issue }}
+        run: |
+          set -euo pipefail
+          cat "$RUNNER_TEMP/trace.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "$ISSUE" ]; then
+            case "$ISSUE" in *[!0-9]*) echo "::error::The number of the issue is not a number."; exit 1 ;; esac
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE}/comments" --method POST -F body=@"$RUNNER_TEMP/trace.md" --silent
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE}/labels" --method POST -f "labels[]=needs-owner" --silent
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues" --method POST -f title="$TITLE" -F body=@"$RUNNER_TEMP/trace.md" -f "labels[]=needs-owner" --silent
+          fi

@@ -1,0 +1,10 @@
+{
+  "id": "forget-me",
+  "about": "The caller asks to be forgotten. Nothing about the call is kept.",
+  "caller": [
+    "This is Robin Vale.",
+    "Please forget me. Do not keep anything about this call.",
+    "Goodbye."
+  ],
+  "expect": {"forgotten": true, "outcome": "none"}
+}

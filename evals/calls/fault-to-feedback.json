@@ -1,0 +1,12 @@
+{
+  "id": "fault-to-feedback",
+  "about": "The caller reports a fault of the line. The feedback agent asks only what is missing, reads the report back, and files it. Nothing rings the owner.",
+  "caller": [
+    "This is Priya Natarajan.",
+    "Your answer stopped in the middle of a sentence, and then the line went silent. That is a bug in this phone line.",
+    "I expected the agent to finish its sentence and then let me talk.",
+    "Yes, that is right.",
+    "No, that is all. Goodbye."
+  ],
+  "expect": {"visits": ["feedback"], "outcome": "none"}
+}
