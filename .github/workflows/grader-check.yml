@@ -63,11 +63,11 @@ jobs:
           fi
 
       - if: steps.key.outputs.present == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
       - if: steps.key.outputs.present == 'true'
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - if: steps.key.outputs.present == 'true'

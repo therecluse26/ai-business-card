@@ -116,12 +116,12 @@ jobs:
       changed: ${{ steps.patch.outputs.changed }}
       answer: ${{ steps.agent.outputs.structured_output }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }} # the commit of the dispatch, for both tries
           fetch-depth: 0 # the agent reads what changed after the version of the call
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
@@ -168,7 +168,7 @@ jobs:
 
       - name: Read the first try
         if: inputs.try == 2
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: "*-1" # change-1 and measure-1, one folder each
           path: ${{ runner.temp }}/first
@@ -237,7 +237,7 @@ jobs:
         if: steps.patch.outputs.changed != 'true'
         run: echo "The coding agent gave no new change in this try." >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.patch.outputs.changed == 'true'
         with:
           name: change-${{ inputs.try }}
@@ -272,11 +272,11 @@ jobs:
       # The same model as the step "Score before the change and after it". A test checks that the two lines are equal.
       LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }} # the commit that the agent changes
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false
       - run: uv sync --frozen
@@ -356,7 +356,7 @@ jobs:
       - name: Store the result for 30 days
         if: steps.sign.outcome == 'success'
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.key.outputs.name }}
           path: ${{ runner.temp }}/store/store.json
@@ -385,15 +385,15 @@ jobs:
       formal: ${{ steps.formal.outcome }}
       score: ${{ steps.score.outcome }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }} # the same commit that the agent changed
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: change-${{ inputs.try }}
           path: ${{ runner.temp }}
@@ -517,7 +517,7 @@ jobs:
 
       # Also after a failed step: the job `push` takes the pull request text from here, and a second try reads
       # what this try showed. None of it runs on another runner; code there reads it as data.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: measure-${{ inputs.try }}
