@@ -150,6 +150,14 @@ The first words of a call are exact (`greeting_words` in `agents/specs.py`); the
 - The consultant agent covers software engineering in general (products, platforms, APIs, cloud, architecture,
   modernizing old systems) as well as AI, and it says so when plain software is the better tool.
 
+### The greeting from a recording
+
+A new call can open with a stored recording of the greeting in place of the model's voice (`voice/stored_greeting.py`). The first word then comes at once, and the owner's name sounds the same on every call. Asked to say the greeting, Gemini Live said the surname wrong in about 6% of answers, and the caller waited a median of about 0.65 s for the first audio.
+
+- Make it with the settings of the server that plays it: `uv run record-greeting takes/` saves three takes (one short Gemini Live session each, well under one cent; `--takes N` for more), each with Gemini's transcript. Listen, then `uv run record-greeting --install takes/take-2.wav`. The install trims the silence at both ends and writes `voice/greeting.wav` (24 kHz mono) and `voice/greeting.json`. Commit both; the next deploy carries them.
+- The sidecar holds a sha256 of the spoken greeting words (respellings included), the leg, the voice and the Gemini model, not the values. A call plays the recording only when all four still match, when `STORED_GREETING` is on (the default), and when the call is new: after a transfer attempt or a provider failure the model speaks as today. In any other case the log says why, in one line, and the model says the greeting.
+- The recording goes down the pipeline as an answer from the greeting agent: the leveler, the output transport, the transcript, the trace and the call figures see it as that (no tokens). The agent's Gemini session gets the greeting as its own words, with no order to answer, so the agent answers the caller's first words. Caller audio stays silent for the first 0.4 s, for a click of the line; after that, the caller's first transcribed words stop the recording. The 8 s watchdog stays: no audio means a failed greeting and a provider change.
+
 ### Live transfer to the owner
 
 A transfer is an outbound call from the Telnyx application to `OWNER_PHONE`. Telnyx refuses it

@@ -85,6 +85,10 @@ class Settings(BaseSettings):
     # between: "Magyar=Mag-yar". The voice models read the respelling; people read the written word.
     # See voice/respell.py. This is stronger than the hint above: a voice model says what it reads.
     respellings: str = ""
+    # Play the stored recording of the greeting (voice/stored_greeting.py) when one was made for exactly
+    # this greeting, leg and voice: the first word comes at once, and the owner's name is always right.
+    # Without a matching recording, or when this is off, the greeting agent's model says the greeting.
+    stored_greeting: bool = True
     brand_name: str = ""  # optional; the greeting then says "<brand>, <owner>'s AI business card"
     owner_phone: str = "+15555550100"
     profile_path: Path = Path("profile.md")
