@@ -59,6 +59,14 @@ async def test_a_gemini_agent_is_not_given_a_handoff_result(specs):
     assert {"fc_1", "fc_2"} <= service._completed_tool_calls
 
 
+def test_handoff_instruction_ends_with_the_order_to_speak_not_with_a_line_to_confirm():
+    # 2026-11-25: the tour agent said "Got it, I'll respond based on what's already happened in the call" first.
+    for text in (handoff_instruction("tour", "OpenAI"), handoff_instruction("tour", "OpenAI", "Sam", ["caller: What runs this line?"])):
+        assert text.rstrip().endswith("The first words you say now are the sentence in quotes above.")
+        assert "Do not confirm this message" in text
+        assert text.index("Hi, I'm the tour agent, running on OpenAI.") < text.index("Do not confirm this message")
+
+
 def test_handoff_instruction_carries_the_exact_intro_line():
     text = handoff_instruction("tour", "OpenAI")
     assert '"Hi, I\'m the tour agent, running on OpenAI."' in text

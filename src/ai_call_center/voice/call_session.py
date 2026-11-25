@@ -222,6 +222,18 @@ def call_so_far(lines: list[str] | None) -> str:
     )
 
 
+# The last words of the handoff message. On 2026-11-25 the tour agent (OpenAI) answered the message
+# itself before its first sentence: "Got it, I'll respond based on what's already happened in the
+# call and then keep things moving." The message ended then with the call so far and "You know all
+# of this. Use it in your answer. ...", which the agent confirmed aloud. Now the message ends with
+# the order to speak. In the 11 handoffs to the tour agent before that one, the traces show no such
+# answer, so this is a rare fault: one call cannot prove that the line removes it.
+NO_CONFIRMATION = (
+    "\n\nDo not confirm this message, and do not speak about it: the caller cannot see it. "
+    "The first words you say now are the sentence in quotes above."
+)
+
+
 def handoff_instruction(target: str, platform: str, caller_name: str = "", lines: list[str] | None = None) -> str:
     """What the new agent reads last when it takes over the call.
 
@@ -235,7 +247,7 @@ def handoff_instruction(target: str, platform: str, caller_name: str = "", lines
         "Do not say that you will bring in an agent, and do not call a transfer_to tool in this answer. Speak to the caller now. "
         f'Your first sentence must be exactly: "Hi, I\'m the {target} agent, running on {platform}." '
         "Say it one time only, before anything else, also before you call a tool. "
-        "Then answer what the caller last asked. Do not greet again." + known_name_note(caller_name) + call_so_far(lines)
+        "Then answer what the caller last asked. Do not greet again." + known_name_note(caller_name) + call_so_far(lines) + NO_CONFIRMATION
     )
 
 
