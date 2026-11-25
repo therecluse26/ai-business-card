@@ -9,11 +9,11 @@ Stack: Telnyx (phone), Pipecat (audio), LangGraph + LangChain (routing, state, t
 ## Status
 
 M1 to M5 are done: the agents run as a text chat and on a phone call.
-On the phone, each agent has its own voice. Two agents run on Google Gemini Live and four on OpenAI
-Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
+On the phone, each agent has its own voice. The greeting agent runs on Phonic, two agents run on
+Google Gemini Live, and three on OpenAI Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
 call stats, transfer to the owner) run from the voice model's requests. The line recognises a
 returning caller by the name they give, looks up a new caller's carrier and area, and limits calls, call length, and
-transfer hours. When a voice provider stops answering, the call moves to the other provider.
+transfer hours. When a voice provider stops answering, the call moves to another provider.
 
 The tour agent can tell the caller how fast the agents answered and what the call has cost so far.
 A small model on the server hears how the caller sounds; see "The server hears how the caller sounds (Pipecat Voice Reader)".
@@ -30,7 +30,7 @@ Dropped: the local pipeline leg (M7). Its timing spike showed it would answer ab
 
 | Agent | Job |
 |---|---|
-| `classifier` | Greets, asks why the caller called, routes |
+| `classifier` | Greets, asks why the caller called, routes. Runs on Phonic; the others on OpenAI or Gemini. |
 | `profile` | Answers questions about the owner from `profile.md` |
 | `tour` | Explains how this system works, with live facts from the call |
 | `consultant` | Asks about the caller's business and suggests uses |
@@ -111,7 +111,7 @@ So the server handles the recovery (`voice/cutoff.py`):
 - A turn with clear words: the agent forgets the note and answers the words. A short "yes" or "no" is clear words.
 - A note lives for one answer. The server deletes it when the agent next starts to speak.
 
-Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova Sonic do not report the start of a caller's turn. The results come from simulated calls with recorded coughs, not from a tuned production system.
+Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova Sonic do not report the start of a caller's turn, and Phonic cannot take a note out again (see "A fourth provider: Phonic"). The greeting agent runs on Phonic by default, so it gets no notes; with `AGENT_LEGS=classifier=openai_realtime` it gets them again. The results come from simulated calls with recorded coughs, not from a tuned production system.
 
 `SAVE_CALLER_AUDIO=true` writes the caller's side of each call to `data/caller_audio/` as a WAV file, so you can hear what the detector heard. It holds callers' voices: it is off by default and the folder is git-ignored.
 
@@ -288,8 +288,9 @@ fastest; `semantic` lets the model judge when the caller is done, which costs ti
 
 ### Two voice providers on one call (M3)
 
-`DEFAULT_LEGS` in `agents/specs.py` sets the voice leg of each agent: `profile` and `consultant` run on
-Gemini Live, the others on OpenAI Realtime. Without `GOOGLE_API_KEY` every agent runs on OpenAI.
+`DEFAULT_LEGS` in `agents/specs.py` sets the voice leg of each agent: `classifier` runs on Phonic (see
+"A fourth provider: Phonic"), `profile` and `consultant` on Gemini Live, the others on OpenAI Realtime.
+Without `GOOGLE_API_KEY` and `PHONIC_API_KEY` every agent runs on OpenAI.
 All services share one conversation context, so the new agent knows what the caller said to the old one.
 
 What differs between the providers is in `voice/legs.py`:
@@ -316,13 +317,58 @@ How this leg differs from the other two:
 
 - It connects when a handoff reaches its agent, and disconnects when the agent is left. AWS closes a stream
   that carries no audio, so a stream opened at call start would be dead when it is needed.
-- Without the keys, or when Nova is marked down, the agent runs on OpenAI or Gemini. Nova is the last fallback.
+- Without the keys, or when Nova is marked down, the agent runs on OpenAI or Gemini. Only Phonic comes after Nova as a fallback.
 - Nova has few English voices (`tiffany`, `matthew`, `amy`), so agents share voices when several run on Nova.
 - Bedrock answers "Invalid input request" when the request to speak arrives in the same instant as a long
   conversation history. The leg waits `NOVA_SETTLE_SECS` (0.3 s) between the two.
 - Nova answers only while microphone audio arrives. `check-nova` sends silence for that reason.
 - Status: `check-nova` passes, and simulated calls ran a handoff into Nova, an answer, and a handoff out.
   It has not carried a real phone call yet.
+
+### A fourth provider: Phonic
+
+The `classifier` agent, which greets every caller, runs on Phonic by default (`phonic` in `DEFAULT_LEGS`).
+Phonic is a speech-to-speech model behind one WebSocket. Pipecat has no Phonic service, so
+`voice/phonic_leg.py` is one. Without `PHONIC_API_KEY` the classifier runs on OpenAI, as before.
+
+1. Put the key in `.env` as `PHONIC_API_KEY`. It starts with `ph_`.
+2. Run `uv run check-phonic`. It opens one short conversation at the phone's 8 kHz and prints the times
+   and what Phonic said, or the error.
+3. To move another agent: `AGENT_LEGS=feedback=phonic`. To move the classifier back: `AGENT_LEGS=classifier=openai_realtime`.
+
+How this leg differs from the others:
+
+- It connects when its agent is needed and closes when the agent is left, like Nova. Phonic bills each
+  minute of an open conversation, so a conversation that waits for a handoff would cost money.
+- Phonic takes no replayed message list. A new conversation gets the call so far as one text (each turn,
+  tool call, tool result and phone-system note on its own line), then one request to speak. The greeting
+  goes in with Phonic's `say`, which speaks the given words and nothing else. Other instructions go in as
+  a system message for the reply.
+- The tools run on this server (Phonic's `custom_websocket` tools). A handoff tool waits for the end of
+  the agent's sentence, and the agent says nothing after it. Without that, the sentence "I'm bringing in
+  the profile agent" played after the tool call, over the next agent.
+- Phonic decides when the caller's turn starts and ends, and stops the agent when the caller talks over it.
+- An `error` message from Phonic is logged and kept, but it does not end the conversation: a second
+  system-prompt update got an error, and the conversation went on working. A close that this server did
+  not ask for is the failure. The service reports it with the close code and the kept error, and the
+  watchdog opens a new conversation and replays the call. A refused key is marked `invalid_api_key`,
+  so the call moves to another provider at once.
+- The caller-sound note and the frustration note do not reach a Phonic agent. Phonic keeps every system
+  message, and it lets a conversation change its system prompt only once, so a note cannot be taken out again.
+- Phonic reports no tokens. The cost estimate counts the minutes that each conversation was open, at
+  $0.07 a minute (the Starter price on phonic.ai/pricing, read 2026-11-24).
+- Phonic's voices for the six agents: `sabrina`, `landon`, `grant`, `nolan`, `eleanor`, `virginia`.
+
+Measured on 2026-11-24 with model `phonic-1` (the model Phonic reported) at 8 kHz, in short test sessions of under 30 s:
+
+- From the start of the connect to "ready": 0.65 to 1.08 s. The socket itself opened in 0.18 to 0.27 s.
+- From the request to speak to the first audio: about 0.3 to 0.4 s.
+- Through this repo's service in a Pipecat pipeline: the greeting's first audio came 1.42 s after the
+  service was asked for it, with the connect. A handoff into a reset Phonic agent: the replay was sent
+  0.76 s after the request and its first audio came 0.57 s later. It said the exact intro line, then the
+  caller's name and business from the call so far.
+
+Status: unit tests with a fake Phonic socket, and the live sessions above. It has not carried a phone call yet.
 
 ### Caller memory and number lookup
 
@@ -453,7 +499,7 @@ A caller must not sit in silence. The server treats a voice service as dead in t
 
 What happens then:
 
-1. The provider is marked down for 5 minutes (`voice/health.py`). New calls build every agent on the other provider.
+1. The provider is marked down for 5 minutes (`voice/health.py`). New calls build each of its agents on another provider.
 2. If the dead service is the active agent, the server restarts the call's media stream. The new AI
    session builds the same agent on the other provider, with the whole conversation. The agent says:
    "Sorry about that pause. I'm the profile agent, now running on OpenAI."
@@ -472,10 +518,10 @@ The server writes the same figures to the log when the call ends.
 
 | Figure | How it is measured |
 |---|---|
-| Answer time | From the last 20 ms of caller audio that held speech to the first agent audio, on the phone side. The same for both providers. Median and slowest, and the median for each provider. |
+| Answer time | From the last 20 ms of caller audio that held speech to the first agent audio, on the phone side. The same for every provider. Median and slowest, and the median for each provider. |
 | Handoff time | From the handoff tool call to the switch to the next agent's voice service. |
 | Tokens | What each provider reports for each answer: text and audio, in and out, cached and not. |
-| Cost | Tokens times the list prices in `PRICES`. Voice models only: not Telnyx minutes, the number lookup, or the summary model. |
+| Cost | Tokens times the list prices in `PRICES`, plus Phonic's open minutes times `PER_MINUTE` (Phonic reports no tokens). Voice models only: not Telnyx minutes, the number lookup, or the summary model. |
 
 The prices were read on 2026-11-16. The OpenAI prices are from OpenAI's model page. For
 `gemini-3.8-live` the sources disagree on the text prices, so the table holds the higher ones and
@@ -1673,6 +1719,7 @@ src/ai_call_center/
   check_voice.py                 `uv run check-voice`: saved caller audio through the voice reader, with each turn's reading and read time
   test_email.py                  `uv run test-email`: one sample lead email, to check the SMTP settings
   check_nova.py                  `uv run check-nova`: one short Nova Sonic session, to check the AWS keys
+  check_phonic.py                `uv run check-phonic`: one short Phonic conversation, to check the key and the times
   telephony/                     Telnyx client, webhooks, media WebSocket; a recording fake for tests
   telephony/lookup.py            Telnyx Number Lookup for a new caller, cached
   telephony/transfers.py         live transfer: call the owner, ask for a key, bring the contact agent back on no answer
@@ -1683,7 +1730,9 @@ src/ai_call_center/
   voice/stats.py                 live figures for a call: answer time, handoff time, tokens, cost estimate
   voice/call_audio.py            both sides of a call, in memory until the decision grader has heard them
   voice/voice_reader.py          Pipecat Voice Reader on the caller's audio: a voice reading for each turn, and the note when a caller sounds frustrated
-  voice/legs.py                  builds one speech-to-speech service per agent (OpenAI, Gemini, or Nova) and drives it
+  voice/legs.py                  builds one speech-to-speech service per agent (OpenAI, Gemini, Nova, or Phonic) and drives it
+  voice/phonic_leg.py            Phonic's WebSocket as a Pipecat service: the call so far as text, tools, turns
+  voice/phone_messages.py        the fixed texts the phone system puts in the shared context (the greeting order)
   voice/tools.py                 the LangGraph tools as Pipecat function schemas
   voice/call_session.py          one phone call: pipeline, switcher, tool handlers, transfer gate, time limit
   app.py                         FastAPI server (uv run serve)

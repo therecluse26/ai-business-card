@@ -25,10 +25,11 @@ from one provider to the other.
 2. Read the start of the log. These three lines must be there:
 
    - `voice providers at start: ...` with `consultant=nova_sonic/...` in it.
+     The same line must hold `classifier=phonic/...`.
    - `LangSmith tracing is on: project voice-business-card`
    - `ready: webhooks at ...`
 
-3. Run `uv run check-nova`. It must print what Nova said, not an AWS error.
+3. Run `uv run check-nova` and `uv run check-phonic`. Each must print what the provider said, not an error.
 4. Make a copy of your settings. Calls B and C change them.
 
    ```sh
@@ -38,13 +39,13 @@ from one provider to the other.
 The server writes everything to `data/server.log`. After each call, the line
 `call <id>: figures: ...` gives the answer times, the tokens and the cost.
 
-## Call A: three providers and the trace
+## Call A: four providers and the trace
 
 Use the normal `.env`. Dial `TELNYX_PHONE_NUMBER`.
 
 | Step | You say | You must hear |
 |---|---|---|
-| 1 | Your name, when the agent asks | The welcome, in the classifier's voice (OpenAI) |
+| 1 | Your name, when the agent asks | The greeting and the welcome, in the classifier's voice (Phonic). This is the first real call on Phonic. |
 | 2 | "Tell me about the owner's background." | A new voice: "Hi, I'm the profile agent, running on Google Gemini." |
 | 3 | One more question about the owner | An answer in the same voice |
 | 4 | "I run a small business. How could this help me?" | A new voice: "Hi, I'm the consultant agent, running on Amazon Nova." |
@@ -83,6 +84,7 @@ phone cannot ring while it is the caller.
    GOOGLE_API_KEY=wrong
    NOVA_AWS_ACCESS_KEY_ID=
    NOVA_AWS_SECRET_ACCESS_KEY=
+   PHONIC_API_KEY=ph_wrong
    ```
 
 2. Restart `uv run serve`.

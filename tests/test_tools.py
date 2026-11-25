@@ -60,7 +60,7 @@ async def test_get_call_stats_reports_agents_and_legs(make_graph, ctx, config):
 
     stats = next(m.content for m in result["messages"] if isinstance(m, ToolMessage))
     assert "text conversation for testing" in stats
-    assert "classifier on OpenAI gpt-realtime-2.1-mini" in stats
+    assert "classifier on Phonic phonic-1" in stats
     assert "tour on OpenAI gpt-realtime-2.1-mini" in stats
     assert "Current agent: tour" in stats
 

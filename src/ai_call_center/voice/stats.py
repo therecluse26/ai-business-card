@@ -8,7 +8,9 @@ from the last moment the caller's audio held speech to the moment the agent's au
 provider's own figure would not do: Gemini Live reports no "caller stopped" event.
 
 The cost is an estimate from list prices. It covers the voice models only: not Telnyx minutes,
-not the number lookup, and not the text model that writes the call summary.
+not the number lookup, and not the text model that writes the call summary. Most providers bill
+by the token and report their tokens. Phonic bills by the minute and reports no tokens, so its
+cost comes from the time its service held a conversation open.
 """
 
 from __future__ import annotations
@@ -51,6 +53,14 @@ PRICES: dict[str, Price] = {
     # amazon.nova-2-5-sonic in us-east-1, from price lists that agree with each other but are not
     # AWS's own page. No cached price was found, so cached tokens count at the full price.
     "nova_sonic": Price(text_in=0.33, text_in_cached=0.33, audio_in=3.00, audio_in_cached=3.00, text_out=2.75, audio_out=12.00),
+}
+
+# US dollars for one minute of an open conversation, for the legs that bill by the minute.
+PER_MINUTE: dict[str, float] = {
+    # Phonic's Starter plan, from https://phonic.ai/pricing, read 2026-11-24: "$0.07 / min",
+    # "No per-token charges". Pro is $0.065 a minute with a $200 monthly minimum. Silence over
+    # 10 seconds is billed at a 95% discount; the estimate leaves the discount out, so it is high.
+    "phonic": 0.07,
 }
 
 
@@ -154,11 +164,31 @@ class CallStats(BaseObserver):
         self._leg_of: dict[str, str] = {}  # Pipecat processor name -> leg
         self._active_leg: Callable[[], str] = lambda: ""
         self._active_agent: Callable[[], str] = lambda: ""
+        self._clocks: list[tuple[str, Callable[[], float]]] = []  # (leg, seconds held open) of the current pipeline
+        self._banked: dict[str, float] = {}  # leg -> seconds held open by the services of earlier pipelines
 
-    def bind(self, leg_of_service: dict[str, str], active_leg: Callable[[], str], active_agent: Callable[[], str] | None = None) -> None:
+    def bind(
+        self,
+        leg_of_service: dict[str, str],
+        active_leg: Callable[[], str],
+        active_agent: Callable[[], str] | None = None,
+        clocks: list[tuple[str, Callable[[], float]]] | None = None,
+    ) -> None:
+        """`clocks`: for each service that bills by the minute, its leg and the seconds it has held
+        a session open (legs.session_clock). The figures of an earlier pipeline are kept."""
+        for leg, seconds in self._clocks:
+            self._banked[leg] = self._banked.get(leg, 0.0) + seconds()
+        self._clocks = list(clocks or [])
         self._leg_of = dict(leg_of_service)
         self._active_leg = active_leg
         self._active_agent = active_agent or (lambda: "")
+
+    def seconds_held(self) -> dict[str, float]:
+        """leg -> seconds of open sessions on this call, for the legs that bill by the minute."""
+        held = dict(self._banked)
+        for leg, seconds in self._clocks:
+            held[leg] = held.get(leg, 0.0) + seconds()
+        return {leg: secs for leg, secs in held.items() if secs > 0}
 
     # --- what the pipeline reports ---
 
@@ -200,6 +230,11 @@ class CallStats(BaseObserver):
                 total += usage.cost(PRICES[leg])
             elif usage.tokens_in or usage.tokens_out:
                 unknown.append(leg)
+        for leg, secs in self.seconds_held().items():
+            if leg in PER_MINUTE:
+                total += secs / 60 * PER_MINUTE[leg]
+            elif leg not in unknown:
+                unknown.append(leg)
         return total, unknown
 
     def describe(self) -> str:
@@ -230,12 +265,17 @@ class CallStats(BaseObserver):
             parts.append(f"A voice provider stopped answering {self.failovers} time{'s' if self.failovers != 1 else ''}, and the call moved to another provider.")
         tokens_in = sum(u.tokens_in for u in self.usage.values())
         tokens_out = sum(u.tokens_out for u in self.usage.values())
-        if tokens_in or tokens_out:
+        held = self.seconds_held()
+        if tokens_in or tokens_out or held:
             dollars, unknown = self.cost()
             cents = dollars * 100
             amount = "under one cent" if cents < 1 else f"about {cents:.0f} cent{'s' if round(cents) != 1 else ''}"
+            tokens = f"Tokens so far: {tokens_in:,} in and {tokens_out:,} out." if tokens_in or tokens_out else "Tokens: no usage has been reported yet."
+            minutes = "".join(
+                f" {LEG_PLATFORMS.get(leg, leg)} bills by the minute, not by the token: {secs / 60:.1f} minutes so far." for leg, secs in held.items()
+            )
             parts.append(
-                f"Tokens so far: {tokens_in:,} in and {tokens_out:,} out. Estimated cost of the voice models so far: {amount} in US money, at list prices."
+                f"{tokens}{minutes} Estimated cost of the voice models so far: {amount} in US money, at list prices."
                 + (f" No price is known for {', '.join(unknown)}." if unknown else "")
             )
         else:

@@ -4,9 +4,10 @@ Each agent gets its own service, pre-connected at call start, because a provider
 voice once it has spoken. A reconnect-and-replay swap on OpenAI was measured at 3-4 s of silence;
 switching between pre-connected services takes under 1 s.
 
-Amazon Nova Sonic is the exception: its service connects when a handoff reaches its agent, and
-disconnects when the agent is left. A Bedrock stream that carries no audio is closed by AWS, so
-a stream opened at call start would be dead by the time it is needed.
+Amazon Nova Sonic and Phonic are the exceptions: their service connects when a handoff reaches
+its agent, and disconnects when the agent is left. A Bedrock stream that carries no audio is
+closed by AWS, so a stream opened at call start would be dead by the time it is needed. Phonic
+bills each minute that a conversation is open. Phonic's service is in phonic_leg.py.
 
 The functions at the bottom (`reset_session`, `replay_and_respond`, ...) are the only place that
 knows how each provider's Pipecat service resets and replays. They use private members of those
@@ -42,6 +43,7 @@ from pipecat.services.openai.realtime.events import (
 from pipecat.services.openai.realtime import events as openai_events
 from pipecat.services.openai.realtime.llm import OpenAIRealtimeLLMService
 
+from ai_call_center.voice.phonic_leg import PhonicLLMService, build_phonic
 from ai_call_center.voice.repeat import DROP, HOLD, PASS, RepeatGuard
 
 from ai_call_center.agents.specs import AgentSpec, default_voice
@@ -291,6 +293,7 @@ LEG_BUILDERS = {
     "openai_realtime": build_openai_realtime,
     "gemini_live": build_gemini_live,
     "nova_sonic": build_nova_sonic,
+    "phonic": build_phonic,
 }
 
 
@@ -302,6 +305,8 @@ def has_credentials(leg: str, settings: Settings) -> bool:
         return bool(settings.google_api_key.get_secret_value())
     if leg == "nova_sonic":
         return bool(settings.nova_aws_access_key_id and settings.nova_aws_secret_access_key.get_secret_value())
+    if leg == "phonic":
+        return bool(settings.phonic_api_key.get_secret_value())
     return False
 
 
@@ -349,7 +354,8 @@ def build_leg(spec: AgentSpec, *, instructions: str, settings: Settings, tools: 
 def self_heals(service: LLMService) -> bool:
     """True when the Pipecat service reconnects by itself after an error. Gemini does (with session
     resumption). Nova does: on a stream error it opens a new stream and replays the context.
-    OpenAI does not: its receive loop ends on any error event."""
+    OpenAI does not: its receive loop ends on any error event. Phonic does not: its service reports
+    a close of the conversation, and the watchdog opens a new one and replays the call."""
     return isinstance(service, GeminiLiveLLMService | AWSNovaSonicLLMService)
 
 
@@ -367,6 +373,10 @@ async def tell_now(service: LLMService, text: str) -> SessionNote | None:
 
     The note does not go into the shared context: it is about one moment, and the next agent must
     not read it. OpenAI only. Gemini and Nova report an interruption after they acted on it.
+    Phonic cannot take a note out again, and `forget_note` must: a system message stays, and its
+    system prompt can be replaced only once per conversation. Measured 2026-11-24: the second
+    `update_system_prompt` got the error "System prompt can only be updated once per conversation",
+    and the agent kept following the first note.
     """
     if not isinstance(service, OpenAIRealtimeLLMService):
         return None
@@ -392,9 +402,15 @@ async def forget_note(note: SessionNote) -> bool:
     return True
 
 
+def session_clock(service: LLMService):
+    """For a provider that bills by the minute, a function that gives the seconds this service has
+    held a session open. None for a provider that bills by the token (it reports its tokens)."""
+    return (lambda: service.seconds_held) if isinstance(service, PhonicLLMService) else None
+
+
 def first_answer_needs_run_frame(service: LLMService) -> bool:
     """OpenAI sets up its session from the first context frame, so its first answer must come from
-    an LLMRunFrame through the pipeline. Gemini can be seeded directly every time."""
+    an LLMRunFrame through the pipeline. Gemini, Nova and Phonic can be seeded directly every time."""
     return isinstance(service, OpenAIRealtimeLLMService)
 
 
@@ -407,6 +423,8 @@ async def ensure_connected(service: LLMService) -> None:
         await service._connect()  # noqa: SLF001
     elif isinstance(service, AWSNovaSonicLLMService) and service._client is None:  # noqa: SLF001
         await service._start_connecting()  # noqa: SLF001 - the normal case: Nova connects when it is needed
+    elif isinstance(service, PhonicLLMService):
+        await service.connect()  # the normal case too; Phonic is ready about 0.9 s later, and `replay` waits for that
 
 
 async def adopt_context(service: LLMService, context: LLMContext) -> None:
@@ -420,18 +438,24 @@ async def adopt_context(service: LLMService, context: LLMContext) -> None:
     known. Pipecat sends a result it has not marked to the session, on the next context frame.
     The results written while another agent had the call belong to other sessions. OpenAI rejects
     such a result ("Tool call ID ... not found in conversation"), and the session then restarts.
+
+    Phonic: drop an instruction it kept from the last time it was active. A context frame does
+    not make it speak; only an instruction appended while it is active does.
     """
     if isinstance(service, GeminiLiveLLMService):
         service._context = context  # noqa: SLF001
         await service._process_completed_function_calls(send_new_results=False)  # noqa: SLF001
     elif isinstance(service, OpenAIRealtimeLLMService) and service._context is not None:  # noqa: SLF001
         await service._process_completed_function_calls(send_new_results=False)  # noqa: SLF001
+    elif isinstance(service, PhonicLLMService):
+        await service.adopt(context)
 
 
 async def reset_session(service: LLMService) -> None:
     """Give the service a fresh server-side session with no conversation in it.
 
-    OpenAI: about 2.4 s. Gemini: about 0.4 s.
+    OpenAI: about 2.4 s. Gemini: about 0.4 s. Nova and Phonic: a close; `ensure_connected` opens
+    a new session later.
     """
     if isinstance(service, OpenAIRealtimeLLMService):
         await service.reset_conversation()
@@ -447,6 +471,8 @@ async def reset_session(service: LLMService) -> None:
         await service._connect()  # noqa: SLF001
     elif isinstance(service, AWSNovaSonicLLMService):
         await service._disconnect()  # noqa: SLF001 - also drops its copy of the context; `ensure_connected` opens a new stream later
+    elif isinstance(service, PhonicLLMService):
+        await service.reset_conversation()
     else:  # pragma: no cover
         raise NotImplementedError(f"reset for {type(service).__name__}")
 
@@ -458,6 +484,8 @@ async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
     Nova: open the stream if needed, then hand it the context; it sets up the session and answers.
     Gemini: seed the session with the context, with the turn marked complete. If the session is
     still opening, the service does this as soon as it is ready.
+    Phonic: open the conversation if needed and wait until it is ready, give it the call so far as
+    text, then ask it to speak: the greeting word for word, any other instruction as a system message.
     """
     if isinstance(service, OpenAIRealtimeLLMService):
         await service._create_response()  # noqa: SLF001
@@ -472,5 +500,7 @@ async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
         await ensure_connected(service)
         if service._context is None:  # noqa: SLF001
             await service._handle_context(context)  # noqa: SLF001
+    elif isinstance(service, PhonicLLMService):
+        await service.replay(context)
     else:  # pragma: no cover
         raise NotImplementedError(f"replay for {type(service).__name__}")

@@ -16,6 +16,8 @@ os.environ["IMPROVE_GITHUB_TOKEN"] = ""
 os.environ["GRADER_DECISION_MODEL"] = ""  # no test sends a call to the decision grader
 # No test writes to the owner's CRM or reads it. A test that needs a CRM passes a fake one in the call context.
 os.environ["CRM_MCP_URL"] = ""
+# No test opens a Phonic conversation: Phonic bills by the minute. A test of the Phonic leg passes a fake socket.
+os.environ["PHONIC_API_KEY"] = ""
 # The fix job runs these tests with its own request in the environment (improve.yml: FIX_ISSUE, FIX_RULE, ...).
 # No test reads the request of the job that runs it, and no test writes an output of that job. A test that
 # needs a request sets it. On 2026-11-22 the first fix job for an issue failed here: its FIX_ISSUE reached the

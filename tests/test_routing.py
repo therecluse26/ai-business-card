@@ -89,4 +89,4 @@ async def test_text_mode_line_is_appended(make_graph, ctx, config):
     await graph.ainvoke({"messages": [HumanMessage("Hi.")]}, config=config, context=ctx)
 
     assert "text mode for testing" in model.system_prompt_of_call(0)
-    assert "gpt-realtime-2.1-mini" in model.system_prompt_of_call(0)
+    assert "On a phone call you run on Phonic phonic-1" in model.system_prompt_of_call(0)  # the classifier's default leg

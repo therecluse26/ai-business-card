@@ -33,6 +33,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "langsmith", extra = ["pipecat"] },
+    { name = "phonic" },
     { name = "pipecat-ai", extra = ["aws-nova-sonic", "expressivity", "google", "openai", "runner", "tracing", "websocket"] },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
@@ -62,6 +63,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.2.22" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.3" },
     { name = "langsmith", extras = ["pipecat"], specifier = ">=0.14.17" },
+    { name = "phonic", specifier = ">=0.33.10" },
     { name = "pipecat-ai", extras = ["aws-nova-sonic", "expressivity", "google", "openai", "runner", "silero", "tracing", "websocket"], specifier = ">=1.16.0" },
     { name = "pydantic-settings", specifier = ">=2.16.3" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
@@ -2551,6 +2553,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/7d/fa/3944b40b07da9ce895c0e6303a5ab7d53da063554f534556b134a54d6093/packaging-26.3.tar.gz", hash = "sha256:94edc256424af38762eb31306eed28beb9f0efc50a8837492c9d6fd6004aed79", size = 313412, upload-time = "2026-08-04T18:15:28.737Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl", hash = "sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c", size = 129956, upload-time = "2026-08-04T18:15:27.159Z" },
+]
+
+[[package]]
+name = "phonic"
+version = "0.33.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/66/e9cbbf6c323fa4e09be76cd97414ec07490549af283efaa256926780eef8/phonic-0.33.10.tar.gz", hash = "sha256:e3b38277dac59fc494eb4dd04bf94c87ac37e5c2966aa79c610eb99350d6a359", size = 271872, upload-time = "2026-11-23T09:11:14.145Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/da/1c5fdbc65bc6184b84055ccb3213f62858d68f9f54b709a7e8fb25b5e420/phonic-0.33.10-py3-none-any.whl", hash = "sha256:a29865cc989013c0a6a200a07029e5a54666b3bc33b640523e0abd3362d06c37", size = 568336, upload-time = "2026-11-23T09:11:12.841Z" },
 ]
 
 [[package]]

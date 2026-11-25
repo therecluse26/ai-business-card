@@ -213,7 +213,14 @@ class Settings(BaseSettings):
     nova_sonic_model: str = "amazon.nova-2-5-sonic"
     nova_endpointing: Literal["LOW", "MEDIUM", "HIGH"] = "HIGH"  # how fast Nova decides the caller has stopped; HIGH is fastest
 
+    # Phonic voice leg (the classifier agent). Without PHONIC_API_KEY, agents set to phonic run on another provider.
+    phonic_api_key: SecretStr = SecretStr("")
+    phonic_model: str = ""  # empty = Phonic's default, which reported itself as phonic-1 on 2026-11-24
+    # How long Phonic waits before it decides the caller has stopped talking. "standard" is its default.
+    phonic_turn_taking: Literal["eager", "standard", "relaxed", "measured", "patient", "very_patient"] = "standard"
+
     # Move agents to another voice leg, for example "consultant=nova_sonic,tour=gemini_live".
+    # To move the greeting agent off Phonic: "classifier=openai_realtime".
     # Empty = the defaults in agents/specs.py.
     agent_legs: str = ""
 
