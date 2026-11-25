@@ -36,8 +36,10 @@ from typing import Any
 from uuid import uuid4
 
 from langchain.chat_models import init_chat_model
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import LLMResult
 from langgraph.checkpoint.memory import InMemorySaver
 
 from ai_call_center.agents.specs import DEFAULT_LEGS, SPECIALISTS, Welcome, companies_phrase, greeting_tip, greeting_words, load_profile, web_address
@@ -172,7 +174,60 @@ def word_list_checks(samples: list[LiveCallSample], owner_name: str) -> dict[str
     return {f"live_call/{number:02d}": asked_for_the_owner(sample_lines(sample.lines, owner_name)) == sample.wants_live_call for number, sample in enumerate(samples, 1)}
 
 
-async def run_call(call: MadeUpCall, graph: Any, settings: Settings) -> CallRun:
+USAGE_KEYS = ("requests", "input_tokens", "cache_read", "cache_creation", "output_tokens")
+
+
+class Usage(BaseCallbackHandler):
+    """The token usage of the model requests of a run, summed by model. The agents and the grader both report here.
+
+    `input_tokens` is all the input of a request. `cache_read` and `cache_creation` are parts of it: the
+    tokens read from the prompt cache, and the tokens written to it. The numbers have no price: prices change."""
+
+    run_inline = True  # an async run calls `on_llm_end` in the event loop, not in a thread, so the sums need no lock
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.by_model: dict[str, dict[str, int]] = {}
+
+    def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:
+        for generation in (one for batch in response.generations for one in batch):
+            message = getattr(generation, "message", None)
+            if not isinstance(message, AIMessage) or not message.usage_metadata:
+                continue  # a fake model reports no usage
+            name = str(message.response_metadata.get("model_name") or message.response_metadata.get("model") or "unknown model")
+            used = message.usage_metadata
+            details: dict[str, Any] = dict(used.get("input_token_details") or {})
+            # LangChain gives the cache writes of each time to live on their own keys, or all of them on "cache_creation".
+            written = sum(int(details.get(key) or 0) for key in ("cache_creation", "ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"))
+            total = self.by_model.setdefault(name, dict.fromkeys(USAGE_KEYS, 0))
+            total["requests"] += 1
+            total["input_tokens"] += int(used.get("input_tokens") or 0)
+            total["cache_read"] += int(details.get("cache_read") or 0)
+            total["cache_creation"] += written
+            total["output_tokens"] += int(used.get("output_tokens") or 0)
+
+
+def added_usage(usages: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """The sum of the usage of some runs, by model."""
+    total: dict[str, dict[str, int]] = {}
+    for usage in usages:
+        for name, used in usage.items():
+            into = total.setdefault(name, dict.fromkeys(USAGE_KEYS, 0))
+            for key in USAGE_KEYS:
+                into[key] += int(used.get(key) or 0)
+    return dict(sorted(total.items()))
+
+
+def usage_lines(usage: dict[str, dict[str, int]]) -> list[str]:
+    """One line for each model, for example: "claude-haiku-5-5: 125 requests, 590,000 tokens in (410,000 from the cache, ...)"."""
+    return [
+        f"{name}: {used['requests']:,} request{'' if used['requests'] == 1 else 's'}, {used['input_tokens']:,} tokens in ({used['cache_read']:,} from the cache, "
+        f"{used['cache_creation']:,} written to the cache), {used['output_tokens']:,} tokens out"
+        for name, used in sorted(usage.items())
+    ]
+
+
+async def run_call(call: MadeUpCall, graph: Any, settings: Settings, *, callbacks: list[Any] | None = None) -> CallRun:
     """Say the caller's lines to the agents, one for each turn, in the text mode. The call stops when
     the lines end, when an agent ends the call, or when an agent transfers it."""
     store = LeadStore(":memory:")
@@ -196,7 +251,9 @@ async def run_call(call: MadeUpCall, graph: Any, settings: Settings) -> CallRun:
         owner_name=owner,
         website_spoken=site.spoken if (site := web_address(settings.website_url, settings.brand_name)) else "",
     )
-    config = {"configurable": {"thread_id": call_id}}
+    config: dict[str, Any] = {"configurable": {"thread_id": call_id}}
+    if callbacks:
+        config["callbacks"] = callbacks
     hello = greeting_words(owner, settings.brand_name)
     turns = [f'{CALL_CONNECTED[:-1]} Say exactly these words: "{hello}"]', *call.caller]
     result: dict[str, Any] = {}
@@ -244,14 +301,21 @@ def call_checks(call: MadeUpCall, run: CallRun, scores: list[Score], *, graded: 
     return checks
 
 
-async def score_calls(calls: list[MadeUpCall], settings: Settings, *, model: BaseChatModel, grader: BaseChatModel | None, decider: Any = None, show: bool = False) -> dict[str, bool]:
-    """Run each made-up call and grade it. These are model requests that cost money."""
+async def score_calls(
+    calls: list[MadeUpCall], settings: Settings, *, model: BaseChatModel, grader: BaseChatModel | None, decider: Any = None, show: bool = False, usage: Usage | None = None
+) -> dict[str, bool]:
+    """Run each made-up call and grade it. These are model requests that cost money.
+
+    The calls run one after the other, never at the same time. So a request can read the prompt cache
+    that an earlier request wrote. `usage` gets the token usage of the agents and of the grader model."""
     graph = build_graph(model, default_specs(), checkpointer=InMemorySaver())
     profile = load_profile(settings.profile_path).full
+    callbacks = [usage] if usage is not None else None
     checks: dict[str, bool] = {}
     for call in calls:
-        run = await run_call(call, graph, settings)
-        scores = await grade_call(run.lines, visited=run.visited, profile=profile, owner=settings.owner_name, model=grader, decider=decider)
+        run = await run_call(call, graph, settings, callbacks=callbacks)
+        config = {"callbacks": callbacks} if callbacks else None
+        scores = await grade_call(run.lines, visited=run.visited, profile=profile, owner=settings.owner_name, model=grader, config=config, decider=decider)
         checks.update(call_checks(call, run, scores, graded=grader is not None or decider is not None))
         if show:
             print(f"\n--- {call.id}: {call.about}")
@@ -263,8 +327,12 @@ async def score_calls(calls: list[MadeUpCall], settings: Settings, *, model: Bas
     return checks
 
 
-def result_of(checks: dict[str, bool], *, version: str, calls: bool) -> dict[str, Any]:
-    return {"version": version, "calls": calls, "passed": sum(checks.values()), "total": len(checks), "checks": dict(sorted(checks.items()))}
+def result_of(checks: dict[str, bool], *, version: str, calls: bool, usage: dict[str, dict[str, int]] | None = None) -> dict[str, Any]:
+    """The result of a run. Only a run of the made-up calls has the key `usage`: the token usage by model (`Usage`)."""
+    result = {"version": version, "calls": calls, "passed": sum(checks.values()), "total": len(checks), "checks": dict(sorted(checks.items()))}
+    if usage is not None:
+        result["usage"] = dict(sorted(usage.items()))
+    return result
 
 
 def compare(old: dict[str, Any], new: dict[str, Any]) -> tuple[list[str], list[str]]:
@@ -287,7 +355,8 @@ def vote(results: list[dict[str, Any]], calls: list[str]) -> dict[str, Any]:
     One run can flip a check with no cause, so for each check of those calls the majority of the runs
     wins. A run that has no result for the check gives no vote. An even split is a failed check: a
     doubt must not make the score better. Each other check keeps its result from the first run. The
-    key `votes` keeps each run's result of each voted check, in run order (null: no result)."""
+    key `votes` keeps each run's result of each voted check, in run order (null: no result). The key
+    `usage` is the sum of the usage of all the runs, when a run has a usage."""
     first = results[0]
     checks: dict[str, bool] = dict(first.get("checks", {}))
     prefixes = tuple(f"call/{name}/" for name in calls)
@@ -296,7 +365,9 @@ def vote(results: list[dict[str, Any]], calls: list[str]) -> dict[str, Any]:
         runs = [result.get("checks", {}).get(name) for result in results]
         checks[name] = runs.count(True) > runs.count(False)
         votes[name] = runs
-    return {**result_of(checks, version=first.get("version", ""), calls=bool(first.get("calls"))), "votes": votes}
+    usages = [result["usage"] for result in results if isinstance(result.get("usage"), dict)]
+    usage = added_usage(usages) if usages else None
+    return {**result_of(checks, version=first.get("version", ""), calls=bool(first.get("calls")), usage=usage), "votes": votes}
 
 
 def describe(result: dict[str, Any]) -> str:
@@ -309,6 +380,7 @@ async def run(args: argparse.Namespace) -> int:
     settings = get_settings()
     directory = Path(args.set)
     checks = word_list_checks(load_live_call(directory), settings.owner_name)
+    usage = Usage()
     if args.calls:
         calls = [call for call in load_calls(directory) if not args.only or call.id in args.only]
         calls = calls[: args.limit] if args.limit else calls
@@ -320,11 +392,14 @@ async def run(args: argparse.Namespace) -> int:
         print(f"{len(calls)} made-up call(s): {turns} turns for {settings.llm_model}, and {len(calls) if grader or decider else 0} request(s) for the grader. These cost money.", file=sys.stderr)
         if grader is None and decider is None:
             print("GRADER_MODEL is empty and the decision grader is off, so only the code rules score the calls.", file=sys.stderr)
-        checks.update(await score_calls(calls, settings, model=default_model(), grader=grader, decider=decider, show=args.show))
-    result = result_of(checks, version=harness_version(settings.harness_version), calls=args.calls)
+        checks.update(await score_calls(calls, settings, model=default_model(), grader=grader, decider=decider, show=args.show, usage=usage))
+    result = result_of(checks, version=harness_version(settings.harness_version), calls=args.calls, usage=usage.by_model if args.calls else None)
     if args.out:
         Path(args.out).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(result, indent=2) if args.json else describe(result))
+    # What the run used, so that a cost is never a surprise. The decision grader is not a LangChain model, so its usage is not here.
+    for line in usage_lines(usage.by_model):
+        print(line, file=sys.stderr)
     if not args.compare:
         return 0
     old = json.loads(Path(args.compare).read_text(encoding="utf-8"))

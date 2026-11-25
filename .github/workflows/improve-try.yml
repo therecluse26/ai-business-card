@@ -1,19 +1,26 @@
-# One try of the coding agent: the jobs `change` and `measure` of the fix job. Only improve.yml calls this file.
+# One try of the coding agent: the jobs `change`, `baseline` and `measure` of the fix job. Only improve.yml calls this file.
 #
 # improve.yml calls it one time, or two times: the second try gets the result of the first.
-#   change   the agent makes one change. Its token can only read. The change leaves this job as a patch.
-#            The task names the earlier pull requests for the same rule or issue, and what became of them.
-#            A second try starts from the first change. `.first-try/` holds the first patch and what the
-#            measure showed (`proposal first-try`). The patch never holds that folder.
-#   measure  code that the agent cannot edit checks the patch, runs the new tests on the old code, runs
-#            the tests, and runs the scorer before the change and after it. A made-up call with a
-#            changed check runs 2 more times on each side. It pushes nothing: the job `push` of
-#            improve.yml pushes the change of the winning try.
+#   change    the agent makes one change. Its token can only read. The change leaves this job as a patch.
+#             The task names the earlier pull requests for the same rule or issue, and what became of them.
+#             A second try starts from the first change. `.first-try/` holds the first patch and what the
+#             measure showed (`proposal first-try`). The patch never holds that folder.
+#   baseline  at the same time as `change`: the "before" result of the existing made-up calls, on clean code.
+#             It runs only with IMPROVE_SCORE_CALLS=all, the API key, and the salt IMPROVE_BASELINE_SALT.
+#             It uses a stored result of the same code state. Else it runs the calls and stores the result.
+#             The stored result is a signed file in a run artifact, for 30 days. A file with a bad signature is ignored.
+#   measure   code that the agent cannot edit checks the patch, runs the new tests on the old code, runs
+#             the tests, and runs the scorer before the change and after it. With a result of `baseline`,
+#             the run before the change takes only the new made-up calls and the word list. A made-up call
+#             with a changed check runs 2 more times on each side. It pushes nothing: the job `push` of
+#             improve.yml pushes the change of the winning try.
 #
 # A called workflow gets none of the caller's `env`. So the inputs of the dispatch come as one JSON text.
-# Only the two secrets of the coding agent and the scorer come in; IMPROVE_PR_TOKEN never does.
+# Only the two secrets of the coding agent and the scorer, and the salt of the job `baseline`, come in.
+# IMPROVE_PR_TOKEN never does.
 # The permissions of the caller's job cap the permissions here, and each job here can only read.
 # The artifacts of a try have its number (change-1, measure-1), because the run of improve.yml holds both tries.
+# The job `baseline` gives its result to `measure` as job outputs. Its stored result is an artifact `baseline-store-...`.
 name: One try of the coding agent
 
 on:
@@ -36,6 +43,9 @@ on:
       CLAUDE_CODE_OAUTH_TOKEN:
         required: false
       ANTHROPIC_API_KEY:
+        required: false
+      # Only three steps of the job `baseline` read it. No code of the agent runs in that job.
+      IMPROVE_BASELINE_SALT:
         required: false
     # A runner that ran the agent's change wrote each output of `measure`. The code that reads them
     # (`proposal retry`, `proposal winner`, `proposal report`) takes only a word from a fixed list.
@@ -112,6 +122,8 @@ jobs:
           fetch-depth: 0 # the agent reads what changed after the version of the call
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
 
       - name: Read the issue
@@ -232,9 +244,129 @@ jobs:
           path: ${{ runner.temp }}/change.patch
           retention-days: 14
 
+  # The "before" result of the existing made-up calls. The old code is the same for both tries, and for each fix job
+  # at the same code state. So this job stores the result, and a later job uses it again.
+  # This job runs only clean code of the commit: no patch and no artifact of the agent. The jobs `change` and
+  # `measure` run the agent's code. Code there can upload an artifact with any name, and anybody can read the
+  # list of the artifacts. So the stored result is a signed file (`proposal baseline-sign`):
+  #   - the signature is an HMAC, with the salt IMPROVE_BASELINE_SALT, of the code state and of the file.
+  #     Only three steps of this job get the salt: name, open, sign. The step that runs the scorer does not.
+  #   - `proposal baseline-open` reads the file with Python's zipfile, and no tool unpacks the artifact. It ignores
+  #     a file with a bad signature, of another code state, too large, or with another name. Then the scorer runs.
+  #   - this job restores no uv cache: an entry that other code wrote can write each file on this runner.
+  # With no salt, no API key, or IMPROVE_SCORE_CALLS other than `all`, it does nothing. Then `measure` runs each call.
+  baseline:
+    if: (vars.IMPROVE_SCORE_CALLS || 'all') == 'all'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # list and download the artifacts of the stored result
+    # The result goes to the job `measure` as job outputs, not as an artifact: code of the job `change` can upload
+    # an artifact with any name, but only this job can set these values. `result` is one JSON line of at most
+    # 100,000 bytes, with only what `proposal baseline-merge` reads. Empty: `measure` runs each made-up call.
+    outputs:
+      found: ${{ steps.open.outputs.result != '' && 'hit' || steps.sign.outputs.result != '' && 'miss' || '' }}
+      result: ${{ steps.open.outputs.result || steps.sign.outputs.result }}
+    env:
+      # The same model as the step "Score before the change and after it". A test checks that the two lines are equal.
+      LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }} # the commit that the agent changes
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - run: uv sync --frozen
+
+      # The state comes from git's own hashes of the inputs, each setting of the scorer, and a format number.
+      # The name of the stored result is an HMAC of the state. The name and the state are not secret.
+      - name: Name the stored result
+        id: key
+        env:
+          BASELINE_SALT: ${{ secrets.IMPROVE_BASELINE_SALT }}
+          HAS_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+        run: |
+          if [ "$HAS_API_KEY" != "true" ]; then
+            echo "No secret ANTHROPIC_API_KEY, so no made-up call runs, and no result is stored."
+            exit 0
+          fi
+          uv run proposal baseline-key
+
+      # The 5 newest artifacts with the exact name, each below 1 MB, as zip files outside the checkout.
+      # A failed list or download is no stored result: then the scorer runs.
+      - name: Find the stored result
+        if: steps.key.outputs.name != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NAME: ${{ steps.key.outputs.name }}
+        run: |
+          set -euo pipefail
+          zips="$RUNNER_TEMP/store-zips"
+          mkdir -p "$zips"
+          if ! ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${NAME}&per_page=20" \
+            --jq '[.artifacts[] | select(.expired == false and .size_in_bytes < 1000000)] | sort_by(.created_at, .id) | reverse | .[:5] | .[].id')"; then
+            echo "The list of the artifacts failed, so the job uses no stored result."
+            exit 0
+          fi
+          n=0
+          for id in $ids; do
+            case "$id" in *[!0-9]*) continue ;; esac
+            n=$((n + 1))
+            # The file name gives the order: 1.zip is the newest.
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}/zip" > "$zips/$n.zip" || rm -f "$zips/$n.zip"
+          done
+          echo "Artifacts with the name of the stored result: $n."
+
+      # The first file with a good signature, of this code state, and with the right form. Else no stored result.
+      - name: Open the stored result
+        id: open
+        if: steps.key.outputs.name != ''
+        continue-on-error: true
+        env:
+          BASELINE_SALT: ${{ secrets.IMPROVE_BASELINE_SALT }}
+          BASELINE_STATE: ${{ steps.key.outputs.state }}
+        run: uv run proposal baseline-open --zips "$RUNNER_TEMP/store-zips" >> "$GITHUB_STEP_SUMMARY"
+
+      # The paid run: each existing made-up call, on the clean code. Its failure does not fail the try.
+      # Then the job `measure` runs each made-up call before the change. A test checks that the settings of this
+      # step and of the step "Score before the change and after it" are equal.
+      - name: Run the existing made-up calls on the clean code
+        id: score
+        if: steps.key.outputs.name != '' && steps.open.outputs.found != 'hit'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: uv run score-harness --calls --out "$RUNNER_TEMP/scored.json"
+
+      - name: Sign the result
+        id: sign
+        if: steps.score.outcome == 'success'
+        continue-on-error: true
+        env:
+          BASELINE_SALT: ${{ secrets.IMPROVE_BASELINE_SALT }}
+          BASELINE_STATE: ${{ steps.key.outputs.state }}
+        run: uv run proposal baseline-sign --result "$RUNNER_TEMP/scored.json" --out "$RUNNER_TEMP/store/store.json" >> "$GITHUB_STEP_SUMMARY"
+
+      # The name of an artifact is unique in one run. When a job of this run uploaded the name first, this upload
+      # fails, and that must not fail the job. The next fix job at the same code state then runs the calls again.
+      - name: Store the result for 30 days
+        if: steps.sign.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.key.outputs.name }}
+          path: ${{ runner.temp }}/store/store.json
+          if-no-files-found: error
+          retention-days: 30
+
   measure:
-    needs: change
-    if: needs.change.outputs.changed == 'true'
+    needs: [change, baseline]
+    # `!cancelled()`: a skipped or failed job `baseline` must not skip this job. Then the scorer runs each made-up call before the change.
+    if: ${{ !cancelled() && needs.change.result == 'success' && needs.change.outputs.changed == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45 # the made-up calls with a changed check run 4 more times
     permissions:
@@ -258,6 +390,8 @@ jobs:
           ref: ${{ github.sha }} # the same commit that the agent changed
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
       - uses: actions/download-artifact@v4
         with:
@@ -309,27 +443,53 @@ jobs:
           LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}
           SCORE_CALLS: ${{ vars.IMPROVE_SCORE_CALLS || 'all' }}
           NEW_CALLS: ${{ steps.guard.outputs.new_calls }}
+          # The outputs of the job `baseline`. Only that job can set them. `proposal baseline-merge` checks them.
+          BASELINE_RESULT: ${{ needs.baseline.outputs.result }}
+          BASELINE_FOUND: ${{ needs.baseline.outputs.found }}
         run: |
           set -euo pipefail
           if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ "$SCORE_CALLS" != "none" ]; then
             echo "No secret ANTHROPIC_API_KEY, so the scorer ran no made-up call. The scores are from the code checks only." >> "$GITHUB_STEP_SUMMARY"
             SCORE_CALLS=none
           fi
+          new_flags=()
+          if [ -n "$NEW_CALLS" ]; then
+            new_flags+=(--calls)
+            for id in $NEW_CALLS; do new_flags+=(--only "$id"); done
+          fi
           flags=()
           case "$SCORE_CALLS" in
             all) flags+=(--calls) ;;
-            new)
-              if [ -n "$NEW_CALLS" ]; then
-                flags+=(--calls)
-                for id in $NEW_CALLS; do flags+=(--only "$id"); done
-              fi ;;
+            new) flags=("${new_flags[@]}") ;;
             none) ;;
             *) echo "IMPROVE_SCORE_CALLS must be all, new or none"; exit 1 ;;
           esac
+          # The job `baseline` ran the existing made-up calls on clean code. With its result, the run before the change
+          # takes only the new made-up calls and the word list. With a bad result, each made-up call runs.
+          if [ -n "${BASELINE_RESULT:-}" ]; then
+            mkdir -p "$RUNNER_TEMP/baseline"
+            printf '%s\n' "$BASELINE_RESULT" > "$RUNNER_TEMP/baseline/baseline.json"
+            printf '%s\n' "${BASELINE_FOUND:-}" > "$RUNNER_TEMP/baseline/found.txt"
+          fi
+          before_flags=("${flags[@]}")
+          stored=""
+          if [ "$SCORE_CALLS" = all ] && [ -f "$RUNNER_TEMP/baseline/baseline.json" ]; then
+            if uv run proposal baseline-merge --baseline "$RUNNER_TEMP/baseline/baseline.json" --found "$RUNNER_TEMP/baseline/found.txt"; then
+              stored=yes
+              before_flags=("${new_flags[@]}")
+            else
+              echo "The stored \"before\" result of the job \`baseline\` cannot be used, so each made-up call ran before the change." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          elif [ "$SCORE_CALLS" = all ]; then
+            echo "The job \`baseline\` gave no stored \"before\" result, so each made-up call ran before the change." >> "$GITHUB_STEP_SUMMARY"
+          fi
           # Before: the old prompts and word lists, with the new made-up call. So the two scores have the same checks.
           git diff HEAD -- src tests > "$RUNNER_TEMP/code.patch"
           if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply -R "$RUNNER_TEMP/code.patch"; fi
-          uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/before.json"
+          uv run score-harness "${before_flags[@]}" --out "$RUNNER_TEMP/before.json"
+          if [ -n "$stored" ]; then
+            uv run proposal baseline-merge --baseline "$RUNNER_TEMP/baseline/baseline.json" --found "$RUNNER_TEMP/baseline/found.txt" --before "$RUNNER_TEMP/before.json"
+          fi
           if [ -s "$RUNNER_TEMP/code.patch" ]; then git apply "$RUNNER_TEMP/code.patch"; fi
           uv run score-harness "${flags[@]}" --out "$RUNNER_TEMP/after.json"
           # One run can flip a check with no cause. Each made-up call with a changed check runs 2 more times
@@ -343,6 +503,10 @@ jobs:
           RED: ${{ steps.proof.outputs.red }}
           AGENT_ANSWER: ${{ needs.change.outputs.answer }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The stored "before" result of the existing made-up calls. `proposal body` takes each value only in its fixed form.
+          STORED: ${{ steps.score.outputs.stored }}
+          STORED_MADE: ${{ steps.score.outputs.made }}
+          STORED_COMMIT: ${{ steps.score.outputs.commit }}
         run: |
           uv run proposal body --before "$RUNNER_TEMP/before.json" --after "$RUNNER_TEMP/after.json" --out "$RUNNER_TEMP/body.md"
           cat "$RUNNER_TEMP/body.md" >> "$GITHUB_STEP_SUMMARY"

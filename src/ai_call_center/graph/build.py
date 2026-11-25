@@ -14,6 +14,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRequest, wrap_model_call
 from langchain.chat_models import init_chat_model
 from langchain.tools import BaseTool
+from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -69,6 +70,34 @@ def mode_line(spec: AgentSpec, ctx: CallContext | None) -> str:
     return f"This conversation is in text mode for testing. On a phone call you run on {leg_label}."
 
 
+# Prompt caching: a request that starts with the same text as an earlier request reads that part from the cache.
+# A cache read costs about a tenth of the input price, and a cache write about 1.25 times the input price.
+# A cache entry lives for 5 minutes after the last request that used it.
+CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+
+
+def caches_prompts(model: Any) -> bool:
+    """True for a Claude model. Only a Claude model gets cache markers. Another model gets the same request as before."""
+    return isinstance(model, ChatAnthropic)
+
+
+def system_message(spec: AgentSpec, ctx: CallContext | None, *, cache: bool = False) -> SystemMessage:
+    """The system prompt of one agent: its instructions, the mode line, and the caller lookup of the call.
+
+    With `cache`, the prompt is two text blocks. The first block holds the part that is the same for each
+    call, and it has the cache marker. The tools come before the system prompt, so the marker covers them too.
+    The second block holds the caller lookup, which is different for each call. Joined, the blocks are the
+    same text as the plain prompt."""
+    stable = f"{spec.instructions}\n\n{mode_line(spec, ctx)}"
+    per_call = f"\n\n{ctx.caller_lookup}" if ctx is not None and ctx.caller_lookup else ""
+    if not cache:
+        return SystemMessage(content=stable + per_call)
+    blocks: list[str | dict[str, Any]] = [{"type": "text", "text": stable, "cache_control": CACHE_CONTROL}]
+    if per_call:
+        blocks.append({"type": "text", "text": per_call})
+    return SystemMessage(content=blocks)
+
+
 def build_graph(
     model: BaseChatModel,
     specs: dict[str, AgentSpec],
@@ -82,10 +111,13 @@ def build_graph(
         name = request.state.get("active_agent") or ENTRY_AGENT
         spec = specs[name]
         ctx = request.runtime.context if request.runtime is not None else None
-        prompt = f"{spec.instructions}\n\n{mode_line(spec, ctx)}"
-        if ctx is not None and ctx.caller_lookup:
-            prompt = f"{prompt}\n\n{ctx.caller_lookup}"
-        return await handler(request.override(system_message=SystemMessage(content=prompt), tools=tools_for(spec, tools)))
+        cache = caches_prompts(request.model)
+        changes: dict[str, Any] = {"system_message": system_message(spec, ctx, cache=cache), "tools": tools_for(spec, tools)}
+        if cache:
+            # A second cache marker, which the API puts on the last block of the conversation.
+            # So the next request reads the turns before it from the cache. The marker adds no text.
+            changes["model_settings"] = {**request.model_settings, "cache_control": CACHE_CONTROL}
+        return await handler(request.override(**changes))
 
     return create_agent(
         model,

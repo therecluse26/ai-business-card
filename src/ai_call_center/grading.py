@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
@@ -278,19 +279,39 @@ def model_rules(*, hears: bool = False) -> list[Rule]:
     return [rule for rule in RULES if rule.check and (hears or not rule.hears)]
 
 
-def grader_prompt(lines: list[str], *, visited: list[str], profile: str, owner: str) -> str:
+# The grader prompt in two parts. The first part is the same for each call: the instructions, the rules and the profile notes.
+# The second part is different for each call: the agents on the call and the transcript.
+_SAME_FOR_EACH_CALL, _CUT, _REST = GRADER_PROMPT.partition("\n\nAgents on the call")
+# Prompt caching, for a Claude grader model only (the same marker as `graph/build.py`). The next call
+# reads the first part from the cache when it starts in 5 minutes or less. A cache read costs about a
+# tenth of the input price. A cache write costs about 1.25 times the input price.
+CACHE_CONTROL: dict[str, str] = {"type": "ephemeral"}
+
+
+def grader_parts(lines: list[str], *, visited: list[str], profile: str, owner: str) -> tuple[str, str]:
+    """The grader prompt as (the part that is the same for each call, the part of this call). Joined, they are `grader_prompt`."""
     rules = "\n".join(
         f"- {rule.key}: {rule.title}. {rule.check.format(owner=owner)}\n  Cause codes: " + "; ".join(f"{code} = {meaning}" for code, meaning in rule.causes)
         for rule in model_rules()
     )
-    return GRADER_PROMPT.format(
-        owner=owner,
-        rules=rules,
-        note_words=NOTE_WORDS,
-        profile=profile.strip() or "(none)",
-        agents=" -> ".join(visited) or "(unknown)",
-        transcript="\n".join(lines),
-    )
+    same = _SAME_FOR_EACH_CALL.format(owner=owner, rules=rules, note_words=NOTE_WORDS, profile=profile.strip() or "(none)")
+    rest = (_CUT + _REST).format(agents=" -> ".join(visited) or "(unknown)", transcript="\n".join(lines))
+    return same, rest
+
+
+def grader_prompt(lines: list[str], *, visited: list[str], profile: str, owner: str) -> str:
+    return "".join(grader_parts(lines, visited=visited, profile=profile, owner=owner))
+
+
+def grader_message(lines: list[str], *, visited: list[str], profile: str, owner: str, cache: bool = False) -> HumanMessage:
+    """The one message to the grader model. With `cache`, it is two text blocks, and the first block has the cache marker.
+
+    The first block is the same for each call, so the next call reads it from the cache. Joined, the
+    two blocks are the same text as `grader_prompt`. With no `cache`, the message is that text."""
+    same, rest = grader_parts(lines, visited=visited, profile=profile, owner=owner)
+    if not cache:
+        return HumanMessage(same + rest)
+    return HumanMessage([{"type": "text", "text": same, "cache_control": CACHE_CONTROL}, {"type": "text", "text": rest}])
 
 
 def parse_scores(text: str) -> list[Score]:
@@ -358,7 +379,8 @@ async def grade(
     if model is None:
         return Grade(scores)
     try:
-        reply = await model.ainvoke([HumanMessage(grader_prompt(lines, visited=visited, profile=profile, owner=owner))], config=config)
+        message = grader_message(lines, visited=visited, profile=profile, owner=owner, cache=isinstance(model, ChatAnthropic))
+        reply = await model.ainvoke([message], config=config)
         text = reply.text if isinstance(reply.text, str) else reply.text()
         return Grade(scores + parse_scores(text), by="the grader model")
     except Exception:

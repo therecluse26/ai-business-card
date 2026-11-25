@@ -15,8 +15,10 @@
 #    the labels allow.
 #
 # Six jobs, so the coding agent never has a token that can write:
-#   try1     one try of the coding agent: the jobs `change` and `measure` of improve-try.yml.
+#   try1     one try of the coding agent: the jobs `change`, `baseline` and `measure` of improve-try.yml.
 #            change   the agent makes one change. Its token can only read. The change leaves this job as a patch.
+#            baseline at the same time, on clean code: the "before" result of the existing made-up calls.
+#                     It uses a stored result of the same code state, or it runs the calls and stores the result.
 #            measure  code that the agent cannot edit checks the patch, runs the new tests on the old code,
 #                     runs the tests, and runs the scorer before the change and after it.
 #   decide   code reads the result of the first try and decides on a second try (`proposal retry`).
@@ -50,13 +52,25 @@
 #     approves the run (GitHub changelog, 2026-05-21). A pull request that the owner's token opened has
 #     no such hold. With no such secret, or when it is not valid any more, the job's own token opens the
 #     pull request, and a person approves the run of the checks (test.yml).
+# Optional:
+#   - a repository secret for the stored "before" result of the existing made-up calls:
+#       IMPROVE_BASELINE_SALT    a random text, for example from `openssl rand -hex 32`. Only three steps of
+#                                the job `baseline` get it, and no code of the agent runs in that job.
+#     The job `baseline` keeps its result as a signed file in a run artifact, for 30 days. The signature is an
+#     HMAC with the salt, of the code state and of the file. The code of the agent can upload an artifact with
+#     the same name, but it cannot sign it. The job ignores a file with a bad signature and runs the calls.
+#     With the salt, and with IMPROVE_SCORE_CALLS=all, the run of the existing made-up calls on the old code is
+#     paid one time for each code state: try 2, and each later fix job at the same code state, use the stored
+#     result. With no salt, nothing is stored, and each try runs each made-up call before the change.
+#     A limit: one stored run is the "before" result of each fix job until the code state changes. The runs
+#     again of a changed check are fresh on both sides, and they limit that.
 # Optional repository variables:
 #   - IMPROVE_MODEL        the model of the coding agent (default: claude-opus-5-5)
 #   - BUILD_MODEL          the model of the coding agent for the scope `code` (default: IMPROVE_MODEL)
 #   - IMPROVE_SCORE_CALLS  "all" (default): the scorer runs each made-up call, before and after.
 #                          "new": only the made-up call that the agent added. "none": the word list only.
 #                          The made-up calls are model requests that cost money. A call with a
-#                          changed check runs 2 more times on each side.
+#                          changed check runs 2 more times on each side. Only "all" uses a stored result.
 #   - IMPROVE_SCORE_MODEL  the model of the agents in a made-up call (default: anthropic:claude-haiku-5-5).
 #                          It is small on purpose, like the voice models of a real call. A large model
 #                          costs about 40 times more: about 3 dollars for one scorer run on claude-opus-5-5.
@@ -155,16 +169,18 @@ env:
 
 jobs:
   # The two tries run the same jobs from one file, so that they cannot drift apart. The caller's `env` does
-  # not reach a called workflow: the inputs of the dispatch go as one JSON text, and only the two named secrets.
+  # not reach a called workflow: the inputs of the dispatch go as one JSON text, and only the three named secrets.
   try1:
     uses: ./.github/workflows/improve-try.yml
     permissions:
       contents: read
       issues: read
       pull-requests: read # the earlier proposals for the same rule or issue
+      actions: read # only the job `baseline` uses it: it lists and downloads the artifacts of the stored result
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      IMPROVE_BASELINE_SALT: ${{ secrets.IMPROVE_BASELINE_SALT }}
     with:
       try: 1
       request: ${{ toJSON(inputs) }}
@@ -185,6 +201,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # The uv cache stays on here: this job has no secret and no write permission.
       - uses: astral-sh/setup-uv@v6
       - run: uv sync --frozen
       - name: Decide on a second try
@@ -202,9 +219,11 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
+      actions: read
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      IMPROVE_BASELINE_SALT: ${{ secrets.IMPROVE_BASELINE_SALT }}
     with:
       try: 2
       request: ${{ toJSON(inputs) }}
@@ -229,6 +248,8 @@ jobs:
           ref: ${{ github.sha }} # the same commit that both tries changed
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
 
       # The runners of the tries ran the agent's commands, so this job reads the issue again from GitHub.
@@ -351,6 +372,8 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
 
       - name: Write why there is no pull request

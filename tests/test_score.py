@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
@@ -12,23 +13,29 @@ from ai_call_center.config import Settings
 from ai_call_center.grading import FAIL, NA, PASS, RULES, Score
 from ai_call_center.graph.build import build_graph
 from ai_call_center.graph.handoffs import handoff_tool_name
+from ai_call_center.grading import grade_call
 from ai_call_center.score import (
     CALLS,
     TEST_SET,
     CallRun,
     LiveCallSample,
     MadeUpCall,
+    Usage,
     call_checks,
     compare,
     describe,
     load_calls,
     load_live_call,
     result_of,
+    run,
     run_call,
     sample_lines,
+    usage_lines,
+    vote,
     word_list_checks,
 )
 from tests.conftest import OWNER, scripted, tool_call
+from tests.test_prompt_cache import claude
 
 
 def settings() -> Settings:
@@ -198,3 +205,48 @@ def test_two_results_compare_by_the_name_of_each_check():
 def test_the_message_type_of_the_fake_model_is_an_ai_message():
     # A guard for the fakes of this file: a scripted string is an agent's answer.
     assert isinstance(tool_call("x"), AIMessage)
+
+
+async def test_the_usage_of_the_agents_and_of_the_grader_is_summed_by_model(specs):
+    usage = Usage()
+    model, grader = claude("Hello. Who am I speaking with?", "Thanks, Dana."), claude('{"name_asked_once": {"verdict": "pass"}}')
+    grader.model = "claude-sonnet-5-5"
+    graph = build_graph(model, specs, checkpointer=InMemorySaver())
+
+    run_ = await run_call(MadeUpCall(id="usage", about="", caller=("This is Dana.",)), graph, settings(), callbacks=[usage])
+    await grade_call(run_.lines, visited=run_.visited, profile="", owner=OWNER, model=grader, config={"callbacks": [usage]})
+
+    one = {"input_tokens": 1000, "cache_read": 700, "cache_creation": 200, "output_tokens": 20}  # what each request of the fake model gives
+    assert usage.by_model == {
+        "claude-haiku-5-5": {"requests": 2, **{key: 2 * value for key, value in one.items()}},
+        "claude-sonnet-5-5": {"requests": 1, **one},
+    }
+    assert usage_lines(usage.by_model) == [
+        "claude-haiku-5-5: 2 requests, 2,000 tokens in (1,400 from the cache, 400 written to the cache), 40 tokens out",
+        "claude-sonnet-5-5: 1 request, 1,000 tokens in (700 from the cache, 200 written to the cache), 20 tokens out",
+    ]
+
+
+async def test_a_model_with_no_usage_gives_no_usage_line(specs):
+    usage = Usage()
+    graph = build_graph(scripted("Hello. Who am I speaking with?", "Hi."), specs, checkpointer=InMemorySaver())
+    await run_call(MadeUpCall(id="fake", about="", caller=("Hi.",)), graph, settings(), callbacks=[usage])
+    assert usage.by_model == {} and usage_lines(usage.by_model) == []
+
+
+def test_the_usage_is_in_the_result_of_a_run_of_the_calls_and_a_vote_adds_it_up():
+    used = {"claude-haiku-5-5": {"requests": 3, "input_tokens": 900, "cache_read": 600, "cache_creation": 100, "output_tokens": 30}}
+    first = json.loads(json.dumps(result_of({"call/a/ran": True}, version="v1", calls=True, usage=used)))
+    assert first["usage"] == used
+    assert "usage" not in result_of({"live_call/01": True}, version="v1", calls=False)
+
+    voted = vote([first, first, result_of({"call/a/ran": False}, version="v1", calls=True)], ["a"])
+    assert voted["usage"] == {"claude-haiku-5-5": {key: 2 * value for key, value in used["claude-haiku-5-5"].items()}}
+    assert "usage" not in vote([result_of({"call/a/ran": True}, version="v1", calls=True)], ["a"])
+
+
+async def test_a_run_with_no_made_up_calls_has_no_usage(tmp_path, capsys):
+    out = tmp_path / "result.json"
+    args = argparse.Namespace(set=str(TEST_SET), calls=False, only=[], limit=0, show=False, out=str(out), compare=None, json=False)
+    assert await run(args) == 0
+    assert "usage" not in json.loads(out.read_text()) and "requests" not in capsys.readouterr().err
