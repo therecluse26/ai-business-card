@@ -197,12 +197,12 @@ jobs:
     outputs:
       again: ${{ steps.retry.outputs.again }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       # The uv cache stays on here: this job has no secret and no write permission.
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
       - run: uv sync --frozen
       - name: Decide on a second try
         id: retry
@@ -243,11 +243,11 @@ jobs:
       branch: ${{ steps.push.outputs.branch }}
       title: ${{ steps.winner.outputs.title }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }} # the same commit that both tries changed
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
@@ -263,7 +263,7 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/issues/${FIX_ISSUE}" > "$RUNNER_TEMP/issue.json"
           echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: "*-[12]" # change-1, measure-1, change-2, measure-2: one folder each
           path: ${{ runner.temp }}/tries
@@ -309,7 +309,7 @@ jobs:
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: steps.push.outputs.branch != ''
         with:
           name: pull-request
@@ -327,7 +327,7 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: pull-request
           path: ${{ runner.temp }}
@@ -367,11 +367,11 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
