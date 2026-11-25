@@ -853,6 +853,14 @@ uv run score-harness --calls                          # each made-up call (paid)
 - The agents' answers change from run to run. Thus one check of a made-up call can pass in one run
   and fail in the next. Read the checks that changed before you trust a small difference.
 - A rule that does not apply to a call gives no check. A model rule with no verdict is a failed check.
+- The prompt cache: with a Claude model, the agents and the grader mark the part of the prompt that is
+  the same for each request. That is the tools, each agent's instructions, and the grader's rules and
+  profile notes. A later request reads that part from the cache, for 5 minutes after the last request
+  that used it. A cache read costs about a tenth of the input price. The text that the model reads
+  does not change. Another provider gets the plain prompt.
+- What a run used: a run with `--calls` prints one line for each model to stderr, with the requests,
+  the tokens in (and the part read from the cache and written to it) and the tokens out. The result
+  has the same numbers under `usage`. No price is shown: prices change.
 - Add a new sample at the end of `live_call.json`, and a new call as a new file. Do not change or
   remove an old one: two results are compared by the name of each check. One file for each call
   means that two open pull requests never change the same lines of the test set.
@@ -974,6 +982,68 @@ What the pull request shows, and its limits:
 - Three runs make a flip with no cause less likely. They do not rule it out.
 - The grader can be wrong about a call. Then the coding agent is told to change nothing when it finds no reason.
 
+**A stored "before" result** (the job `baseline` of `improve-try.yml`, `proposal baseline-key`). With
+`IMPROVE_SCORE_CALLS=all`, each try ran each existing made-up call on the old code. The old code is the
+same for both tries, and for each fix job that starts at the same code state. So that paid run is stored:
+
+- The job `baseline` runs at the same time as the job `change`. It runs only clean code of the commit:
+  no patch and no artifact of the agent. Its token can only read.
+- The state of the code is one HMAC with the secret `IMPROVE_BASELINE_SALT`. It holds git's own hashes of
+  `src`, `evals`, `pyproject.toml`, `uv.lock`, `.python-version`, `uv.toml` and `profile.md`, each setting
+  of the scorer (a secret only as "set" or "empty"), and a format number. A change of `BASELINE_FORMAT` in
+  `proposal.py` makes each stored result unused. The state is public. A setting can be a phone number, and
+  a plain hash of a phone number can be found by trying numbers. So the state needs the secret.
+- The stored result is a signed file in a run artifact. The artifact keeps it for 30 days. The name of the
+  artifact is `baseline-store-` and an HMAC of the state with the secret `IMPROVE_BASELINE_SALT`.
+  The name is not secret.
+- The signature is an HMAC with the same secret. It covers the state and the whole file: the checks, and
+  when and at which commit the job made it. So a file of one code state is not good for another.
+- The job lists the 5 newest artifacts with that name, each below 1 MB, and downloads them as zip files
+  (`gh api`). No tool unpacks them. `proposal baseline-open` reads one file by its exact name into memory,
+  and refuses a file above 1 MB before it reads it. The first file with a good signature, of this state,
+  and with the form of a stored result is used. A file with a bad signature is ignored.
+- On a miss, the job runs `score-harness --calls` on the model of `IMPROVE_SCORE_MODEL`. A step after it
+  signs the result (`proposal baseline-sign`) and uploads it.
+- The job `measure` gets the result as two outputs of the job `baseline`: `found` and `result`. `result` is
+  one JSON line of at most 100,000 bytes, with only the checks of the existing made-up calls and the stamp.
+  It is not an artifact: code of the job `change` can upload an artifact with any name first, and `measure`
+  cannot check a signature. Only the job `baseline` can set its outputs. Its run before the change
+  then takes only the new made-up calls and the word list. `proposal baseline-merge` puts in the stored
+  checks of each existing made-up call that this run did not run. Each other check comes from this run.
+- A stored result that is not there, is not JSON, or does not hold each existing made-up call is not used.
+  Then each made-up call runs before the change, and the run summary says so.
+- The runs again (`proposal again`) do not change: they are fresh on both sides.
+- The pull request says that the "before" result of the existing made-up calls is stored, when it was
+  made, and at which commit.
+- The second try needs nothing more: its job `baseline` finds the artifact of the first try.
+- The name of an artifact is unique in one run. When the second try does not find the artifact of the
+  first try, it runs the calls again, and its upload fails. That does not fail the job.
+
+Why the signature: the jobs `change` and `measure` run the agent's code. Code there can upload an artifact
+with any name, and anybody can read the list of the artifacts. Without a signature, such code can store a
+false result for the next fix job. It does not have the salt, so it cannot sign. A forged artifact only
+costs a fresh run. Only three steps of the job `baseline` get the salt: name, open and sign. The step
+that runs the scorer does not.
+
+No cache for a job with a secret or a write permission: the list of the caches of this repository is
+public. Code of the agent can write a cache entry, and an entry can write each file on the runner. So each
+such job turns off the uv cache (`enable-cache: false`), and no workflow uses `actions/cache`. The unit
+tests of a pull request, the tests before a deploy, and the job `decide` keep the uv cache. They have no
+secret and no write permission.
+
+Limits:
+
+- One stored run is the "before" result of each fix job until the code state changes. A check that
+  flipped with no cause in that run stays flipped for each of them. The runs again limit that: the
+  stored result is one vote of three, and the two other votes are fresh.
+- A change of a model of the provider, under the same name, does not change the key.
+- With no salt, the job `baseline` stores nothing and reads nothing. Each try then runs each made-up call
+  before the change, as before.
+- Code of the agent can upload 5 or more bad artifacts with the name of a stored result. Then the job finds
+  no good file, and it runs the calls again. That costs money, but it never gives a false result.
+- The job `baseline` runs also when the agent changes nothing. On a miss that run is paid, but the next
+  fix job at the same code state uses it.
+
 **A test that fails first** (`proposal red`). For a change of code, the unit test is the only measure:
 the scorer runs only the text mode. A new test that also passes on the old code proves nothing. So
 after the guard applied the patch, the job puts back the old `src/` file by file. It runs only the test
@@ -988,8 +1058,8 @@ files that the patch added or changed, then it puts the change back. The result 
 - A test that fails on the old code for another reason, for example a typo, also counts as `red`.
 - The task of the scope `code` tells the coding agent to add a test that fails before its change.
 
-**A second try** (`proposal retry`, `.github/workflows/improve-try.yml`). One try is the jobs `change`
-and `measure`. `improve.yml` calls that file once, and a second time when code says so:
+**A second try** (`proposal retry`, `.github/workflows/improve-try.yml`). One try is the jobs `change`,
+`baseline` and `measure`. `improve.yml` calls that file once, and a second time when code says so:
 
 - A second try runs when the guard refused the patch, or the unit tests or the formal check failed.
 - It also runs when the verdict is `worse`, or `same` for the scope `prompts` when the made-up calls ran.
@@ -1058,12 +1128,16 @@ To turn the loop on:
    a person selects "Approve workflows to run". With no `IMPROVE_PR_TOKEN`, or with one that is not valid
    any more, the job's own token opens the pull request, and that approval is necessary again.
    Only the job `open` gets this token. That job runs no line of the coding agent's change.
+6. Optional: run `openssl rand -hex 32 | gh secret set IMPROVE_BASELINE_SALT`. With this secret, the
+   "before" result of the existing made-up calls is stored for each code state (above). Without it, each
+   try runs each made-up call before the change.
 
 Optional repository variables:
 
 - `IMPROVE_MODEL`: the coding agent's model (default `claude-opus-5-5`).
 - `BUILD_MODEL`: the coding agent's model for the scope `code` (default: `IMPROVE_MODEL`).
 - `IMPROVE_SCORE_CALLS`: `all`, `new` or `none`, the made-up calls that the scorer runs. These cost money.
+  Only `all` uses a stored "before" result.
 - `IMPROVE_SCORE_MODEL`: the model of the agents in a made-up call of the fix job. The default is
   `anthropic:claude-haiku-5-5`, a small model like the voice models of a real call. One scorer run makes about
   125 requests, each with the full prompt of an agent. On `claude-opus-5-5` that is about 3 dollars for one run.
@@ -1632,7 +1706,7 @@ scripts/git-hooks/
   dependabot.yml                 one pull request each week for the Python packages, one for the actions
   workflows/test.yml             the checks of a pull request: unit tests, the scorer, the formal check, actionlint
   workflows/improve.yml          the fix job and the build job: the tries, then push, open and report
-  workflows/improve-try.yml      one try of the coding agent (the jobs change and measure); only improve.yml calls it
+  workflows/improve-try.yml      one try of the coding agent (the jobs change, baseline and measure); only improve.yml calls it
   workflows/issues.yml           the queue: the labels of the issues start the triage agent or a job
   workflows/triage.yml           the triage agent: one label for one issue
   workflows/grader-check.yml     each week, the decision grader on the made-up calls, with a floor

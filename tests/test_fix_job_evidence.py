@@ -7,32 +7,53 @@ from __future__ import annotations
 
 import json
 import subprocess
+import zipfile
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from ai_call_center.issue_queue import AUTO_FIX, NEEDS_OWNER, QueueIssue, plan
+from ai_call_center.config import Settings
 from ai_call_center.proposal import (
     EARLIER_DIFF,
     EARLIER_PULLS,
+    HIT,
+    MISS,
     NO_TEST,
     NOT_RED,
     RED,
     TRACE_AUTHOR,
     Guarded,
     Refused,
+    STORE_LIMIT,
+    STORE_MEMBER,
+    Stored,
     changed_tests,
     earlier_item,
     earlier_pulls,
     earlier_text,
+    input_ids,
     json_values,
+    merge_stored,
     old_src,
+    open_store,
     open_trace,
     pr_body,
     prove_red,
     red_result,
     request_from,
     run_again,
+    scorer_settings,
+    sign_store,
+    signed_store,
+    stamp,
+    state_hash,
+    store_name,
+    stored_checks,
+    stored_from,
+    stored_from_env,
     task,
     trace_text,
     trace_title,
@@ -116,6 +137,257 @@ def test_nothing_runs_again_when_the_made_up_calls_did_not_run_or_no_check_chang
         assert run_again(before, after, score=no_score, old_code=lambda: pytest.fail("no old code")) == []
         assert json.loads(after.read_text()) == new and "votes" not in json.loads(before.read_text())
     assert "ran again" not in pr_body(request_from(ENV), {}, old, new, Guarded(files=[], new_calls=[]))
+
+
+# --- a stored "before" result of the existing made-up calls ---
+
+INPUTS = {"src": "1" * 40, "evals": "2" * 40, "profile.md": "3" * 40}
+SETTINGS = {"llm_model": "anthropic:claude-haiku-5-5", "grader_model": "anthropic:claude-sonnet-5-5", "owner_name": "Ann"}
+COMMIT_A = "a" * 40
+MADE = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
+
+
+def test_the_name_is_the_same_for_the_same_code_state_and_changes_with_the_salt_or_an_input():
+    state = state_hash("salt-1", INPUTS, SETTINGS)
+    name = store_name("salt-1", state)
+    assert name == store_name("salt-1", state_hash("salt-1", dict(reversed(INPUTS.items())), SETTINGS))  # the order of the inputs does not count
+    assert len(name) == len("baseline-store-") + 64 and name.startswith("baseline-store-") and "salt-1" not in name
+    assert store_name("salt-2", state_hash("salt-2", INPUTS, SETTINGS)) != name
+    assert store_name("salt-1", state_hash("salt-1", {**INPUTS, "src": "4" * 40}, SETTINGS)) != name  # a change of code
+    assert store_name("salt-1", state_hash("salt-1", INPUTS, {**SETTINGS, "llm_model": "anthropic:claude-opus-5-5"})) != name  # another scorer model
+    assert store_name("salt-1", state_hash("salt-1", INPUTS, {**SETTINGS, "grader_model": ""})) != name  # another grader model
+    assert store_name("salt-1", state_hash("salt-1", INPUTS, {**SETTINGS, "owner_name": "Bo"})) != name
+    # With no salt there is no state and no name: the job stores nothing and reads nothing.
+    assert state_hash("", INPUTS, SETTINGS) == state_hash("  \n", INPUTS, SETTINGS) == ""
+    assert store_name("", state) == store_name("  \n", state) == ""
+    # The state, the name and the signature have labels of their own: no one of them is another.
+    assert name.removeprefix("baseline-store-") not in (state, sign_store({}, salt="salt-1", state=state, made=MADE, commit=COMMIT_A)["signature"])
+
+
+def test_the_state_is_public_so_a_setting_in_it_cannot_be_found_by_trying_values():
+    """`scorer_settings` puts each plain setting into the state, for example a phone number. The state is a step output
+    and a field of the stored file. A plain hash of a phone number can be found by trying numbers; an HMAC cannot."""
+    import hashlib
+
+    settings = {**SETTINGS, "owner_phone": "+15550100"}
+    state = state_hash("salt-1", INPUTS, settings)
+    text = json.dumps({"format": 1, "inputs": INPUTS, "settings": settings}, sort_keys=True)
+    assert state != hashlib.sha256(text.encode("utf-8")).hexdigest() and len(state) == 64
+    assert state != state_hash("salt-2", INPUTS, settings) and "15550100" not in state
+
+
+def test_the_format_number_makes_each_stored_result_unused(monkeypatch):
+    import ai_call_center.proposal as proposal
+
+    state = state_hash("salt-1", INPUTS, SETTINGS)
+    monkeypatch.setattr(proposal, "BASELINE_FORMAT", proposal.BASELINE_FORMAT + 1)
+    assert state_hash("salt-1", INPUTS, SETTINGS) != state
+
+
+def test_the_settings_of_the_scorer_name_a_secret_only_as_set_or_empty(monkeypatch):
+    monkeypatch.delenv("GRADER_MODEL", raising=False)  # the workflow sets no GRADER_MODEL
+    found = scorer_settings(Settings(_env_file=None, smtp_password="made-up-secret-1", crm_api_token="", llm_model="anthropic:claude-haiku-5-5"))
+    assert found["smtp_password"] == "set" and found["crm_api_token"] == "empty" and found["llm_model"] == "anthropic:claude-haiku-5-5"
+    assert "made-up-secret-1" not in json.dumps(found) and found["profile_path"] == "profile.md"
+    assert found["grader_model"] == Settings.model_fields["grader_model"].default  # the default of config.py, when no variable sets it
+    # A secret that is set or not changes the key: Jev, for example, decides a transfer only with its key.
+    assert state_hash("salt-1", INPUTS, found) != state_hash("salt-1", INPUTS, {**found, "smtp_password": "empty"})
+
+
+def test_the_inputs_are_the_hashes_of_git_and_a_missing_input_stops_the_key(repo):
+    ids = input_ids(("src", "tests"))
+    assert ids == {name: subprocess.run(["git", "rev-parse", f"HEAD:{name}"], capture_output=True, text=True, check=True).stdout.strip() for name in ("src", "tests")}
+    (repo / "src/pkg/old.py").write_text("OLD = 2\n", encoding="utf-8")
+    assert input_ids(("src",)) == {"src": ids["src"]}  # only the last commit counts, not a change that is not committed
+    subprocess.run(["git", "commit", "-qam", "change"], check=True)
+    assert input_ids(("src",)) != {"src": ids["src"]}
+    with pytest.raises(subprocess.CalledProcessError):
+        input_ids(("src", "profile.md"))
+
+
+def stored_result(checks: dict[str, bool], *, calls: bool = True) -> dict:
+    return stamp(result(checks, calls=calls), made=MADE, commit=COMMIT_A)
+
+
+def test_the_merge_takes_from_the_stored_result_only_the_existing_made_up_calls_that_did_not_run_fresh():
+    fresh = result({"live_call/01": False, "call/new/ran": True, "call/a/ran": True, "call/a/rule/x": True})
+    baseline = stored_result({
+        "live_call/01": True,  # the word list ran fresh
+        "call/a/ran": False, "call/a/rule/x": False,  # the fresh run ran `a` itself
+        "call/b/ran": True, "call/b/rule/x": False,
+        "call/new/ran": False,  # the agent's new call: never from the store
+        "call/gone/ran": True,  # not in the clean test set
+    })  # fmt: skip
+    merged = merge_stored(fresh, baseline, ["a", "b"])
+    assert merged["checks"] == {"call/a/ran": True, "call/a/rule/x": True, "call/b/ran": True, "call/b/rule/x": False, "call/new/ran": True, "live_call/01": False}
+    assert (merged["passed"], merged["total"], merged["calls"], merged["version"]) == (4, 6, True, "v1") and "votes" not in merged and "stored" not in merged
+    # With no new made-up call, the fresh run is the word list only, and the merge holds each existing call.
+    merged = merge_stored(result({"live_call/01": True}, calls=False), baseline, ["a", "b"])
+    assert merged["calls"] is True and sorted(merged["checks"]) == ["call/a/ran", "call/a/rule/x", "call/b/ran", "call/b/rule/x", "live_call/01"]
+
+
+def test_a_stored_result_that_does_not_hold_each_existing_made_up_call_is_refused():
+    good = stored_result({"call/a/ran": True, "call/b/ran": True})
+    assert stored_checks(good, ["a", "b"]) == {"call/a/ran": True, "call/b/ran": True}
+    for bad in (
+        [],  # not a result
+        {**good, "calls": False},  # the made-up calls did not run
+        {**good, "checks": "all"},
+        stored_result({"call/a/ran": True}),  # no result for `b`
+        stored_result({"call/a/ran": True, "call/b/rule/x": True}),  # `b` has no `ran` check
+        {**good, "checks": {"call/a/ran": True, "call/b/ran": "yes"}},  # not true or false
+    ):
+        with pytest.raises(Refused):
+            stored_checks(bad, ["a", "b"])
+    # A check name with a character that a check cannot have is not taken.
+    assert stored_checks({**good, "checks": {**good["checks"], "call/a/x y": True}}, ["a", "b"]) == {"call/a/ran": True, "call/b/ran": True}
+
+
+def test_a_stored_result_says_when_and_at_which_commit_it_was_made():
+    good = stored_result({"call/a/ran": True})
+    assert stored_from(good, MISS) == Stored(found=MISS, made="2026-11-24T15:00:00Z", commit=COMMIT_A)
+    for baseline, found in ((good, "maybe"), ({**good, "stored": {"made": "now", "commit": COMMIT_A}}, HIT), ({**good, "stored": {"made": "2026-11-24T15:00:00Z", "commit": "main"}}, HIT), ({"calls": True}, HIT)):
+        with pytest.raises(Refused):
+            stored_from(baseline, found)
+    # The values reach `proposal body` as the outputs of the scorer step. A value that is not in its form gives no text.
+    assert stored_from_env({"STORED": HIT, "STORED_MADE": "2026-11-24T15:00:00Z", "STORED_COMMIT": COMMIT_A}) == Stored(HIT, "2026-11-24T15:00:00Z", COMMIT_A)
+    assert stored_from_env({"STORED": HIT, "STORED_MADE": "2026-11-24T15:00:00Z", "STORED_COMMIT": COMMIT_A + "\n@owner"}) is None
+    assert stored_from_env({}) is None
+
+
+def test_the_pull_request_says_when_the_before_result_was_stored():
+    before, after = result({"call/a/ran": True}), result({"call/a/ran": True})
+    body = pr_body(request_from(ENV), {}, before, after, Guarded(files=[], new_calls=[]), stored=Stored(HIT, "2026-11-24T15:00:00Z", COMMIT_A))
+    # 15:00 UTC on 2026-11-24 is 10:00 in New York, in winter time.
+    assert "on the clean code of the commit `aaaaaaaaaaaa`, on 2026-11-24 10:00 EST. An earlier job `baseline` made it, at the same code state: of the first try, or of an earlier fix job." in body
+    assert "Each made-up call with a changed check ran again fresh on both sides." in body
+    assert "The job `baseline` of this try made it." in pr_body(request_from(ENV), {}, before, after, Guarded(files=[], new_calls=[]), stored=Stored(MISS, "2026-07-01T15:00:00Z", COMMIT_A))
+    assert "2026-07-01 11:00 EDT" in pr_body(request_from(ENV), {}, before, after, Guarded(files=[], new_calls=[]), stored=Stored(MISS, "2026-07-01T15:00:00Z", COMMIT_A))
+    assert "stored result" not in pr_body(request_from(ENV), {}, before, after, Guarded(files=[], new_calls=[]))
+
+
+def test_the_runs_again_of_a_merged_result_are_fresh_on_both_sides(tmp_path):
+    """A stored check of an existing call that differs after the change is one vote of three. The two runs again are fresh."""
+    baseline = stored_result({"call/a/ran": True, "call/a/rule/x": False})
+    before = write(tmp_path / "before.json", merge_stored(result({"live_call/01": True}, calls=False), baseline, ["a"]))
+    after = write(tmp_path / "after.json", result({"live_call/01": True, "call/a/ran": True, "call/a/rule/x": True}))
+    seen = []
+    again = {"before": [result({"call/a/ran": True, "call/a/rule/x": True})] * 2, "after": [result({"call/a/ran": True, "call/a/rule/x": True})] * 2}
+    assert run_again(before, after, score=scored(again, seen), old_code=nullcontext) == ["a"]
+    old, new = json.loads(before.read_text()), json.loads(after.read_text())
+    assert old["votes"]["call/a/rule/x"] == [False, True, True] and verdict(old, new)[0] == "same"
+
+
+SALT = "made-up-salt-1"
+STATE = state_hash(SALT, INPUTS, SETTINGS)
+OTHER_STATE = state_hash(SALT, {**INPUTS, "src": "4" * 40}, SETTINGS)
+
+
+def signed(*, state: str = STATE, salt: str = SALT, checks: dict[str, bool] | None = None, made: datetime = MADE) -> dict:
+    return sign_store(result(checks or {"call/a/ran": True, "call/a/rule/x": False}), salt=salt, state=state, made=made, commit=COMMIT_A)
+
+
+def test_the_signature_covers_the_checks_the_stamp_and_the_state():
+    data = signed()
+    assert data["state"] == STATE and data["stored"] == {"made": "2026-11-24T15:00:00Z", "commit": COMMIT_A} and SALT not in json.dumps(data)
+    assert signed_store(json.loads(json.dumps(data, indent=2)), salt=SALT, state=STATE) == data  # another layout of the same JSON
+    for bad in (
+        {**data, "checks": {**data["checks"], "call/a/rule/x": True}},  # a changed check
+        {**data, "stored": {**data["stored"], "commit": "b" * 40}},  # a changed stamp
+        {**data, "passed": data["passed"] + 1},
+        {**data, "more": 1},  # a field more
+        {key: value for key, value in data.items() if key != "signature"},  # no signature
+        {**data, "signature": data["signature"].upper()},
+        {**data, "signature": "é" * 64},  # not ASCII
+        {**data, "state": OTHER_STATE},
+        {**signed(state=OTHER_STATE), "state": STATE},  # a good file of another code state, with this state written in
+        signed(salt="another-salt"),
+        [],
+    ):
+        with pytest.raises(Refused):
+            signed_store(bad, salt=SALT, state=STATE)
+    # A good file of state X is not good under the name of state Y.
+    with pytest.raises(Refused):
+        signed_store(signed(state=OTHER_STATE), salt=SALT, state=STATE)
+    with pytest.raises(Refused):
+        signed_store(data, salt="", state=STATE)
+    with pytest.raises(Refused):
+        sign_store(result({}), salt=" ", state=STATE, made=MADE, commit=COMMIT_A)
+
+
+def zip_of(path: Path, members: dict[str, bytes]) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, content in members.items():
+            archive.writestr(name, content)
+    return path
+
+
+def text_of(data: object) -> bytes:
+    return json.dumps(data).encode("utf-8")
+
+
+def test_a_forged_or_squatted_artifact_only_costs_a_fresh_run(tmp_path):
+    """Code of the agent can upload an artifact with the name of the stored result. Each such zip file is skipped."""
+    good = signed()
+    bad = [
+        ({STORE_MEMBER: text_of({**good, "checks": {**good["checks"], "call/a/rule/x": True}})}, "the signature of the file is not good"),
+        ({STORE_MEMBER: text_of(signed(state=OTHER_STATE))}, "the file is of another code state"),
+        ({STORE_MEMBER: text_of(good) + b" " * STORE_LIMIT}, "the file in the zip file is too large"),  # good JSON: only the size refuses it
+        ({"baseline.json": text_of(good), "../store.json": text_of(good)}, "KeyError"),  # the wrong member name
+        ({STORE_MEMBER: text_of(signed(checks={"call/z/ran": True}))}, "the stored result has no result for 1 existing made-up call(s)"),
+        ({STORE_MEMBER: b"\xff{"}, "UnicodeDecodeError"),
+    ]
+    for number, (members, why) in enumerate(bad, start=1):
+        folder = tmp_path / f"case-{number}"
+        folder.mkdir()
+        zip_of(folder / "1.zip", members)
+        assert open_store(folder, salt=SALT, state=STATE, existing=["a"]) == (None, [f"1.zip: {why}"])
+    not_zip = tmp_path / "not-zip"
+    not_zip.mkdir()
+    (not_zip / "1.zip").write_bytes(text_of(good))  # the right JSON, but not in a zip file
+    (not_zip / "2.zip").write_bytes(b"")
+    (not_zip / "3.zip").write_bytes(b"\0" * (STORE_LIMIT + 1))  # Python does not open it at all
+    found, skipped = open_store(not_zip, salt=SALT, state=STATE, existing=["a"])
+    assert found is None and skipped == ["1.zip: BadZipFile", "2.zip: BadZipFile", "3.zip: the zip file is too large"]
+    assert open_store(tmp_path / "no-folder", salt=SALT, state=STATE, existing=["a"]) == (None, [])
+
+
+def test_the_newest_good_stored_result_after_two_bad_ones_is_used(tmp_path):
+    good = signed()
+    zip_of(tmp_path / "1.zip", {STORE_MEMBER: text_of({**good, "signature": "0" * 64})})
+    zip_of(tmp_path / "2.zip", {STORE_MEMBER: text_of(signed(state=OTHER_STATE))})
+    zip_of(tmp_path / "3.zip", {STORE_MEMBER: text_of(good)})
+    zip_of(tmp_path / "4.zip", {STORE_MEMBER: text_of(signed(made=datetime(2026, 11, 20, 15, 0, tzinfo=timezone.utc)))})  # older
+    found, skipped = open_store(tmp_path, salt=SALT, state=STATE, existing=["a"])
+    assert found == good and [line.split(":")[0] for line in skipped] == ["1.zip", "2.zip"]
+    assert skipped == ["1.zip: the signature of the file is not good", "2.zip: the file is of another code state"]
+    # The merge of the job `measure` reads the opened file as a stored result.
+    assert stored_from(found, HIT) == Stored(HIT, "2026-11-24T15:00:00Z", COMMIT_A)
+    assert merge_stored(result({"live_call/01": True}, calls=False), found, ["a"])["checks"]["call/a/rule/x"] is False
+
+
+def test_the_job_output_holds_only_what_the_merge_reads_and_has_a_limit():
+    import ai_call_center.proposal as proposal
+
+    good = signed(checks={"call/a/ran": True, "call/a/rule/x": False, "call/gone/ran": True, "live_call/01": True})
+    line = proposal.hand_off(good, ["a"])
+    assert "\n" not in line and json.loads(line) == {"calls": True, "checks": {"call/a/ran": True, "call/a/rule/x": False}, "stored": good["stored"]}
+    assert stored_checks(json.loads(line), ["a"]) and stored_from(json.loads(line), MISS).commit == COMMIT_A  # `baseline-merge` takes it
+    many = signed(checks={"call/a/ran": True, **{f"call/a/rule/r{n}": True for n in range(6000)}})
+    assert len(json.dumps(many, separators=(",", ":"))) > proposal.HAND_LIMIT and proposal.hand_off(many, ["a"]) == ""  # too large: no result
+
+
+def test_an_output_is_one_line(tmp_path, monkeypatch):
+    """A value from a file that another person made must not add a second output with a line break."""
+    import ai_call_center.proposal as proposal
+
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(outputs))
+    proposal._output("result", '{"a":1}')
+    for value in ('{"a":1}\nfound=hit', "x\rfound=hit"):
+        with pytest.raises(Refused):
+            proposal._output("result", value)
+    assert outputs.read_text(encoding="utf-8") == 'result={"a":1}\n'
 
 
 # --- a proof that a new test fails before the change ---

@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import zipfile
 from collections.abc import Iterator
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -28,6 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 WORKFLOW = (REPO / ".github/workflows/improve.yml").read_text(encoding="utf-8")
 TRY = (REPO / ".github/workflows/improve-try.yml").read_text(encoding="utf-8")  # the jobs `change` and `measure` of each try
 BOTH = TRY + WORKFLOW  # in the order of a run: a try, then the jobs `decide`, `push` and `report`
+MEASURE = TRY.split("\n  measure:\n", 1)[1]  # the job `measure`: the last job of improve-try.yml
 ENV = {"FIX_RULE": "name_asked_once", "FIX_AGENT": "contact", "FIX_CAUSE": "asked_again_after_handoff", "FIX_VERSION": "6e77d417184e", "FIX_FAILED_CALLS": "2", "FIX_GRADED_CALLS": "5"}
 PROMPTS = ALLOWED_FILES[0]  # the instructions of each agent
 NEW_CALL = "dry-run-call"
@@ -36,14 +38,14 @@ NEW_TEST = "tests/test_dry_run.py"
 
 def workflow_commands(temp: Path) -> list[list[str]]:
     """The words of each `uv run proposal ...` and `uv run score-harness ...` in the workflows, in the order of a run.
-    `"${flags[@]}"` is left out: it holds the flags of the made-up calls, and those calls cost money."""
+    `"${flags[@]}"` and `"${before_flags[@]}"` are left out: they hold the flags of the made-up calls, and those calls cost money."""
     found = []
     for line in BOTH.splitlines():
         if line.lstrip().startswith("#"):
             continue
         # `Bash(uv run score-harness)` is a permission of the coding agent, not a step of the job.
-        for text in re.findall(r"(?<!Bash\()uv run ((?:proposal|score-harness)\b[^\n>)]*)", line):
-            found.append(shlex.split(text.replace('"${flags[@]}"', "").replace("$RUNNER_TEMP", str(temp))))
+        for text in re.findall(r"(?<!Bash\()uv run ((?:proposal|score-harness)\b[^\n>);]*)", line):
+            found.append(shlex.split(re.sub(r'"\$\{\w+\[@\]\}"', "", text).replace("$RUNNER_TEMP", str(temp))))
     return found
 
 
@@ -105,6 +107,9 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     (root / PROMPTS).parent.mkdir(parents=True)
     (root / PROMPTS).write_text('GREETING = "Hello."\n', encoding="utf-8")
     shutil.copytree(REPO / "evals", root / "evals")
+    # The other inputs of the key of a stored result (`proposal baseline-key`), made up.
+    for name, text in {"pyproject.toml": '[project]\nname = "dry-run"\n', "uv.lock": "version = 1\n", ".python-version": "3.13\n", "uv.toml": "", "profile.md": "# A made-up profile\n"}.items():
+        (root / name).write_text(text, encoding="utf-8")
     monkeypatch.chdir(root)
     # The git settings of the computer (a signing key, a hook, a line ending rule) stay out of the made-up repository.
     for name, value in {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_AUTHOR_NAME": "Test", "GIT_AUTHOR_EMAIL": "test@example.test", "GIT_COMMITTER_NAME": "Test", "GIT_COMMITTER_EMAIL": "test@example.test"}.items():
@@ -147,9 +152,10 @@ def earlier_pull_requests(temp: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 ANSWER = {"changed": True, "title": "The greeting asks how it can help", "reason": "The greeting had no question.", "change": "One line.", "made_up_call": NEW_CALL}
 NAMES = [
-    # improve-try.yml: the job `change`, then the job `measure`
+    # improve-try.yml: the job `change`, the job `baseline`, then the job `measure`
     "proposal earlier", "proposal task", "proposal schema", "proposal first-try",
-    "proposal guard", "proposal red", "score-harness", "score-harness", "proposal again", "proposal body",
+    "proposal baseline-key", "proposal baseline-open", "score-harness", "proposal baseline-sign",
+    "proposal guard", "proposal red", "proposal baseline-merge", "score-harness", "proposal baseline-merge", "score-harness", "proposal again", "proposal body",
     # improve.yml: the jobs `decide`, `push` and `report`
     "proposal retry", "proposal winner", "proposal guard", "proposal report",
 ]  # fmt: skip
@@ -162,8 +168,10 @@ def test_each_command_of_the_fix_job_runs_as_the_workflow_calls_it(repo: Path, t
     names = [" ".join(words[:2]) if words[0] == "proposal" else words[0] for words in commands]
     # A new command in the workflow needs a step in this dry run.
     assert names == NAMES
-    earlier, task, schema, _first_try, guard, red, before, after, again, body, retry, winner, push_guard, report = commands
+    earlier, task, schema, _first_try, baseline_key, baseline_open, stored_run, baseline_sign, guard, red, can_merge, before, merge, after, again, body, retry, winner, push_guard, report = commands
     assert "--calls" not in before + after  # the dry run must not run a made-up call
+    assert stored_run[:2] == ["score-harness", "--calls"]  # the paid run of the job `baseline`: the dry run makes a result of its own
+    assert merge == [*can_merge, "--before", str(temp / "before.json")]  # the same check, then the merge
     assert push_guard == guard  # the job `push` checks the patch with the same command
 
     # --- the job `change` ---
@@ -186,11 +194,42 @@ def test_each_command_of_the_fix_job_runs_as_the_workflow_calls_it(repo: Path, t
     the_coding_agent_makes_a_change(repo)
     assert make_patch(temp, monkeypatch, number=1) == {"changed": "true"}
 
-    # --- the job `measure`: a clean checkout of the same commit ---
+    # --- the job `baseline`, at the same time: a clean checkout of the same commit ---
     git("reset", "-q", "--hard", "HEAD")
     git("clean", "-fdq")
     assert not (repo / NEW_TEST).exists()
+    monkeypatch.setenv("BASELINE_SALT", "made-up-salt")  # the step gives the secret as an environment value
+    capsys.readouterr()
+    key_outputs = run(baseline_key, monkeypatch, temp / "outputs")
+    printed = capsys.readouterr().out
+    assert set(key_outputs) == {"name", "state"} and key_outputs["name"].startswith("baseline-store-") and len(key_outputs["state"]) == 64
+    assert "made-up-salt" not in printed + "".join(key_outputs.values())
+    monkeypatch.setenv("BASELINE_STATE", key_outputs["state"])  # the steps `open` and `sign` get the state as an environment value
+    # The step `find` downloaded no artifact: there is no stored result, so the paid run follows.
+    assert run(baseline_open, monkeypatch, temp / "outputs") == {"found": "", "result": ""}
+    existing = sorted(path.stem for path in (repo / "evals/calls").glob("*.json"))
+    scored = score.result_of({"live_call/01": False, **{f"call/{name}/ran": True for name in existing}, f"call/{existing[0]}/rule/x": False}, version="v0", calls=True)
+    (temp / "scored.json").write_text(json.dumps(scored), encoding="utf-8")
+    sign_outputs = run(baseline_sign, monkeypatch, temp / "outputs")
+    stamped = json.loads((temp / "store/store.json").read_text(encoding="utf-8"))
+    assert stamped["checks"] == scored["checks"] and stamped["stored"]["commit"] == git("rev-parse", "HEAD").strip()
+    assert stamped["state"] == key_outputs["state"] and len(stamped["signature"]) == 64 and "made-up-salt" not in json.dumps(stamped)
+    # The output `result`: only the checks of the existing made-up calls and the stamp. No state, no signature.
+    handed = json.loads(sign_outputs["result"])
+    assert set(sign_outputs) == {"result"} and handed == {"calls": True, "checks": {name: ok for name, ok in scored["checks"].items() if name.startswith("call/")}, "stored": stamped["stored"]}
+    # The next job `baseline` at the same code state finds the artifact, as a zip file, and opens it.
+    (temp / "store-zips").mkdir()
+    with zipfile.ZipFile(temp / "store-zips/1.zip", "w") as archive:
+        archive.write(temp / "store/store.json", "store.json")
+    assert run(baseline_open, monkeypatch, temp / "outputs") == {"found": "hit", "result": sign_outputs["result"]}
+    monkeypatch.delenv("BASELINE_SALT")
+    monkeypatch.delenv("BASELINE_STATE")
+    # The job outputs of this try: the step `sign` made the result. The scorer step of `measure` writes them to files.
+    (temp / "baseline").mkdir()
+    (temp / "baseline/baseline.json").write_text(sign_outputs["result"] + "\n", encoding="utf-8")
+    (temp / "baseline/found.txt").write_text("miss\n", encoding="utf-8")
 
+    # --- the job `measure`: a clean checkout of the same commit ---
     guard_outputs = run(guard, monkeypatch, temp / "outputs")
     assert guard_outputs == {"changed": "true", "new_calls": NEW_CALL}
     assert "How can I help?" in (repo / PROMPTS).read_text(encoding="utf-8") and (repo / NEW_TEST).exists()
@@ -199,21 +238,36 @@ def test_each_command_of_the_fix_job_runs_as_the_workflow_calls_it(repo: Path, t
     red_outputs = run(red, monkeypatch, temp / "outputs")
     assert red_outputs == {"red": "red"} and "How can I help?" in (repo / PROMPTS).read_text(encoding="utf-8")
 
+    # The stored result holds each existing made-up call, so the run before the change takes only the new ones.
+    assert run(can_merge, monkeypatch, temp / "outputs") == {}
     run(before, monkeypatch, temp / "outputs")
+    merge_outputs = run(merge, monkeypatch, temp / "outputs")
+    assert merge_outputs == {"stored": "miss", "made": stamped["stored"]["made"], "commit": stamped["stored"]["commit"]}
+    merged = json.loads((temp / "before.json").read_text(encoding="utf-8"))
+    # Each check of an existing made-up call is the stored one. The word list ran fresh: the stored live_call/01 is not used.
+    assert merged["calls"] is True and merged["checks"][f"call/{existing[0]}/rule/x"] is False
+    assert {name for name in merged["checks"] if name.startswith("call/")} == {name for name in scored["checks"] if name.startswith("call/")}
     run(after, monkeypatch, temp / "outputs")
     result = json.loads((temp / "after.json").read_text(encoding="utf-8"))
     assert result["calls"] is False and result["total"] == len(result["checks"]) > 0
-    run(again, monkeypatch, temp / "outputs")  # no made-up call ran, so none runs again
+    assert merged["checks"]["live_call/01"] is result["checks"]["live_call/01"] is True
+    assert merged["total"] == len(result["checks"]) + len([name for name in scored["checks"] if name.startswith("call/")])
+    run(again, monkeypatch, temp / "outputs")  # no made-up call ran after the change, so none runs again
     assert json.loads((temp / "after.json").read_text(encoding="utf-8")) == result
 
     monkeypatch.setenv("AGENT_ANSWER", json.dumps(ANSWER))
     monkeypatch.setenv("RUN_URL", "https://example.test/run/1")
     monkeypatch.setenv("RED", red_outputs["red"])  # the step gives the output of the proof as an environment value
+    for name, value in merge_outputs.items():  # the step gives the outputs of the scorer step as environment values
+        monkeypatch.setenv({"stored": "STORED", "made": "STORED_MADE", "commit": "STORED_COMMIT"}[name], value)
     body_outputs = run(body, monkeypatch, temp / "outputs")
     assert body_outputs == {"verdict": "same", "calls": "false", "title": "The greeting asks how it can help"}
     text = (temp / "body.md").read_text(encoding="utf-8")
     assert f"`{NEW_CALL}`" in text and f"`{PROMPTS}`" in text and "The agent changed a test" in text and "https://example.test/run/1" in text
     assert "At least one new or changed test fails on the code before the change" in text
+    assert f"is a stored result. The job `baseline` ran them on the clean code of the commit `{merge_outputs['commit'][:12]}`" in text
+    for name in ("STORED", "STORED_MADE", "STORED_COMMIT"):
+        monkeypatch.delenv(name)
     tries = keep_artifacts(temp, 1)
     try1 = {"changed": "true", "answer": json.dumps(ANSWER), "finished": "true", **body_outputs, **red_outputs, "guard": "success", "proof": "success", "tests": "success", "formal": "skipped", "score": "success"}
     del try1["title"]  # not an output of improve-try.yml: the job `push` cuts the title again from the answer
@@ -250,7 +304,8 @@ def test_each_command_of_the_fix_job_runs_as_the_workflow_calls_it(repo: Path, t
     assert run(report, monkeypatch, temp / "outputs")["issue"] == "31"
 
     # Each output that a later step of the workflows reads is an output that the command wrote.
-    for step, outputs in (("guard", guard_outputs), ("proof", red_outputs), ("body", body_outputs), ("retry", retry_outputs), ("winner", winner_outputs), ("trace", report_outputs), ("patch", {"changed": ""})):
+    steps = (("guard", guard_outputs), ("proof", red_outputs), ("body", body_outputs), ("retry", retry_outputs), ("winner", winner_outputs), ("trace", report_outputs), ("patch", {"changed": ""}), ("key", key_outputs), ("score", merge_outputs))
+    for step, outputs in steps:
         used = set(re.findall(rf"steps\.{step}\.outputs\.(\w+)", BOTH))
         assert used and used <= set(outputs), f"the workflow reads an output of the step `{step}` that the command does not write"
     # Each output of a try that improve.yml reads is an output of improve-try.yml.
@@ -265,7 +320,7 @@ def test_a_second_try_starts_from_the_first_change_and_its_patch_holds_no_file_o
     temp = tmp_path / "runner"
     temp.mkdir()
     commands = workflow_commands(temp)
-    _, task, _, first_try, guard, _, _, _, _, body, retry, winner, _, report = commands
+    _, task, _, first_try, _, _, _, _, guard, _, _, _, _, _, _, body, retry, winner, _, report = commands
 
     # --- the first try: its change, and a job `measure` that stopped at the unit tests ---
     the_coding_agent_makes_a_change(repo)
@@ -345,7 +400,7 @@ def test_the_build_job_for_an_issue_runs_the_same_commands_with_the_scope_code(r
     here it is a made-up issue. The agent adds a module and changes the README, which the scope `prompts` refuses."""
     temp = tmp_path / "runner"
     temp.mkdir()
-    _, task, _, _, guard, red, before, after, _, body, *_ = workflow_commands(temp)
+    _, task, _, _, _, _, _, _, guard, red, _, before, _, after, _, body, *_ = workflow_commands(temp)
     found = {"number": 12, "title": "Add a goodbye line", "body": "Each agent says goodbye before the call ends.", "state": "open", "user": {"login": "Ann-Lee"}, "labels": [{"name": "build"}]}
     (temp / "issue.json").write_text(json.dumps(found), encoding="utf-8")
     for name, value in {"FIX_ISSUE": "12", "FIX_SCOPE": "code", "FIX_ISSUE_FILE": str(temp / "issue.json"), "GITHUB_REPOSITORY_OWNER": "Ann-Lee", "FIX_RULE": "", "FIX_VERSION": ""}.items():
@@ -447,7 +502,228 @@ def test_a_job_after_a_job_that_can_be_skipped_has_a_status_function_in_its_cond
 def test_the_made_up_calls_of_the_fix_job_run_on_a_small_model():
     """One scorer run makes about 125 requests, each with the full prompt of an agent. On the default LLM_MODEL
     (claude-opus-5-5) one fix job with two tries cost about 14 dollars (the run 45457766996, 2026-11-24)."""
+    line = "LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}"
     step = TRY.split("- name: Score before the change and after it", 1)[1].split("\n      - name:", 1)[0]
-    assert "LLM_MODEL: ${{ vars.IMPROVE_SCORE_MODEL || 'anthropic:claude-haiku-5-5' }}" in step
-    # Only the scorer step sets it: the unit tests and the formal check make no model request.
-    assert TRY.count("LLM_MODEL:") == 1 and "LLM_MODEL" not in WORKFLOW
+    assert line in step
+    # The job `baseline` runs the existing made-up calls for the "before" result: on the same model, with the same line.
+    assert line in TRY.split("\n  baseline:\n", 1)[1].split("\n    steps:\n", 1)[0]
+    # Only these two set it: the unit tests and the formal check make no model request.
+    assert TRY.count("LLM_MODEL:") == TRY.count(line) == 2 and "LLM_MODEL" not in WORKFLOW
+
+
+# --- the job `baseline`: a stored "before" result of the existing made-up calls ---
+
+
+def _jobs(text: str) -> dict:
+    import yaml
+
+    return yaml.safe_load(text)["jobs"]
+
+
+WORKFLOWS = {path.name: path.read_text(encoding="utf-8") for path in sorted((REPO / ".github/workflows").glob("*.yml"))}
+# The jobs that keep the uv cache. Each has no secret and no write permission, so an entry that other code wrote can
+# reach no secret there and write nothing to the repository. A new job on this list needs the same reason.
+CACHE_KEPT = {("fly-deploy.yml", "test"), ("improve.yml", "decide"), ("test.yml", "test")}
+
+
+def _sensitive(workflow: dict, job: dict) -> bool:
+    """A job that reads a secret, gives one to a called workflow, or has a permission that can write."""
+    permissions = job.get("permissions", workflow.get("permissions", {}))
+    writes = permissions == "write-all" or (isinstance(permissions, dict) and "write" in permissions.values())
+    return writes or "secrets." in str(job) + str(workflow.get("env", "")) or "secrets" in job
+
+
+def test_no_job_with_a_secret_or_a_write_permission_restores_a_cache():
+    """The list of the caches of this repository is public, with the key and the version of each entry. Code of the
+    agent can write an entry, and an entry is a tar file that can write each file on the runner. So a job with a secret
+    or a write permission restores no cache: no `actions/cache`, no cache of a setup action, and no uv cache.
+    astral-sh/setup-uv@v6: `enable-cache` "auto" is on for a runner of GitHub, and "false" turns off restore and save."""
+    import yaml
+
+    kept = set()
+    for file, text in WORKFLOWS.items():
+        workflow = yaml.safe_load(text)
+        for name, job in workflow["jobs"].items():
+            steps = job.get("steps", [])
+            assert not [step for step in steps if str(step.get("uses", "")).startswith("actions/cache")], (file, name)
+            setup_uv = [step for step in steps if str(step.get("uses", "")).startswith("astral-sh/setup-uv")]
+            if not _sensitive(workflow, job):
+                kept |= {(file, name)} if [step for step in setup_uv if (step.get("with") or {}).get("enable-cache") is not False] else set()
+                continue
+            for step in steps:
+                given = step.get("with") or {}
+                assert not given.get("cache") and given.get("restore-cache") in (None, False), (file, name, step)
+            assert all((step.get("with") or {}).get("enable-cache") is False for step in setup_uv), (file, name)
+    assert kept == CACHE_KEPT
+    # A composite action of this repository restores no cache either.
+    for path in (REPO / ".github/actions").rglob("action.yml"):
+        assert "actions/cache" not in path.read_text(encoding="utf-8") and "setup-uv" not in path.read_text(encoding="utf-8"), path
+
+
+def test_the_salt_reaches_only_three_steps_of_the_job_baseline():
+    """The salt signs the stored result. Only steps of the job `baseline` that run clean code of the commit get it:
+    name, open, sign. Never the job, and never the step that runs the scorer."""
+    import yaml
+
+    jobs = _jobs(TRY)
+    declared = yaml.safe_load(TRY)[True]["workflow_call"]["secrets"]  # YAML reads the key `on` as true
+    assert set(declared) == {"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "IMPROVE_BASELINE_SALT"}
+    for name in ("try1", "try2"):
+        assert _jobs(WORKFLOW)[name]["secrets"]["IMPROVE_BASELINE_SALT"] == "${{ secrets.IMPROVE_BASELINE_SALT }}"
+    assert [file for file, text in WORKFLOWS.items() if "IMPROVE_BASELINE_SALT" in text] == ["improve-try.yml", "improve.yml"]
+    assert WORKFLOW.count("secrets.IMPROVE_BASELINE_SALT") == 2 and TRY.count("secrets.IMPROVE_BASELINE_SALT") == 3
+    baseline = jobs["baseline"]
+    salted = [step for step in baseline["steps"] if "IMPROVE_BASELINE_SALT" in str(step)]
+    assert [step["id"] for step in salted] == ["key", "open", "sign"]
+    assert all(step["env"]["BASELINE_SALT"] == "${{ secrets.IMPROVE_BASELINE_SALT }}" for step in salted)
+    assert [f"uv run proposal baseline-{word}" in step["run"] for step, word in zip(salted, ("key", "open", "sign"))] == [True, True, True]
+    assert "IMPROVE_BASELINE_SALT" not in str(baseline.get("env")) + str(yaml.safe_load(TRY).get("env"))
+    assert all("IMPROVE_BASELINE_SALT" not in str(job) for name, job in jobs.items() if name != "baseline")
+    (scorer,) = [step for step in baseline["steps"] if "score-harness" in str(step.get("run", ""))]
+    assert scorer["id"] == "score" and "BASELINE" not in str(scorer["env"])
+    # Clean code only: the commit of the run, no artifact of this run, nothing of the job `change`, a token that can only read.
+    assert baseline["permissions"] == {"contents": "read", "actions": "read"} and "needs" not in baseline and "needs" not in jobs["change"]
+    # The outputs of the job are exactly `found` and `result`, from the steps `open` and `sign`. No name, no state, no salt.
+    assert baseline["outputs"] == {
+        "found": "${{ steps.open.outputs.result != '' && 'hit' || steps.sign.outputs.result != '' && 'miss' || '' }}",
+        "result": "${{ steps.open.outputs.result || steps.sign.outputs.result }}",
+    }
+    assert baseline["steps"][0]["with"] == {"ref": "${{ github.sha }}", "persist-credentials": False}
+    assert baseline["if"] == "(vars.IMPROVE_SCORE_CALLS || 'all') == 'all'"
+    # A called workflow gets no more than its caller's permissions: both tries give `actions: read`.
+    assert all(_jobs(WORKFLOW)[name]["permissions"]["actions"] == "read" for name in ("try1", "try2"))
+
+
+def test_the_job_baseline_reads_an_artifact_only_with_python_and_keeps_its_result_for_30_days():
+    """An artifact with the name of the stored result can come from code of the agent. No tool unpacks it: a zip file
+    can hold a path that writes outside its folder. `proposal baseline-open` reads one file by name, into memory."""
+    steps = {step.get("id") or step.get("name"): step for step in _jobs(TRY)["baseline"]["steps"]}
+    for step in steps.values():
+        assert not re.search(r"\b(unzip|tar|bsdtar|7z|jar)\b", str(step.get("run", ""))), step
+        assert "download-artifact" not in str(step.get("uses", "")) and "actions/cache" not in str(step.get("uses", ""))
+    find = steps["Find the stored result"]
+    assert find["continue-on-error"] is True and find["env"] == {"GH_TOKEN": "${{ github.token }}", "NAME": "${{ steps.key.outputs.name }}"}
+    assert 'actions/artifacts?name=${NAME}&per_page=20"' in find["run"] and 'zips="$RUNNER_TEMP/store-zips"' in find["run"]
+    assert "select(.expired == false and .size_in_bytes < 1000000)" in find["run"] and "reverse | .[:5]" in find["run"]
+    assert steps["open"]["continue-on-error"] is True and steps["open"]["if"] == "steps.key.outputs.name != ''"
+    assert '--zips "$RUNNER_TEMP/store-zips"' in steps["open"]["run"]
+    assert steps["score"]["if"] == "steps.key.outputs.name != '' && steps.open.outputs.found != 'hit'"
+    store = steps["Store the result for 30 days"]
+    assert store["uses"] == "actions/upload-artifact@v4" and store["continue-on-error"] is True and store["if"] == "steps.sign.outcome == 'success'"
+    assert store["with"] == {"name": "${{ steps.key.outputs.name }}", "path": "${{ runner.temp }}/store/store.json", "if-no-files-found": "error", "retention-days": 30}
+    # The only artifact of the job is the stored result. The job `measure` gets the result as job outputs.
+    assert [step for step in steps.values() if "upload-artifact" in str(step.get("uses", ""))] == [store]
+
+
+def test_the_scorer_of_the_job_baseline_runs_with_the_settings_of_the_run_before_the_change():
+    """The stored result replaces a part of the run before the change in the job `measure`. So each environment
+    value that can change a result is the same in the two steps: the model, the API key, the owner's name, and each
+    other setting of config.py."""
+    import yaml
+
+    from ai_call_center.config import Settings
+
+    workflow = yaml.safe_load(TRY)
+
+    def env_of(job: str, step: str) -> dict[str, str]:
+        (found,) = [one for one in workflow["jobs"][job]["steps"] if one.get("id") == step]
+        return {**workflow.get("env", {}), **workflow["jobs"][job].get("env", {}), **found.get("env", {})}
+
+    baseline, measure = env_of("baseline", "score"), env_of("measure", "score")
+    # Only these differ: the script of the step `measure` reads them, to choose the flags of the scorer and the stored result.
+    flags = {"SCORE_CALLS", "NEW_CALLS", "BASELINE_RESULT", "BASELINE_FOUND"}
+    assert set(measure) - set(baseline) == flags and flags.isdisjoint(name.upper() for name in Settings.model_fields)
+    assert set(baseline) <= set(measure) and {"LLM_MODEL", "ANTHROPIC_API_KEY", "OWNER_NAME"} <= set(baseline)
+    assert {key: value for key, value in measure.items() if key not in flags} == baseline
+    settings = {name.upper() for name in Settings.model_fields}
+    # The step `key` reads the settings for the state hash. It sees the same settings as the scorer.
+    key = env_of("baseline", "key")
+    assert {name for name in key.keys() ^ baseline.keys()} == {"BASELINE_SALT", "HAS_API_KEY", "ANTHROPIC_API_KEY"}
+    assert settings.isdisjoint({"BASELINE_SALT", "HAS_API_KEY", "ANTHROPIC_API_KEY"})
+    # No step before them sets a setting through GITHUB_ENV.
+    for job in ("baseline", "measure"):
+        for step in workflow["jobs"][job]["steps"]:
+            for written in re.findall(r"echo \"(\w+)=[^\n]*>> \"\$GITHUB_ENV\"", str(step.get("run", ""))):
+                assert written.upper() not in settings, (job, written)
+    assert 'echo "FIX_ISSUE_FILE=$RUNNER_TEMP/issue.json" >> "$GITHUB_ENV"' in MEASURE  # the regular expression finds a write
+
+
+def test_the_job_measure_runs_also_when_the_job_baseline_was_skipped_or_failed():
+    measure = _jobs(TRY)["measure"]
+    assert measure["needs"] == ["change", "baseline"]
+    assert measure["if"] == "${{ !cancelled() && needs.change.result == 'success' && needs.change.outputs.changed == 'true' }}"
+    # The result comes as job outputs, never as an artifact: code of the job `change` can upload an artifact with any name.
+    assert "baseline-${{" not in TRY + WORKFLOW and "BASELINE_" not in str(measure.get("env"))
+    downloads = [step["with"] for step in measure["steps"] if "download-artifact" in str(step.get("uses", ""))]
+    assert downloads == [{"name": "change-${{ inputs.try }}", "path": "${{ runner.temp }}"}]
+    (scorer,) = [step for step in measure["steps"] if step.get("id") == "score"]
+    assert scorer["env"]["BASELINE_RESULT"] == "${{ needs.baseline.outputs.result }}" and scorer["env"]["BASELINE_FOUND"] == "${{ needs.baseline.outputs.found }}"
+    # The script reads them as environment values only.
+    assert "needs.baseline" not in scorer["run"] and "${{" not in scorer["run"]
+
+
+def fake_uv(folder: Path, log: Path) -> Path:
+    """A fake `uv`: `uv run score-harness` writes a made-up result, `uv run proposal again` only notes its words,
+    and each other `uv run proposal` command runs for real. No model gets a request."""
+    folder.mkdir()
+    script = folder / "uv"
+    script.write_text(
+        f"""#!{sys.executable}
+import json, subprocess, sys
+from pathlib import Path
+words = sys.argv[2:]
+with open({str(log)!r}, "a") as file:
+    file.write(json.dumps(words) + "\\n")
+if words[0] == "score-harness":
+    only = [words[n + 1] for n, word in enumerate(words) if word == "--only"]
+    ids = only or sorted(path.stem for path in Path("evals/calls").glob("*.json"))
+    checks = {{"live_call/01": True, **({{f"call/{{name}}/ran": True for name in ids}} if "--calls" in words else {{}})}}
+    out = words[words.index("--out") + 1]
+    Path(out).write_text(json.dumps({{"version": "v1", "calls": "--calls" in words, "passed": len(checks), "total": len(checks), "checks": checks}}))
+elif words[:2] != ["proposal", "again"]:
+    sys.exit(subprocess.run([sys.executable, "-m", "ai_call_center.proposal", *words[1:]]).returncode)
+""",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return folder
+
+
+@pytest.mark.parametrize(
+    ("setting", "new_calls", "found", "before", "notice"),
+    [
+        ("all", NEW_CALL, "miss", ["--calls", "--only", NEW_CALL], ""),  # a good stored result: only the new made-up call runs before
+        ("all", "", "hit", [], ""),  # no new made-up call: the word list only, which costs nothing
+        ("all", NEW_CALL, "maybe", ["--calls"], "cannot be used"),  # a bad stored result: each made-up call runs
+        ("all", NEW_CALL, None, ["--calls"], "gave no stored"),  # no stored result
+        ("new", NEW_CALL, "miss", ["--calls", "--only", NEW_CALL], ""),  # `new` does not use a stored result
+    ],
+)
+def test_the_scorer_step_runs_before_the_change_only_the_calls_that_the_stored_result_does_not_hold(repo: Path, tmp_path: Path, setting, new_calls, found, before, notice):
+    """The step "Score before the change and after it" as the runner runs it, with bash and a fake `uv`."""
+    temp = tmp_path / "runner"
+    temp.mkdir()
+    the_coding_agent_makes_a_change(repo)
+    existing = sorted(path.stem for path in (REPO / "evals/calls").glob("*.json"))
+    # The outputs of the job `baseline`, as the step gets them: environment values. A job with no result gives "".
+    stored = {"calls": True, "checks": {f"call/{name}/ran": True for name in existing}, "stored": {"made": "2026-11-24T15:00:00Z", "commit": "a" * 40}}
+    handed = {"BASELINE_RESULT": json.dumps(stored, separators=(",", ":")), "BASELINE_FOUND": found} if found is not None else {"BASELINE_RESULT": "", "BASELINE_FOUND": ""}
+    log = temp / "uv.log"
+    env = {**os.environ, "PATH": f"{fake_uv(tmp_path / 'bin', log)}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(temp), "GITHUB_STEP_SUMMARY": str(temp / "summary.md"), "GITHUB_OUTPUT": str(temp / "outputs")}
+    env |= {"ANTHROPIC_API_KEY": "made-up", "SCORE_CALLS": setting, "NEW_CALLS": new_calls, **handed}  # a made-up key: a real request would fail
+    subprocess.run(["bash", "-e", "-c", step_script(MEASURE, "score")], check=True, env=env)
+    runs = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    scorer = [words[1:] for words in runs if words[0] == "score-harness"]
+    after = {"all": ["--calls"], "new": ["--calls", "--only", NEW_CALL]}[setting]  # the run after the change does not change
+    assert scorer == [[*before, "--out", str(temp / "before.json")], [*after, "--out", str(temp / "after.json")]]
+    assert "How can I help?" in (repo / PROMPTS).read_text(encoding="utf-8")  # the change is back after the run before it
+    summary = (temp / "summary.md").read_text(encoding="utf-8") if (temp / "summary.md").exists() else ""
+    assert (notice in summary) if notice else summary == ""
+    result = json.loads((temp / "before.json").read_text(encoding="utf-8"))
+    used = setting == "all" and found in ("hit", "miss")
+    outputs = (temp / "outputs").read_text(encoding="utf-8") if (temp / "outputs").exists() else ""
+    assert ("stored=" in outputs) is used and (f"stored={found}" in outputs) is used
+    if used:
+        # The full "before" result: each existing made-up call, and the new one when it ran.
+        assert {name.split("/")[1] for name in result["checks"] if name.startswith("call/")} == set(existing) | ({NEW_CALL} if new_calls else set())
+        assert result["calls"] is True

@@ -64,6 +64,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - run: uv sync --frozen
 
       - name: Make the labels of the queue

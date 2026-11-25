@@ -10,6 +10,10 @@ in, it checks which files the agent changed, and it writes the evidence. The com
   An old entry of the test set must stay as it was, and an old made-up call file too. The check of the
   file names runs before the patch is applied, so the code that checks is never code that the agent wrote.
 - `proposal red`: run the new and changed test files on the old code. A new test must fail there.
+- `proposal baseline-key`: name the stored "before" result of the existing made-up calls (the job `baseline`).
+- `proposal baseline-open`: read the first stored result with a good signature from the downloaded artifacts.
+- `proposal baseline-sign`: stamp and sign a new stored result.
+- `proposal baseline-merge`: check a stored result, and put its checks into the "before" result of the job `measure`.
 - `proposal again`: run each made-up call with a changed check 2 more times on each side, and vote.
 - `proposal body`: compare the score from before the change with the score after it, and print the
   text of the pull request.
@@ -43,6 +47,8 @@ The measure is `score.py`. The agent cannot change it, and it cannot change the 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import importlib.abc
 import importlib.machinery
 import json
@@ -51,17 +57,23 @@ import re
 import shutil
 import subprocess
 import sys
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
+from pydantic import SecretStr
+
+from ai_call_center.config import Settings
 from ai_call_center.grading import AGENTS, OTHER, cause_meaning, rule_of
 from ai_call_center.fault_report import LIMITS, safe
 from ai_call_center.improve import COMMIT, FixRequest
 from ai_call_center.issue_queue import CODE, PROMPTS, IssueRequest, Refused, flat_rows, issue_from_file, issue_lines, issue_request, plain
-from ai_call_center.score import CALLS, TEST_SET, call_from, changed_calls, compare, is_call_id, vote
+from ai_call_center.score import CALLS, TEST_SET, call_from, changed_calls, compare, is_call_id, result_of, vote
 
 Request = FixRequest | IssueRequest
 
@@ -755,6 +767,218 @@ def vote_lines(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     ]
 
 
+# --- a stored "before" result of the existing made-up calls ---
+
+# The job `baseline` of improve-try.yml runs the existing made-up calls on the clean code of the commit. It stores
+# the result as a signed file in a run artifact. The old code is the same for both tries, and for each fix job at
+# the same code state, so a stored result saves a paid run. The jobs `change` and `measure` run the agent's code,
+# and that code can upload an artifact with the same name. So the file has a signature: an HMAC with a salt that
+# only the job `baseline` gets. A file with a bad signature only costs a fresh run, never a wrong result.
+BASELINE_FORMAT = 1  # a change of this number makes each stored result unused
+# The tracked inputs of the result of a made-up call: the code, the test set, the dependencies, the Python
+# version, and the owner's profile (`settings.profile_path`). The README and the workflows are not inputs.
+BASELINE_INPUTS = ("src", "evals", "pyproject.toml", "uv.lock", ".python-version", "uv.toml", "profile.md")
+BASELINE_SALT = "BASELINE_SALT"  # the environment value with the secret IMPROVE_BASELINE_SALT; never an argument
+BASELINE_STATE = "BASELINE_STATE"  # the environment value with the state hash of the step `key`
+HIT, MISS = "hit", "miss"  # an earlier job stored the result; the job `baseline` of this run made it
+STORE_PREFIX = "baseline-store-"  # the start of the name of the artifact of a stored result
+STORE_MEMBER = "store.json"  # the one file in that artifact
+STORE_LIMIT = 1_000_000  # bytes: the largest file of a stored result, and the largest zip file that the job reads
+# Each HMAC has a label of its own, so a name can never be a signature, and a signature never a name.
+_NAME_LABEL = "baseline-store-name-v1|"
+_SIGN_LABEL = "baseline-store-signature-v1|"
+_STATE_LABEL = "baseline-store-state-v1|"
+HAND_LIMIT = 100_000  # bytes: the largest result that the job `baseline` gives to the job `measure` as a job output
+_MADE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
+EASTERN = "America/New_York"  # the owner reads each time in US Eastern time
+
+
+def input_ids(paths: tuple[str, ...] = BASELINE_INPUTS) -> dict[str, str]:
+    """git's own hash of each input in the last commit: a tree for a folder, a blob for a file.
+    A missing input stops the command: a key must never leave out an input."""
+    return {path: _git("rev-parse", f"HEAD:{path}").strip() for path in paths}
+
+
+def scorer_settings(settings: Settings) -> dict[str, Any]:
+    """Each setting of the scorer's process. A secret gives only "set" or "empty", never its value."""
+    found: dict[str, Any] = {}
+    for name in type(settings).model_fields:
+        value = getattr(settings, name)
+        found[name] = ("set" if value.get_secret_value() else "empty") if isinstance(value, SecretStr) else value if isinstance(value, (str, int, float, bool)) or value is None else str(value)
+    return found
+
+
+def state_hash(salt: str, inputs: dict[str, str], settings: dict[str, Any]) -> str:
+    """One HMAC of the code state and the settings that decide the "before" result of the existing made-up calls,
+    or "" with no salt. The state is public, and a setting can be a phone number: a plain hash of it can be guessed."""
+    text = json.dumps({"format": BASELINE_FORMAT, "inputs": inputs, "settings": settings}, sort_keys=True)
+    return _keyed(salt, _STATE_LABEL + text) if salt.strip() else ""
+
+
+def _keyed(salt: str, text: str) -> str:
+    return hmac.new(salt.strip().encode("utf-8"), text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def store_name(salt: str, state: str) -> str:
+    """The name of the artifact of the stored result, or "" with no salt. The name is not secret."""
+    return f"{STORE_PREFIX}{_keyed(salt, _NAME_LABEL + state)}" if salt.strip() else ""
+
+
+def stamp(result: dict[str, Any], *, made: datetime, commit: str) -> dict[str, Any]:
+    """A new stored result with when it was made (UTC, for the machine) and at which commit."""
+    return {**result, "stored": {"made": made.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "commit": commit}}
+
+
+def _canonical(value: Any) -> str:
+    """One fixed JSON text for one value: the same text when the signer writes it and when the reader checks it."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def store_signature(salt: str, state: str, payload: dict[str, Any]) -> str:
+    """The HMAC of the state and of the stored file without its field `signature`."""
+    unsigned = {key: value for key, value in payload.items() if key != "signature"}
+    return _keyed(salt, _SIGN_LABEL + state + "|" + _canonical(unsigned))
+
+
+def sign_store(result: dict[str, Any], *, salt: str, state: str, made: datetime, commit: str) -> dict[str, Any]:
+    """The stored file: the scorer result, the stamp, the state, and the signature of all of them."""
+    if not salt.strip() or not state:
+        raise Refused("no salt or no state, so the job cannot sign the result")
+    payload = json.loads(_canonical({**stamp(result, made=made, commit=commit), "state": state}))
+    payload.pop("signature", None)
+    return {**payload, "signature": store_signature(salt, state, payload)}
+
+
+def signed_store(data: Any, *, salt: str, state: str) -> dict[str, Any]:
+    """The stored file when its signature is good for this state. Refused for each other file."""
+    if not isinstance(data, dict) or not isinstance(data.get("signature"), str):
+        raise Refused("the file has no signature")
+    if not salt.strip() or data.get("state") != state:
+        raise Refused("the file is of another code state")
+    if not hmac.compare_digest(data["signature"].encode("utf-8"), store_signature(salt, state, data).encode("utf-8")):
+        raise Refused("the signature of the file is not good")
+    return data
+
+
+def read_store(path: Path, *, salt: str, state: str, existing: list[str]) -> dict[str, Any]:
+    """One zip file of an artifact: its one file, signed and with the form of a stored result. Refused, or another
+    error, for each other zip file. No tool unpacks it: Python reads one file, by its exact name, into memory."""
+    if path.stat().st_size > STORE_LIMIT:
+        raise Refused("the zip file is too large")
+    with zipfile.ZipFile(path) as archive:
+        info = archive.getinfo(STORE_MEMBER)
+        if info.file_size > STORE_LIMIT:  # the size that the zip file gives, before any byte is read
+            raise Refused("the file in the zip file is too large")
+        with archive.open(info) as member:
+            content = member.read(STORE_LIMIT + 1)
+    if len(content) > STORE_LIMIT:
+        raise Refused("the file in the zip file is too large")
+    data = signed_store(json.loads(content.decode("utf-8")), salt=salt, state=state)
+    stored_from(data, HIT)
+    stored_checks(data, existing)
+    return data
+
+
+def open_store(folder: Path, *, salt: str, state: str, existing: list[str]) -> tuple[dict[str, Any] | None, list[str]]:
+    """The first good stored file in the zip files of the folder, newest first (1.zip is the newest), or None.
+    A fault in one zip file skips that file, so a forged artifact only costs a fresh run."""
+    paths = sorted(folder.glob("*.zip"), key=lambda path: (len(path.name), path.name)) if folder.is_dir() else []
+    skipped: list[str] = []
+    for path in paths:
+        try:
+            return read_store(path, salt=salt, state=state, existing=existing), skipped
+        except Refused as error:
+            skipped.append(f"{path.name}: {error}")
+        except Exception as error:  # noqa: BLE001 - another person can make the file; each fault is only a skip
+            skipped.append(f"{path.name}: {type(error).__name__}")
+    return None, skipped
+
+
+def hand_off(data: dict[str, Any], existing: list[str]) -> str:
+    """The output `result` of the job `baseline`: one JSON line with only what `proposal baseline-merge` reads.
+    "" when it is above HAND_LIMIT: then the job `measure` runs each made-up call."""
+    stored = stored_from(data, HIT)
+    line = _canonical({"calls": True, "checks": stored_checks(data, existing), "stored": {"made": stored.made, "commit": stored.commit}})
+    return line if len(line.encode("utf-8")) <= HAND_LIMIT else ""
+
+
+@dataclass(frozen=True)
+class Stored:
+    """A stored result that the job `measure` used, for the pull request text. Each value has a fixed form."""
+
+    found: str  # HIT or MISS
+    made: str  # UTC, as `_MADE`
+    commit: str  # a full git commit
+
+
+def existing_calls() -> list[str]:
+    """The ids of the made-up calls in the last commit: the clean test set, with no call of the agent."""
+    names = _git("ls-tree", "--name-only", "HEAD", "--", CALLS_FOLDER).split("\n")
+    return sorted({call_file_id(name.strip()) for name in names} - {""})
+
+
+def stored_checks(baseline: Any, existing: list[str]) -> dict[str, bool]:
+    """The checks of the existing made-up calls in a stored result. Refused when the result does not hold each of them."""
+    if not isinstance(baseline, dict) or baseline.get("calls") is not True or not isinstance(baseline.get("checks"), dict):
+        raise Refused("the stored result is not a result of the made-up calls")
+    prefixes = tuple(f"call/{name}/" for name in existing)
+    checks = {name: ok for name, ok in baseline["checks"].items() if isinstance(name, str) and _CHECK_NAME.fullmatch(name) and name.startswith(prefixes) and isinstance(ok, bool)}
+    missing = [name for name in existing if f"call/{name}/ran" not in checks]
+    if missing:
+        raise Refused(f"the stored result has no result for {len(missing)} existing made-up call(s)")
+    return checks
+
+
+def stored_from(baseline: Any, found: str) -> Stored:
+    """When and at which commit the stored result was made. Refused when a value does not have its fixed form."""
+    made = baseline.get("stored") if isinstance(baseline, dict) else None
+    made = made if isinstance(made, dict) else {}
+    when, commit = str(made.get("made", "")), str(made.get("commit", ""))
+    if found not in (HIT, MISS) or not _MADE.fullmatch(when) or not _FULL_COMMIT.fullmatch(commit):
+        raise Refused("the stored result does not say when and at which commit the job `baseline` made it")
+    return Stored(found=found, made=when, commit=commit)
+
+
+def merge_stored(fresh: dict[str, Any], baseline: Any, existing: list[str]) -> dict[str, Any]:
+    """The full "before" result: each check of the fresh run, and from the stored result each check of an existing
+    made-up call that the fresh run did not run. The keys are those of a scorer result, so `run_again` and
+    `pr_body` read it as one."""
+    ran = {name.split("/")[1] for name in fresh.get("checks", {}) if name.startswith("call/")}
+    checks = dict(fresh.get("checks", {}))
+    checks.update({name: ok for name, ok in stored_checks(baseline, existing).items() if name.split("/")[1] not in ran})
+    return result_of(checks, version=str(fresh.get("version", "")), calls=True)
+
+
+def stored_from_env(env: dict[str, str]) -> Stored | None:
+    """The stored result that the scorer step used (its outputs `stored`, `made`, `commit`), or None."""
+    try:
+        return stored_from({"stored": {"made": env.get("STORED_MADE", "").strip(), "commit": env.get("STORED_COMMIT", "").strip()}}, env.get("STORED", "").strip())
+    except Refused:
+        return None
+
+
+def eastern(made: str) -> str:
+    """A UTC time of `_MADE` as US Eastern time, with EST or EDT."""
+    when = datetime.strptime(made, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    try:
+        return when.astimezone(ZoneInfo(EASTERN)).strftime("%Y-%m-%d %H:%M %Z")
+    except (KeyError, ValueError, OSError):  # no time zone data on the runner
+        return when.strftime("%Y-%m-%d %H:%M UTC")
+
+
+def stored_lines(stored: Stored | None) -> list[str]:
+    """One or two sentences for the evidence when the "before" result of the existing made-up calls was stored."""
+    if stored is None:
+        return []
+    source = "The job `baseline` of this try made it." if stored.found == MISS else "An earlier job `baseline` made it, at the same code state: of the first try, or of an earlier fix job."
+    return [
+        f'The "before" result of the made-up calls that were in the test set before this change is a stored result. The job `baseline` ran them on the clean code of the commit `{stored.commit[:12]}`, on {eastern(stored.made)}. {source}',
+        "The new made-up calls and the word list ran fresh before the change. Each made-up call with a changed check ran again fresh on both sides.",
+        "",
+    ]
+
+
 # --- the text of the pull request ---
 
 
@@ -800,8 +1024,9 @@ def _head(request: Request) -> list[str]:
     ]
 
 
-def pr_body(request: Request, answer: dict[str, Any], before: dict[str, Any], after: dict[str, Any], guarded: Guarded, *, run_url: str = "", red: str = "") -> str:
-    """The text of the pull request. `red` is the result of `prove_red`, or "" when the job did not run it."""
+def pr_body(request: Request, answer: dict[str, Any], before: dict[str, Any], after: dict[str, Any], guarded: Guarded, *, run_url: str = "", red: str = "", stored: Stored | None = None) -> str:
+    """The text of the pull request. `red` is the result of `prove_red`, or "" when the job did not run it.
+    `stored` is the stored "before" result of the existing made-up calls, or None when the job ran them itself."""
     kind, worse, better = verdict(before, after)
     is_issue, is_build = isinstance(request, IssueRequest), scope_of(request) == CODE
     measured = {
@@ -826,6 +1051,7 @@ def pr_body(request: Request, answer: dict[str, Any], before: dict[str, Any], af
         f"The scorer (`uv run score-harness`) ran before the change and after it, on {paid}.",
         "Both runs had the same test set, with the new made-up call, so the two scores have the same checks.",
         "",
+        *stored_lines(stored),
         "| | Checks passed |",
         "|---|---|",
         f"| Before the change | {_scores(before)} |",
@@ -1189,7 +1415,9 @@ def open_trace(rows: Any, title: str) -> int | None:
 
 
 def _output(name: str, value: str) -> None:
-    """Give a value to the next steps of the job."""
+    """Give a value to the next steps of the job. A value is one line: a line break could add a second output."""
+    if "\n" in value or "\r" in value:
+        raise Refused(f"the output `{name}` holds a line break")
     path = os.environ.get("GITHUB_OUTPUT")
     if path:
         with open(path, "a", encoding="utf-8") as file:
@@ -1232,6 +1460,16 @@ def main() -> None:
     again_cmd = commands.add_parser("again", help="run each made-up call with a changed check again, and write the vote into both results")
     again_cmd.add_argument("--before", required=True, metavar="FILE")
     again_cmd.add_argument("--after", required=True, metavar="FILE")
+    commands.add_parser("baseline-key", help=f"give the state and the name of the stored result of the existing made-up calls; the salt comes from {BASELINE_SALT}")
+    open_cmd = commands.add_parser("baseline-open", help=f"give the first stored result with a good signature as the outputs found and result; the salt and the state come from {BASELINE_SALT} and {BASELINE_STATE}")
+    open_cmd.add_argument("--zips", required=True, metavar="DIR", help="the zip files of the artifacts, 1.zip the newest")
+    sign_cmd = commands.add_parser("baseline-sign", help=f"stamp and sign a new stored result; the salt and the state come from {BASELINE_SALT} and {BASELINE_STATE}")
+    sign_cmd.add_argument("--result", required=True, metavar="FILE", help="the result of the scorer")
+    sign_cmd.add_argument("--out", required=True, metavar="FILE")
+    merge_cmd = commands.add_parser("baseline-merge", help="check a stored result; with --before, put its checks of the existing made-up calls into that result")
+    merge_cmd.add_argument("--baseline", required=True, metavar="FILE", help="the stored result from the job baseline")
+    merge_cmd.add_argument("--found", required=True, metavar="FILE", help="hit or miss: an earlier job stored the result, or the job baseline of this run made it")
+    merge_cmd.add_argument("--before", metavar="FILE", help="the result of the fresh run before the change; the full result replaces it")
     commands.add_parser("retry", help="from the result of the first try (JOBS), decide if a second try runs")
     first_cmd = commands.add_parser("first-try", help="for the second try: write what the first try showed, and apply its patch after the guard's checks")
     first_cmd.add_argument("--tries", required=True, metavar="DIR", help="the artifacts change-1 and measure-1, one folder each")
@@ -1257,6 +1495,73 @@ def main() -> None:
         if args.command == "again":
             calls = run_again(Path(args.before), Path(args.after))
             print("made-up calls that ran again: " + (", ".join(calls) or "none"))
+            return
+        if args.command == "baseline-key":
+            # The name and the state are not secret. Only the salt is, and it never goes to an output.
+            salt = env.get(BASELINE_SALT, "")
+            if not salt.strip():
+                _output("name", "")
+                _output("state", "")
+                print("No secret IMPROVE_BASELINE_SALT, so the job stores no result and reads none.")
+                return
+            try:
+                state = state_hash(salt, input_ids(), scorer_settings(Settings()))
+            except subprocess.CalledProcessError:
+                _output("name", "")
+                _output("state", "")
+                print(f"An input of the made-up calls is not in the last commit ({', '.join(BASELINE_INPUTS)}), so the job stores no result.")
+                return
+            name = store_name(salt, state)
+            _output("name", name)
+            _output("state", state)
+            print(f"The stored result has the name {name}.")
+            return
+        if args.command == "baseline-open":
+            salt, state = env.get(BASELINE_SALT, ""), env.get(BASELINE_STATE, "").strip()
+            found, skipped = (None, []) if not salt.strip() or not state else open_store(Path(args.zips), salt=salt, state=state, existing=existing_calls())
+            for line in skipped:
+                print(f"Not used: {line}.")
+            if found is None:
+                _output("found", "")
+                _output("result", "")
+                print("No stored result with a good signature, so the job runs the existing made-up calls.")
+                return
+            line = hand_off(found, existing_calls())
+            _output("found", HIT)
+            _output("result", line)
+            print(f"The stored result of the commit {found['stored']['commit'][:12]} has a good signature. No made-up call runs in this job.")
+            if not line:
+                print("The stored result is too large for a job output, so the job `measure` runs each made-up call.")
+            return
+        if args.command == "baseline-sign":
+            commit = _git("rev-parse", "HEAD").strip()
+            signed = sign_store(_load(args.result), salt=env.get(BASELINE_SALT, ""), state=env.get(BASELINE_STATE, "").strip(), made=datetime.now(timezone.utc), commit=commit)
+            line = hand_off(signed, existing_calls())  # a result that a later job cannot use is not stored
+            out = Path(args.out)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(signed, indent=2) + "\n", encoding="utf-8")
+            _output("result", line)
+            print(f"This job ran the existing made-up calls on the clean code of the commit {commit[:12]}, and signed the result.")
+            if not line:
+                print("The result is too large for a job output, so the job `measure` runs each made-up call.")
+            return
+        if args.command == "baseline-merge":
+            try:
+                baseline = _load(args.baseline)
+                found = Path(args.found).read_text(encoding="utf-8")[:10].strip()
+            except (OSError, ValueError) as error:
+                raise Refused(f"the stored result cannot be read: {type(error).__name__}") from error
+            existing = existing_calls()
+            stored, checks = stored_from(baseline, found), stored_checks(baseline, existing)
+            if not args.before:
+                print(f"The stored result holds each of the {len(existing)} existing made-up call(s), with {len(checks)} check(s).")
+                return
+            merged = merge_stored(_load(args.before), baseline, existing)
+            Path(args.before).write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+            _output("stored", stored.found)
+            _output("made", stored.made)
+            _output("commit", stored.commit)
+            print(f"The \"before\" result holds the stored checks of the existing made-up calls: {merged['passed']} of {merged['total']} checks passed.")
             return
         if args.command == "retry":
             first, _ = tries_from(jobs_from(env.get("JOBS", "")))
@@ -1336,7 +1641,8 @@ def main() -> None:
         before, after = _load(args.before), _load(args.after)
         kind, _, _ = verdict(before, after)
         red = env.get("RED", "").strip()
-        Path(args.out).write_text(pr_body(request, answer, before, after, guarded, run_url=env.get("RUN_URL", ""), red=red if red in RED_TEXT else ""), encoding="utf-8")
+        stored = stored_from_env(env)
+        Path(args.out).write_text(pr_body(request, answer, before, after, guarded, run_url=env.get("RUN_URL", ""), red=red if red in RED_TEXT else "", stored=stored), encoding="utf-8")
         _output("verdict", kind)
         _output("calls", "true" if after.get("calls") else "false")
         _output("title", pr_title(answer, request))

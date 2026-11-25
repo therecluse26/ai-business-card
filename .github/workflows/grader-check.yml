@@ -68,6 +68,8 @@ jobs:
           persist-credentials: false
       - if: steps.key.outputs.present == 'true'
         uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false # a secret or a write permission: no cache, because other code can write an entry
       - if: steps.key.outputs.present == 'true'
         run: uv sync --frozen
 
