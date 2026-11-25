@@ -25,7 +25,7 @@ from one provider to the other.
 2. Read the start of the log. These three lines must be there:
 
    - `voice providers at start: ...` with `consultant=nova_sonic/...` in it.
-     The same line must hold `classifier=phonic/...`.
+     The same line must hold `classifier=gemini_live/...`.
    - `LangSmith tracing is on: project voice-business-card`
    - `ready: webhooks at ...`
 
@@ -45,7 +45,7 @@ Use the normal `.env`. Dial `TELNYX_PHONE_NUMBER`.
 
 | Step | You say | You must hear |
 |---|---|---|
-| 1 | Your name, when the agent asks | The greeting and the welcome, in the classifier's voice (Phonic). This is the first real call on Phonic. |
+| 1 | Your name, when the agent asks | The greeting and the welcome, in the classifier's voice (Gemini) |
 | 2 | "Tell me about the owner's background." | A new voice: "Hi, I'm the profile agent, running on Google Gemini." |
 | 3 | One more question about the owner | An answer in the same voice |
 | 4 | "I run a small business. How could this help me?" | A new voice: "Hi, I'm the consultant agent, running on Amazon Nova." |

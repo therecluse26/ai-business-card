@@ -6,6 +6,7 @@ what the live API sent on 2026-11-24 (see the module docstring of phonic_leg.py)
 
 from __future__ import annotations
 
+import dataclasses
 import asyncio
 import base64
 import json
@@ -43,7 +44,7 @@ from pipecat.workers.runner import WorkerRunner
 from websockets.exceptions import ConnectionClosedError
 from websockets.frames import Close
 
-from ai_call_center.agents.specs import parse_agent_legs
+from ai_call_center.agents.specs import default_voice, parse_agent_legs
 from ai_call_center.config import Settings
 from ai_call_center.voice import legs
 from ai_call_center.voice.call_session import handoff_instruction, retire_connect_message
@@ -730,8 +731,18 @@ def settings(**over) -> Settings:
     return Settings(_env_file=None, **{**base, **over})
 
 
-def test_the_classifier_runs_on_phonic_and_falls_back_to_openai_without_a_key(specs):
-    classifier = specs["classifier"]
+def on_phonic(spec):
+    """The spec as `AGENT_LEGS=<agent>=phonic` gives it. No agent runs on Phonic by default."""
+    return dataclasses.replace(spec, leg="phonic", voice=default_voice(spec.name, "phonic"))
+
+
+def test_no_agent_runs_on_phonic_by_default(specs):
+    assert "phonic" not in {spec.leg for spec in specs.values()}
+    assert (specs["classifier"].leg, specs["classifier"].voice) == ("gemini_live", "Aoede")
+
+
+def test_an_agent_set_to_phonic_runs_on_it_and_falls_back_to_openai_without_a_key(specs):
+    classifier = on_phonic(specs["classifier"])
     assert (classifier.leg, classifier.voice) == ("phonic", "sabrina")
     assert legs.resolve_spec(classifier, settings(phonic_api_key=KEY)) is classifier
     moved = legs.resolve_spec(classifier, settings())
@@ -743,7 +754,7 @@ def test_the_classifier_runs_on_phonic_and_falls_back_to_openai_without_a_key(sp
 def test_the_phonic_leg_is_built_from_the_settings_and_opens_nothing(specs):
     from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
-    spec = specs["classifier"]
+    spec = on_phonic(specs["classifier"])
     tools = tools_for_agent(spec, voice_tool_schemas(specs))
     svc = legs.build_leg(spec, instructions="You are the classifier.", settings=settings(phonic_api_key=KEY, phonic_turn_taking="relaxed"), tools=tools)  # gitleaks:allow - KEY is the made-up key at the top of this file
     assert isinstance(svc, PhonicLLMService) and not svc.connected
