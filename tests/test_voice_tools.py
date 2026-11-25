@@ -44,7 +44,7 @@ def test_every_agent_can_reach_the_feedback_agent_and_it_can_hand_back(specs):
 def test_each_agent_has_its_own_voice(specs):
     voices = [spec.voice for spec in specs.values()]
     assert len(set(voices)) == len(voices)
-    assert specs["classifier"].voice == default_voice("classifier", DEFAULT_LEGS["classifier"]) == "sabrina"
+    assert specs["classifier"].voice == default_voice("classifier", DEFAULT_LEGS["classifier"]) == "Aoede"
 
 
 def test_the_feedback_agent_has_a_voice_that_no_other_agent_on_its_leg_uses():

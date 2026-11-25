@@ -9,8 +9,8 @@ Stack: Telnyx (phone), Pipecat (audio), LangGraph + LangChain (routing, state, t
 ## Status
 
 M1 to M5 are done: the agents run as a text chat and on a phone call.
-On the phone, each agent has its own voice. The greeting agent runs on Phonic, two agents run on
-Google Gemini Live, and three on OpenAI Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
+On the phone, each agent has its own voice. Three agents run on Google Gemini Live (the greeting agent
+is one of them) and three on OpenAI Realtime; a handoff changes the voice and the provider in under a second. The tools (save a lead,
 call stats, transfer to the owner) run from the voice model's requests. The line recognises a
 returning caller by the name they give, looks up a new caller's carrier and area, and limits calls, call length, and
 transfer hours. When a voice provider stops answering, the call moves to another provider.
@@ -30,7 +30,7 @@ Dropped: the local pipeline leg (M7). Its timing spike showed it would answer ab
 
 | Agent | Job |
 |---|---|
-| `classifier` | Greets, asks why the caller called, routes. Runs on Phonic; the others on OpenAI or Gemini. |
+| `classifier` | Greets, asks why the caller called, routes |
 | `profile` | Answers questions about the owner from `profile.md` |
 | `tour` | Explains how this system works, with live facts from the call |
 | `consultant` | Asks about the caller's business and suggests uses |
@@ -111,7 +111,7 @@ So the server handles the recovery (`voice/cutoff.py`):
 - A turn with clear words: the agent forgets the note and answers the words. A short "yes" or "no" is clear words.
 - A note lives for one answer. The server deletes it when the agent next starts to speak.
 
-Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova Sonic do not report the start of a caller's turn, and Phonic cannot take a note out again (see "A fourth provider: Phonic"). The greeting agent runs on Phonic by default, so it gets no notes; with `AGENT_LEGS=classifier=openai_realtime` it gets them again. The results come from simulated calls with recorded coughs, not from a tuned production system.
+Limits: the notes work for agents on OpenAI Realtime only; Gemini Live and Nova Sonic do not report the start of a caller's turn, and Phonic cannot take a note out again (see "A fourth provider: Phonic"). The greeting agent runs on Gemini Live by default, so it gets no notes; with `AGENT_LEGS=classifier=openai_realtime` it gets them. The results come from simulated calls with recorded coughs, not from a tuned production system.
 
 `SAVE_CALLER_AUDIO=true` writes the caller's side of each call to `data/caller_audio/` as a WAV file, so you can hear what the detector heard. It holds callers' voices: it is off by default and the folder is git-ignored.
 
@@ -288,9 +288,8 @@ fastest; `semantic` lets the model judge when the caller is done, which costs ti
 
 ### Two voice providers on one call (M3)
 
-`DEFAULT_LEGS` in `agents/specs.py` sets the voice leg of each agent: `classifier` runs on Phonic (see
-"A fourth provider: Phonic"), `profile` and `consultant` on Gemini Live, the others on OpenAI Realtime.
-Without `GOOGLE_API_KEY` and `PHONIC_API_KEY` every agent runs on OpenAI.
+`DEFAULT_LEGS` in `agents/specs.py` sets the voice leg of each agent: `classifier`, `profile` and `consultant`
+run on Gemini Live, the others on OpenAI Realtime. Without `GOOGLE_API_KEY` every agent runs on OpenAI.
 All services share one conversation context, so the new agent knows what the caller said to the old one.
 
 What differs between the providers is in `voice/legs.py`:
@@ -327,14 +326,15 @@ How this leg differs from the other two:
 
 ### A fourth provider: Phonic
 
-The `classifier` agent, which greets every caller, runs on Phonic by default (`phonic` in `DEFAULT_LEGS`).
 Phonic is a speech-to-speech model behind one WebSocket. Pipecat has no Phonic service, so
-`voice/phonic_leg.py` is one. Without `PHONIC_API_KEY` the classifier runs on OpenAI, as before.
+`voice/phonic_leg.py` is one. No agent runs on Phonic by default. The `classifier` agent, which greets
+every caller, ran on it on the live line on 2026-11-24 and worked. It moved to Gemini Live the same day
+for the price: Phonic bills $0.07 for each open minute, about ten times the other legs.
 
 1. Put the key in `.env` as `PHONIC_API_KEY`. It starts with `ph_`.
 2. Run `uv run check-phonic`. It opens one short conversation at the phone's 8 kHz and prints the times
    and what Phonic said, or the error.
-3. To move another agent: `AGENT_LEGS=feedback=phonic`. To move the classifier back: `AGENT_LEGS=classifier=openai_realtime`.
+3. Move an agent to Phonic: `AGENT_LEGS=classifier=phonic`. An agent set to Phonic with no key runs on another provider.
 
 How this leg differs from the others:
 
@@ -368,7 +368,8 @@ Measured on 2026-11-24 with model `phonic-1` (the model Phonic reported) at 8 kH
   0.76 s after the request and its first audio came 0.57 s later. It said the exact intro line, then the
   caller's name and business from the call so far.
 
-Status: unit tests with a fake Phonic socket, and the live sessions above. It has not carried a phone call yet.
+Status: unit tests with a fake Phonic socket, the live sessions above, and one real phone call on 2026-11-24.
+On that call the greeting agent held Phonic for 0.6 minutes (about 4 cents), and the median answer time was 1.3 s.
 
 ### Caller memory and number lookup
 

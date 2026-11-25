@@ -28,7 +28,9 @@ LEG_PLATFORMS: dict[str, str] = {
 }
 
 DEFAULT_LEGS: dict[str, str] = {
-    "classifier": "phonic",  # falls back to openai_realtime on a server with no Phonic key
+    # Gemini Live since 2026-11-24. Phonic greeted callers for one evening: it worked, and at $0.07 for each
+    # open minute it cost about ten times the other legs (the owner's figure).
+    "classifier": "gemini_live",
     "profile": "gemini_live",
     "tour": "openai_realtime",
     "consultant": "gemini_live",
@@ -89,6 +91,9 @@ VOICE_LEVELS_DBFS: dict[str, float] = {
     "ash": -24.5,
     "Charon": -15.0,
     "Puck": -20.4,
+    # Measured 2026-11-24 on 6.3 s of speech from Gemini Live, brought to 8 kHz, before the phone's PCMU.
+    # The same method gave Charon -16.4 and Puck -18.7, so it is within 2 dB of the phone-side figures.
+    "Aoede": -17.4,
     # Phonic, measured 2026-11-24 on 1.9 s of speech in Phonic's own 8 kHz PCM, before the phone's PCMU.
     "sabrina": -19.5,
 }

@@ -140,7 +140,7 @@ async def run(settings: Settings) -> int:
         f"It works. Ready after {ready:.1f} s; first audio {first_audio:.2f} s after the request."
         f" Model: {model or 'not reported'}. Phonic said: {said or '(no text came with the audio)'}"
     )
-    print("The classifier agent runs on Phonic by default. To move another agent, set for example AGENT_LEGS=feedback=phonic in .env.")
+    print("No agent runs on Phonic by default. To move an agent to it, set for example AGENT_LEGS=classifier=phonic in .env.")
     return 0
 
 
