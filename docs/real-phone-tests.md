@@ -60,6 +60,14 @@ Pass:
 - Each handoff starts with the intro line, in a different voice.
 - No silence longer than about 3 seconds.
 - The log has no `ERROR` line for this call.
+- The greeting from a recording, when `voice/greeting.wav` is installed (`uv run record-greeting`):
+  - The log has `classifier: the greeting plays from the stored recording`, and no line
+    `no stored greeting (...)`. If that line is there, it names what does not match.
+  - The greeting starts as soon as the call connects, and you hear it only once.
+  - The agent says nothing more until you speak. Then it answers your name as on a normal call.
+  - Call once more and say your name over the start of the greeting. The greeting stops, and the
+    agent answers you. The log has `the caller spoke over the stored greeting; it stops`.
+  - In LangSmith the first agent turn shows the greeting words.
 
 Then check LangSmith, project `voice-business-card`, tab **Threads**:
 

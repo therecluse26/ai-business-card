@@ -61,7 +61,6 @@ from ai_call_center.agents.specs import (
     Welcome,
     companies_phrase,
     greeting_tip,
-    greeting_words,
     load_profile,
     web_address,
 )
@@ -136,10 +135,12 @@ from ai_call_center.voice.legs import (
     ensure_connected,
     first_answer_needs_run_frame,
     forget_note,
+    plays_recordings,
     ready_legs,
     replay_and_respond,
     reset_session,
     resolve_spec,
+    seed_without_answer,
     self_heals,
     session_clock,
     tell_now,
@@ -149,6 +150,8 @@ from ai_call_center.voice.phone_messages import CALL_SO_FAR_MARK, CONNECT_MARK, 
 from ai_call_center.voice.respell import Respelling
 from ai_call_center.voice.spoken_tool import SpokenToolWatch
 from ai_call_center.voice.stats import CallStats
+from ai_call_center.voice.stored_greeting import StoredGreeting, greeting_target, spoken_greeting
+from ai_call_center.voice.stored_greeting import choose as choose_greeting
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 from ai_call_center.voice.voice_reader import CallerVoiceReader, FrustrationNote, default_voice_model
 from ai_call_center.writing import default_library, search_result
@@ -166,6 +169,7 @@ CALLER_WORDS_WAIT_SECS = 0.5
 SPOKEN_TOOL_WAIT_SECS = 0.4  # after the agent said a tool's name: how long the server waits for the real tool call
 SPOKE_WAIT_SECS = 0.5  # how long a handoff waits for a sign that the caller spoke to the agent, before it is refused
 OPENING_QUIET_SECS = 3.0  # the longest time the caller's audio is replaced by silence while the greeting has not started
+OPENING_CLICK_SECS = 0.4  # a stored greeting starts at once; the click of 2026-11-16 ended 230 ms after the stream opened
 TRANSCRIPT_WAIT_SECS = 0.8  # how long a transfer request waits for the transcript of the caller's last turn
 ANSWER_DEADLINE_SECS = 8.0  # an agent asked to speak (greeting, handoff) that stays silent this long has failed
 RECOVERIES_PER_SERVICE = 2
@@ -395,12 +399,16 @@ class OpeningQuiet(FrameProcessor):
     170 ms, 60 ms after the stream opened, and a second greeting right after the first.
     Before the greeting starts, the caller has nothing to answer. After it starts, the caller's
     audio passes, so the caller can interrupt. `limit_secs` opens the audio if no greeting comes.
+    `click_secs`: the audio stays silent this long after it began, also when the greeting has
+    started. For a stored greeting, which starts before such a click is over.
     """
 
-    def __init__(self, limit_secs: float = OPENING_QUIET_SECS) -> None:
+    def __init__(self, limit_secs: float = OPENING_QUIET_SECS, click_secs: float = 0.0) -> None:
         super().__init__()
         self._limit = limit_secs
+        self._click = click_secs
         self._first_audio_at: float | None = None
+        self._greeting_started = False
         self.open = False
 
     def screen(self, frame: Frame) -> None:
@@ -408,12 +416,17 @@ class OpeningQuiet(FrameProcessor):
         if self.open:
             return
         if isinstance(frame, BotStartedSpeakingFrame):
-            self.open = True
-            log.info("caller audio opened: the greeting started")
+            self._greeting_started = True
+            if not self._click:
+                self.open = True
+                log.info("caller audio opened: the greeting started")
         elif isinstance(frame, InputAudioRawFrame):
             now = time.monotonic()
             self._first_audio_at = self._first_audio_at or now
-            if now - self._first_audio_at >= self._limit:
+            if self._greeting_started and now - self._first_audio_at >= self._click:
+                self.open = True
+                log.info("caller audio opened: the greeting plays, and %.1f s for a click at the start are over", self._click)
+            elif now - self._first_audio_at >= self._limit:
                 self.open = True
                 log.warning("caller audio opened after %.1f s with no greeting", self._limit)
             else:
@@ -744,7 +757,7 @@ class CallSession:
             store.reopen_call(self.call_control_id)
         # Every caller hears the same greeting, which asks who they are. No agent knows if the number
         # called before: identify_caller checks the name in code and gives the notes only on a match.
-        hello = self.respell.spoken(greeting_words(self.settings.owner_name, self.settings.brand_name))
+        hello = spoken_greeting(self.settings, self.respell)
         # Number lookup started at call.initiated; take the result if it is ready.
         info = await self.lookups.get(caller_number) if self.lookups else None
         lookup_block = lookup_text(info) if info is not None else ""
@@ -837,6 +850,12 @@ class CallSession:
         else:
             first_messages = [{"role": "developer", "content": connect_message(hello)}]
         context = LLMContext(messages=first_messages, tools=tools_for_agent(entry, schemas))
+        # A new call opens with the stored recording of the greeting, when one was made for exactly these
+        # words, this leg and this voice (voice/stored_greeting.py). In every other case the model says it.
+        target = greeting_target(self.settings, entry, self.respell)
+        recorded, why = choose_greeting(enabled=self.settings.stored_greeting, fresh=resume is None, leg_plays=plays_recordings(legs[entry_agent].service), **target)
+        if recorded is None:
+            log.info("call %s: no stored greeting (%s); the %s agent's model speaks first", self.call_control_id, why, entry_agent)
         caller_words = CallerWords()
         # The transcript is for code and for people (the transfer check, the lead email): it has the written words.
         ctx.transcript = lambda: [self.respell.written(line) for line in caller_words.with_newest(transcript_lines(context.messages))]
@@ -1060,7 +1079,7 @@ class CallSession:
         # The voice reader hears each caller turn. It is off for a caller who asked to be forgotten.
         voice_model = default_voice_model(self.settings)
         voice_reader = CallerVoiceReader(voice_model, on_voice_reading, active=lambda: not ctx.forgotten) if voice_model else None
-        processors = [transport.input(), *([caller_audio] if caller_audio else []), *([voice_reader] if voice_reader else []), OpeningQuiet(), user_aggregator, caller_words, watchdog, switcher, CallerSoundWatch(on_sound, drop_sound_note), SpokenToolWatch(self.specs, on_spoken_tool)]
+        processors = [transport.input(), *([caller_audio] if caller_audio else []), *([voice_reader] if voice_reader else []), OpeningQuiet(click_secs=OPENING_CLICK_SECS if recorded else 0.0), user_aggregator, caller_words, watchdog, switcher, CallerSoundWatch(on_sound, drop_sound_note), SpokenToolWatch(self.specs, on_spoken_tool)]
         if self.settings.voice_level_dbfs:
             # Every voice at one loudness, so a handoff does not sound like a volume change.
             voice_by_service = {id(vl.service): self.specs[name].voice or "" for name, vl in legs.items()}
@@ -1303,8 +1322,10 @@ class CallSession:
             timers.append(asyncio.create_task(enforce_time_limit()))
             timers.append(asyncio.create_task(watch_services()))
             log.info("call %s connected after %.0f ms; agent=%s leg=%s voice=%s", self.call_control_id, (time.monotonic() - started) * 1000, entry.name, legs[entry_agent].leg, entry.voice)
-            await _answer(legs[entry_agent], context, worker)
-            expect_speech(legs[entry_agent])
+            # The recording plays at once; it waits for no session. If it cannot start, the model greets.
+            if recorded is None or not await _greet_from_recording(legs[entry_agent], context, recorded, target["words"]):
+                await _answer(legs[entry_agent], context, worker)
+            expect_speech(legs[entry_agent])  # with a recording too: no audio in time means the greeting failed
 
         @transport.event_handler("on_client_disconnected")
         async def on_client_disconnected(_transport, _client) -> None:
@@ -1489,6 +1510,32 @@ async def _answer(vl: VoiceLeg, context: LLMContext, worker: PipelineWorker) -> 
         # Its server-side session is fresh (never used, or reset when we left it): replay and answer.
         await replay_and_respond(vl.service, context)
     vl.used = True
+
+
+async def _greet_from_recording(vl: VoiceLeg, context: LLMContext, recorded: StoredGreeting, words: str) -> bool:
+    """Play the stored greeting as the agent's first answer. False when it could not start; then
+    nothing was played and nothing changed, and the model says the greeting.
+
+    After it, the shared context is as after a greeting from the model: no order to greet (it is
+    retired, as at a handoff), and the greeting as the agent's own message, in the spoken words that
+    the model was asked to say. The message goes in now, not when the audio has played, because the
+    agent's session is seeded with the context now: the caller can speak during the greeting, and the
+    agent must know what it said. A caller who talks over the recording stops it; the context keeps
+    the whole greeting then. From the model, the shared context keeps about the words that had played
+    (the output transport passes each piece of Gemini's transcript on with its audio), and Gemini's own
+    session keeps what it had made by then, which runs ahead of the audio.
+    """
+    try:
+        await vl.service.play_recording(recorded.audio, recorded.sample_rate, words)
+    except Exception:
+        log.exception("%s: the stored greeting could not start; the model says it", vl.agent)
+        return False
+    log.info("%s: the greeting plays from the stored recording (%.1f s)", vl.agent, recorded.seconds)
+    retire_connect_message(context.messages)
+    context.add_message({"role": "assistant", "content": words})
+    await seed_without_answer(vl.service, context)
+    vl.used = True
+    return True
 
 
 async def _reset_in_background(vl: VoiceLeg) -> None:

@@ -20,10 +20,20 @@ import asyncio
 import dataclasses
 import json
 import logging
+import time
 
-from google.genai.types import EndSensitivity, StartSensitivity
+from google.genai.types import EndSensitivity, LiveServerContent, LiveServerMessage, StartSensitivity
 from pipecat.adapters.llm.schemas.tools_schema import ToolsSchema
-from pipecat.frames.frames import FunctionCallResultFrame, LLMFullResponseEndFrame, TTSStoppedFrame
+from pipecat.frames.frames import (
+    FunctionCallResultFrame,
+    LLMFullResponseEndFrame,
+    LLMFullResponseStartFrame,
+    TextType,
+    TTSAudioRawFrame,
+    TTSStartedFrame,
+    TTSStoppedFrame,
+    TTSTextFrame,
+)
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameProcessorSetup
@@ -167,13 +177,84 @@ def gemini_vad(settings: Settings) -> GeminiVADParams:
     )
 
 
-class HandoffGeminiLive(GeminiLiveLLMService):
-    """Gemini Live, with one change: a tool result marked `run_llm=False` is not sent to Gemini.
+RECORDING_CHUNK_SECS = 0.04  # the size of the audio frames of a stored recording, about the size Gemini sends
+RECORDING_SLACK_SECS = 0.3  # a recording still counts as playing this long after its pushed length; the phone starts it a moment later
 
-    Our handoff tools return such a result, because the next agent answers, not this one. Gemini
-    answers every tool result it receives, so the old agent would speak the new agent's opening
-    line in the old voice. Without the result the model waits, silent, until we reset its session.
+
+class HandoffGeminiLive(GeminiLiveLLMService):
+    """Gemini Live, with two changes.
+
+    1. A tool result marked `run_llm=False` is not sent to Gemini. Our handoff tools return such a
+       result, because the next agent answers, not this one. Gemini answers every tool result it
+       receives, so the old agent would speak the new agent's opening line in the old voice.
+       Without the result the model waits, silent, until we reset its session.
+    2. It can play a stored recording as its own turn (`play_recording`, for the stored greeting),
+       and its session can be seeded with the call so far without an answer (`seed_without_answer`).
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.quiet_seed = False  # the next seed of a new session asks for no answer; see seed_without_answer
+        self._recording_ends = 0.0  # monotonic time when a stored recording that plays now ends; 0.0 when none plays
+
+    async def play_recording(self, audio: bytes, sample_rate: int, text: str) -> None:
+        """Push a recording down the pipeline as this agent's turn, in the frames of a model answer.
+
+        So the output transport resamples it for the phone, the voice leveler levels it, an
+        interruption stops it, the trace shows `text` as the agent's answer, and the watchdog and the
+        call figures see the agent speak. `text` does not go into the shared context from here: the
+        caller does that (see `_greet_from_recording` in call_session.py), because the session must
+        be seeded with it before the recording has played out.
+        """
+        step = max(int(sample_rate * RECORDING_CHUNK_SECS), 1) * 2
+        chunks = [audio[at : at + step] for at in range(0, len(audio) - len(audio) % 2, step)]
+        if not chunks or sample_rate <= 0:
+            raise ValueError("the recording has no audio")
+        words = TTSTextFrame(text, text_type=TextType.SENTENCE)
+        words.append_to_context = False
+        self._recording_ends = time.monotonic() + len(audio) / 2 / sample_rate + RECORDING_SLACK_SECS
+        await self._set_bot_is_responding(True)
+        await self.push_frame(TTSStartedFrame())
+        await self.push_frame(LLMFullResponseStartFrame())
+        await self.push_frame(words)
+        for chunk in chunks:
+            await self.push_frame(TTSAudioRawFrame(audio=chunk, sample_rate=sample_rate, num_channels=1))
+        # End the turn as a model turn ends: TTSStoppedFrame and LLMFullResponseEndFrame, and the
+        # trace's "llm_response" span with the words as its output.
+        self._llm_output_buffer = text
+        await self._handle_msg_turn_complete(LiveServerMessage(server_content=LiveServerContent(turn_complete=True)))
+
+    async def _handle_msg_input_transcription(self, message: LiveServerMessage) -> None:
+        # Gemini reports "interrupted" only when the caller talks over its own answer. It does not
+        # know of the recording, so the caller's first words while it plays stop it here.
+        content = message.server_content
+        heard = content.input_transcription.text if content and content.input_transcription else ""
+        if heard and heard.strip() and time.monotonic() < self._recording_ends:
+            self._recording_ends = 0.0
+            log.info("%s: the caller spoke over the stored greeting; it stops", self)
+            await self.broadcast_interruption()
+        await super()._handle_msg_input_transcription(message)
+
+    async def _handle_interruption(self) -> None:
+        self._recording_ends = 0.0
+        await super()._handle_interruption()
+
+    async def _create_initial_response(self, for_reconnect: bool = False) -> None:
+        if not self.quiet_seed or for_reconnect:
+            await super()._create_initial_response(for_reconnect)
+            return
+        # Pipecat answers the seed of a first context unless `_inference_on_context_initialization`
+        # is off. Off only for this seed: a later replay must answer. If the session is still
+        # opening, Pipecat calls this again when it is ready; the flag stays until a seed is sent.
+        sends = self._session is not None and not self._disconnecting
+        answers = self._inference_on_context_initialization
+        self._inference_on_context_initialization = False
+        try:
+            await super()._create_initial_response()
+        finally:
+            self._inference_on_context_initialization = answers
+        if sends:
+            self.quiet_seed = False
 
     async def _handle_function_call_result(self, frame: FunctionCallResultFrame) -> None:
         if frame.properties is not None and frame.properties.run_llm is False:
@@ -468,6 +549,8 @@ async def reset_session(service: LLMService) -> None:
         await service._disconnect()  # noqa: SLF001
         service._session_resumption_handle = None  # noqa: SLF001 - a resumed session would bring the old conversation back
         service._context = None  # noqa: SLF001 - so the new session is not seeded until the agent is active again
+        if isinstance(service, HandoffGeminiLive):
+            service.quiet_seed = False  # the next seed is a replay, which must answer
         await service._connect()  # noqa: SLF001
     elif isinstance(service, AWSNovaSonicLLMService):
         await service._disconnect()  # noqa: SLF001 - also drops its copy of the context; `ensure_connected` opens a new stream later
@@ -491,6 +574,8 @@ async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
         await service._create_response()  # noqa: SLF001
     elif isinstance(service, GeminiLiveLLMService):
         await adopt_context(service, context)
+        if isinstance(service, HandoffGeminiLive):
+            service.quiet_seed = False  # this replay asks for an answer
         await service._create_initial_response()  # noqa: SLF001
     elif isinstance(service, AWSNovaSonicLLMService):
         # Nova sets up its session from the first context it sees: tools, instructions, the
@@ -504,3 +589,26 @@ async def replay_and_respond(service: LLMService, context: LLMContext) -> None:
         await service.replay(context)
     else:  # pragma: no cover
         raise NotImplementedError(f"replay for {type(service).__name__}")
+
+
+def plays_recordings(service: LLMService) -> bool:
+    """True when the service can play a stored recording as its own turn and be seeded without an
+    answer. Gemini only: the stored greeting is a Gemini take (`record-greeting`)."""
+    return isinstance(service, HandoffGeminiLive)
+
+
+async def seed_without_answer(service: LLMService, context: LLMContext) -> None:
+    """Give the service's session the call so far, and ask for no answer: it speaks after the caller does.
+
+    For a played recording. Pipecat's Gemini seed is the conversation as client content; with the
+    turn not complete, the model takes it in and waits for the caller's audio. That is the use the
+    google-genai docs give for `turn_complete=False`: context before a realtime conversation. Pipecat
+    seeds a reconnect this way too. If the session is still opening, the seed goes when it is ready.
+    The service holds the shared context from here, so a later context frame from the pipeline is
+    an update: it neither seeds the session again nor reconnects it.
+    """
+    if not isinstance(service, HandoffGeminiLive):
+        raise NotImplementedError(f"seed without an answer for {type(service).__name__}")
+    await adopt_context(service, context)
+    service.quiet_seed = True
+    await service._create_initial_response()  # noqa: SLF001
