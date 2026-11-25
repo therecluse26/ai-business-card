@@ -42,7 +42,7 @@ PROMPT = re.compile(rb"caller \(\w+\)> $")
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 TURN_SECS = 180
 # A text call runs on this model, not on LLM_MODEL of `.env`. The live line runs small realtime voice models
-# (OPENAI_REALTIME_MODEL, NOVA_SONIC_MODEL, GEMINI_LIVE_MODEL in config.py). A large text model follows a prompt
+# (OPENAI_REALTIME_MODEL, NOVA_SONIC_MODEL, GEMINI_LIVE_MODEL, PHONIC_MODEL in config.py). A large text model follows a prompt
 # that a small voice model does not, so a pass on a large model proves less about the line. No vendor publishes
 # a text model that is equal to its realtime model; this is the nearest small model that the repo has a key for.
 PROOF_MODEL = "anthropic:claude-haiku-5-5"

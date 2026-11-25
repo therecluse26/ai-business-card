@@ -1,6 +1,6 @@
 """Voice-mode tool schemas mirror the LangGraph tools, agent by agent."""
 
-from ai_call_center.agents.specs import DEFAULT_VOICES
+from ai_call_center.agents.specs import DEFAULT_LEGS, default_voice
 from ai_call_center.graph.build import all_tools
 from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
@@ -44,17 +44,17 @@ def test_every_agent_can_reach_the_feedback_agent_and_it_can_hand_back(specs):
 def test_each_agent_has_its_own_voice(specs):
     voices = [spec.voice for spec in specs.values()]
     assert len(set(voices)) == len(voices)
-    assert specs["classifier"].voice == DEFAULT_VOICES["classifier"]
+    assert specs["classifier"].voice == default_voice("classifier", DEFAULT_LEGS["classifier"]) == "sabrina"
 
 
 def test_the_feedback_agent_has_a_voice_that_no_other_agent_on_its_leg_uses():
     from ai_call_center.agents.specs import DEFAULT_LEGS, LEG_VOICES
 
     # Nova has three English voices, so agents share them there. The other legs have a voice for each agent.
-    for leg in ("openai_realtime", "gemini_live"):
+    for leg in ("openai_realtime", "gemini_live", "phonic"):
         others = {agent: voice for agent, voice in LEG_VOICES[leg].items() if agent != "feedback"}
         assert LEG_VOICES[leg]["feedback"] not in others.values()
-    assert set(LEG_VOICES["nova_sonic"]) == set(DEFAULT_LEGS)  # a move to Nova still finds a voice
+    assert set(LEG_VOICES["nova_sonic"]) == set(LEG_VOICES["phonic"]) == set(DEFAULT_LEGS)  # a move to Nova or Phonic still finds a voice
 
 
 # --- a handoff: the agent that gets the call answers the caller ---

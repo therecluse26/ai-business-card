@@ -16,6 +16,7 @@ LEGS: dict[str, str] = {
     "openai_realtime": "OpenAI gpt-realtime-2.1-mini, a speech-to-speech model",
     "gemini_live": "Google gemini-3.8-live, a speech-to-speech model",
     "nova_sonic": "Amazon Nova 2.5 Sonic, a speech-to-speech model",
+    "phonic": "Phonic phonic-1, a speech-to-speech model",  # the model name Phonic reported on 2026-11-24
 }
 
 # Short platform names, for the introduction line an agent says after a handoff.
@@ -23,10 +24,11 @@ LEG_PLATFORMS: dict[str, str] = {
     "openai_realtime": "OpenAI",
     "gemini_live": "Google Gemini",
     "nova_sonic": "Amazon Nova",
+    "phonic": "Phonic",
 }
 
 DEFAULT_LEGS: dict[str, str] = {
-    "classifier": "openai_realtime",
+    "classifier": "phonic",  # falls back to openai_realtime on a server with no Phonic key
     "profile": "gemini_live",
     "tour": "openai_realtime",
     "consultant": "gemini_live",
@@ -65,6 +67,15 @@ LEG_VOICES: dict[str, dict[str, str]] = {
         "contact": "amy",  # female, British
         "feedback": "amy",  # a caller reaches it mostly from the classifier, which is tiffany
     },
+    # Phonic's preset voices, from its voice list on 2026-11-24. The genders follow the same pattern.
+    "phonic": {
+        "classifier": "sabrina",  # female
+        "profile": "landon",  # male
+        "tour": "grant",  # male
+        "consultant": "nolan",  # male
+        "contact": "eleanor",  # female
+        "feedback": "virginia",  # female
+    },
 }
 DEFAULT_VOICES: dict[str, str] = LEG_VOICES["openai_realtime"]
 
@@ -78,6 +89,8 @@ VOICE_LEVELS_DBFS: dict[str, float] = {
     "ash": -24.5,
     "Charon": -15.0,
     "Puck": -20.4,
+    # Phonic, measured 2026-11-24 on 1.9 s of speech in Phonic's own 8 kHz PCM, before the phone's PCMU.
+    "sabrina": -19.5,
 }
 
 
@@ -137,6 +150,7 @@ LEG_COMPANIES: dict[str, str] = {
     "openai_realtime": "OpenAI",
     "gemini_live": "Google",
     "nova_sonic": "Amazon",
+    "phonic": "Phonic",
 }
 
 NAME_QUESTION = "I remember callers, so first: who am I speaking with?"

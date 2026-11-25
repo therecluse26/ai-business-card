@@ -3,7 +3,7 @@
 from pipecat.metrics.metrics import LLMTokenUsage
 
 from ai_call_center.analytics import Answer
-from ai_call_center.voice.stats import PRICES, AnswerTimer, CallStats, Price, Usage
+from ai_call_center.voice.stats import PER_MINUTE, PRICES, AnswerTimer, CallStats, Price, Usage
 
 LOUD, QUIET = 0.1, 0.0001
 
@@ -106,4 +106,32 @@ def test_a_small_cost_is_said_as_under_one_cent_and_an_unknown_provider_is_named
 def test_every_built_voice_leg_has_a_price():
     from ai_call_center.voice.legs import LEG_BUILDERS
 
-    assert set(LEG_BUILDERS) <= set(PRICES)
+    assert set(LEG_BUILDERS) <= set(PRICES) | set(PER_MINUTE)
+
+
+def test_phonic_minutes_are_in_the_cost_though_phonic_reports_no_tokens():
+    """Phonic bills by the minute and reports no tokens. Its minutes must not drop out of the total."""
+    held = {"secs": 60.0}
+    stats = CallStats()
+    stats.bind({}, lambda: "phonic", lambda: "classifier", [("phonic", lambda: held["secs"])])
+
+    dollars, unknown = stats.cost()
+    assert unknown == [] and abs(dollars - 1.0 * PER_MINUTE["phonic"]) < 1e-9
+    text = stats.describe()
+    assert "Tokens: no usage has been reported yet. Phonic bills by the minute, not by the token: 1.0 minutes so far." in text
+    assert "about 7 cents" in text
+
+    # A new pipeline (a restarted media stream) brings new services; the minutes of the old ones stay.
+    stats.add_usage("openai_realtime", LLMTokenUsage(prompt_tokens=20_000, completion_tokens=2_000, total_tokens=22_000, input_audio_tokens=500, output_audio_tokens=1_500))
+    stats.bind({}, lambda: "openai_realtime", lambda: "tour", [("phonic", lambda: 30.0)])
+    assert stats.seconds_held() == {"phonic": 90.0}
+    dollars, _ = stats.cost()
+    tokens = (19_500 * 0.60 + 500 * 10 + 500 * 2.40 + 1_500 * 20) / 1e6
+    assert abs(dollars - (tokens + 1.5 * PER_MINUTE["phonic"])) < 1e-9
+    assert "Tokens so far: 20,000 in and 2,000 out. Phonic bills by the minute" in stats.describe()
+
+
+def test_a_service_that_held_no_session_adds_nothing():
+    stats = CallStats()
+    stats.bind({}, lambda: "openai_realtime", None, [("phonic", lambda: 0.0)])
+    assert stats.seconds_held() == {} and "no usage has been reported yet" in stats.describe() and "minute" not in stats.describe()

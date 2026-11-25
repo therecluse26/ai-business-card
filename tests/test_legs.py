@@ -13,7 +13,7 @@ from ai_call_center.voice.tools import tools_for_agent, voice_tool_schemas
 
 def settings(**over) -> Settings:
     # Every provider key is set here, so a real key in the developer's environment changes no test.
-    base = {"openai_api_key": "sk-test", "google_api_key": "g-test", "nova_aws_access_key_id": "", "nova_aws_secret_access_key": ""}
+    base = {"openai_api_key": "sk-test", "google_api_key": "g-test", "nova_aws_access_key_id": "", "nova_aws_secret_access_key": "", "phonic_api_key": ""}
     return Settings(_env_file=None, **{**base, **over})
 
 
@@ -107,8 +107,8 @@ async def test_an_openai_agent_is_not_sent_results_of_tool_calls_other_agents_ma
 
 def test_an_agent_moves_to_the_other_provider_when_its_own_is_marked_down(specs):
     down_openai = frozenset({"openai_realtime"})
-    spec = resolve_spec(specs["classifier"], settings(), down_openai)
-    assert (spec.leg, spec.voice) == ("gemini_live", LEG_VOICES["gemini_live"]["classifier"])
+    spec = resolve_spec(specs["tour"], settings(), down_openai)
+    assert (spec.leg, spec.voice) == ("gemini_live", LEG_VOICES["gemini_live"]["tour"])
     assert resolve_spec(specs["profile"], settings(), down_openai) is specs["profile"]  # already on Gemini
 
     spec = resolve_spec(specs["profile"], settings(), frozenset({"gemini_live"}))
@@ -116,8 +116,8 @@ def test_an_agent_moves_to_the_other_provider_when_its_own_is_marked_down(specs)
 
 
 def test_a_provider_without_a_key_is_never_the_fallback(specs):
-    spec = resolve_spec(specs["classifier"], settings(google_api_key=""), frozenset({"openai_realtime"}))
-    assert spec is specs["classifier"]  # nothing else can run; the configured leg is tried anyway
+    spec = resolve_spec(specs["tour"], settings(google_api_key=""), frozenset({"openai_realtime"}))
+    assert spec is specs["tour"]  # nothing else can run; the configured leg is tried anyway
     assert ready_legs(settings(google_api_key=""), frozenset({"openai_realtime"})) == []
     assert ready_legs(settings(), frozenset({"gemini_live"})) == ["openai_realtime"]
 

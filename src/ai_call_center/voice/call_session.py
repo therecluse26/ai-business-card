@@ -141,9 +141,11 @@ from ai_call_center.voice.legs import (
     reset_session,
     resolve_spec,
     self_heals,
+    session_clock,
     tell_now,
 )
 from ai_call_center.voice.leveler import VoiceLeveler
+from ai_call_center.voice.phone_messages import CALL_SO_FAR_MARK, CONNECT_MARK, GREETING_DONE, connect_message  # noqa: F401 - importable from here too
 from ai_call_center.voice.respell import Respelling
 from ai_call_center.voice.spoken_tool import SpokenToolWatch
 from ai_call_center.voice.stats import CallStats
@@ -210,7 +212,7 @@ def call_so_far(lines: list[str] | None) -> str:
     if not recent:
         return ""
     return (
-        "\n\nThe call so far, word for word, newest last. The caller said this on this call, to you or to another agent:\n"
+        f"\n\n{CALL_SO_FAR_MARK}, newest last. The caller said this on this call, to you or to another agent:\n"
         + "\n".join(recent)
         + "\n\nYou know all of this. Use it in your answer. Never ask the caller to say it again, and never say that you cannot see the earlier conversation."
     )
@@ -241,16 +243,6 @@ def handoff_refused(agent: str, platform: str) -> str:
         f'If you have not said it yet, say: "Hi, I\'m the {agent} agent, running on {platform}." '
         "Then answer the caller's last words yourself. You may hand off after the caller speaks again."
     )
-
-
-def connect_message(words: str) -> str:
-    """The first message of a call, with the exact greeting. Left free, a voice model said only
-    "I'm the AI assistant on this line", and once spoke its own thoughts first. Measured 2026-11-16."""
-    return f'The call has just connected. Say exactly these words to the caller, and nothing before or after them: "{words}"'
-
-
-CONNECT_MARK = "The call has just connected. Say exactly these words"
-GREETING_DONE = "The call connected, and the greeting agent said the greeting."
 
 
 def retire_connect_message(messages: list) -> bool:
@@ -1084,7 +1076,8 @@ class CallSession:
         recording = recorder(self.call_control_id, sample_rate=TELNYX_SAMPLE_RATE, forgotten=lambda: ctx.forgotten) if hearing is not None and hearing.hears and not ctx.forgotten else None
         pipeline = Pipeline([*processors, transport.output(), *([recording] if recording else []), gate, AgentStoppedWatch(on_agent_stopped), assistant_aggregator])
 
-        stats.bind({vl.service.name: vl.leg for vl in legs.values()}, lambda: legs[state.active_agent].leg, lambda: state.active_agent)
+        clocks = [(vl.leg, clock) for vl in legs.values() if (clock := session_clock(vl.service)) is not None]
+        stats.bind({vl.service.name: vl.leg for vl in legs.values()}, lambda: legs[state.active_agent].leg, lambda: state.active_agent, clocks)
         worker = PipelineWorker(
             pipeline,
             params=PipelineParams(
