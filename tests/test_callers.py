@@ -129,7 +129,8 @@ def test_every_caller_hears_the_same_first_words():
     words = greeting_words(OWNER, "Digital Reformer")
     assert words == (
         f"Hi, you've reached Digital Reformer. I'm one of six AI agents {OWNER} built, and this call is a live sample of the work "
-        f"{OWNER.split()[0]} does for clients. I remember callers, so first: who am I speaking with?"
+        f"{OWNER.split()[0]} does for clients. This call is recorded and reviewed by AI to improve the line. "
+        "I remember callers, so first: who am I speaking with?"
     )
 
 
