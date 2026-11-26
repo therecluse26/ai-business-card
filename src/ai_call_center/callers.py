@@ -27,7 +27,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 
 from ai_call_center.leads import CallRecord, Lead, LeadStore, NumberInfo
-from ai_call_center.names import same_person
+from ai_call_center.names import clean_first_name, same_person
 
 log = logging.getLogger(__name__)
 
@@ -69,9 +69,9 @@ def recall(store: LeadStore, caller_number: str, name: str, *, exclude_call: str
     if only_calls is not None:
         leads = [lead for lead in leads if lead.call_control_id in only_calls]
         calls = [call for call in calls if call.call_control_id in only_calls]
-    own_leads = [lead for lead in leads if same_person(name, lead.name)]
+    own_leads = [lead for lead in leads if _same_name(name, lead.name)]
     lead_calls = {lead.call_control_id for lead in own_leads}
-    own_calls = [call for call in calls if same_person(name, call.caller_name) or (not call.caller_name.strip() and call.call_control_id in lead_calls)]
+    own_calls = [call for call in calls if _same_name(name, call.caller_name) or (not call.caller_name.strip() and call.call_control_id in lead_calls)]
     if not own_leads and not own_calls:
         return None
     lead = own_leads[0] if own_leads else None
@@ -88,6 +88,13 @@ def recall(store: LeadStore, caller_number: str, name: str, *, exclude_call: str
         leads=own_leads,
         calls=own_calls,
     )
+
+
+def _same_name(spoken: str, stored: str) -> bool:
+    """`same_person`, and when both names have a last name, the last names are the same too."""
+    a, b = spoken.split(), stored.split()
+    last = len(a) < 2 or len(b) < 2 or clean_first_name(a[-1]) == clean_first_name(b[-1])
+    return last and same_person(spoken, stored)
 
 
 RECENT_CALLS = 3  # call summaries that the history holds

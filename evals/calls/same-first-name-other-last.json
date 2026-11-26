@@ -1,0 +1,11 @@
+{
+  "id": "same-first-name-other-last",
+  "about": "The caller gives a first and last name. An earlier caller on the number had the same first name and another last name. The agent must not say they called before.",
+  "caller": [
+    "Hi, this is Teodora Quillfeather.",
+    "I have never called this line before. Who did you think I was?",
+    "I only want to know what kind of work he does.",
+    "Thanks, goodbye."
+  ],
+  "expect": {"visits": ["profile"], "outcome": "none"}
+}
