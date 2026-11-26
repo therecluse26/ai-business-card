@@ -2,7 +2,7 @@
 
 import json
 
-from ai_call_center.analytics import MESSAGE, NO_OUTCOME, TEXT, TRANSFER, VOICE, AnalyticsStore, Answer, CallAnalytics, call_day, forget_call, harness_version, public_report, record_call
+from ai_call_center.analytics import MEETING, MESSAGE, NO_OUTCOME, TEXT, TRANSFER, VOICE, AnalyticsStore, Answer, CallAnalytics, call_day, forget_call, harness_version, public_report, record_call
 from ai_call_center.grading import FAIL, NA, PASS, RULES, Score
 from ai_call_center.graph.tools import forget
 from ai_call_center.leads import LeadStore
@@ -90,7 +90,9 @@ def test_outcomes_are_totals_and_only_from_five_calls_on():
     calls = [a_call(f"call-{n}", outcome=TRANSFER if n == 0 else MESSAGE) for n in range(4)]
     assert public_report(calls)["totals"]["outcomes"] is None
     calls.append(a_call("call-4", outcome=NO_OUTCOME))
-    assert public_report(calls)["totals"]["outcomes"] == {"message": 3, "transfer": 1, "none": 1}
+    assert public_report(calls)["totals"]["outcomes"] == {"message": 3, "transfer": 1, "none": 1, "meeting": 0}
+    calls.append(a_call("call-5", outcome=MEETING))  # a call that booked a meeting on Cal.com (meetings.py)
+    assert public_report(calls)["totals"]["outcomes"]["meeting"] == 1
 
 
 def test_test_calls_are_left_out_unless_asked_for():

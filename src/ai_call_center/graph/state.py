@@ -16,6 +16,7 @@ from ai_call_center.crm import Crm
 from ai_call_center.decisions import Decider, Decision
 from ai_call_center.guardrails import TransferHours
 from ai_call_center.leads import LeadStore, NumberInfo
+from ai_call_center.meetings import MeetingOption, Scheduler
 from ai_call_center.notify import Notifier
 from ai_call_center.telephony import Telephony, Texter
 
@@ -80,3 +81,8 @@ class CallContext:
     # `feedback.report_feedback` run; the public text still comes from its model and its scrub. Never sent during the call.
     feedback_filed: list[tuple[str, str]] = field(default_factory=list)
     transfer_hours: TransferHours | None = None  # None = a live transfer is allowed at any time
+    scheduler: Scheduler | None = None  # Cal.com (meetings.py); None = no meeting can be booked
+    meeting_cap: int = 3  # bookings for the whole line in 24 hours (CALCOM_MAX_BOOKINGS_PER_DAY)
+    meeting_options: dict[str, MeetingOption] = field(default_factory=dict)  # option id -> the exact start that find_meeting_times offered
+    held_meeting: str = ""  # "<option id>|<email>" that was read back to the caller; it is booked only after their yes
+    meeting_lead_id: int = 0  # the lead record of the booking; a message after it is new

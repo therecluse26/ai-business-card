@@ -32,9 +32,11 @@ from ai_call_center.crm import crm_configured
 from ai_call_center.graph.handoffs import handoff_tool_name, make_handoff_tool
 from ai_call_center.graph.state import CallContext, CallState
 from ai_call_center.graph.tools import (
+    book_meeting,
     crm_lookup,
     end_call,
     file_feedback,
+    find_meeting_times,
     forget_caller,
     get_call_stats,
     identify_caller,
@@ -45,6 +47,7 @@ from ai_call_center.graph.tools import (
     search_writing,
     text_portfolio_link,
 )
+from ai_call_center.meetings import calcom_configured
 from ai_call_center.tracing import tracing_enabled
 from ai_call_center.writing import about_line, default_library
 
@@ -52,7 +55,7 @@ ENTRY_AGENT = "classifier"
 
 
 def all_tools(specs: dict[str, AgentSpec]) -> dict[str, BaseTool]:
-    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, search_writing, text_portfolio_link, identify_caller, verify_passphrase, set_passphrase, file_feedback, crm_lookup, forget_caller, end_call]
+    tools: list[BaseTool] = [save_lead, request_owner_transfer, get_call_stats, search_writing, text_portfolio_link, identify_caller, verify_passphrase, set_passphrase, file_feedback, crm_lookup, find_meeting_times, book_meeting, forget_caller, end_call]
     tools += [make_handoff_tool(spec) for spec in specs.values()]
     return {t.name: t for t in tools}
 
@@ -130,7 +133,8 @@ def build_graph(
     )
 
 
-def default_specs() -> dict[str, AgentSpec]:
+def default_specs(*, booking: bool | None = None) -> dict[str, AgentSpec]:
+    """The agents as the settings make them. `booking` False keeps the meeting tools out even with a Cal.com key (`uv run chat` without `--book`)."""
     settings = get_settings()
     return build_specs(
         load_profile(settings.profile_path),
@@ -144,6 +148,7 @@ def default_specs() -> dict[str, AgentSpec]:
         legs=parse_agent_legs(settings.agent_legs),
         tracing=tracing_enabled(settings),
         crm=crm_configured(settings),
+        booking=calcom_configured(settings) and booking is not False,
     )
 
 

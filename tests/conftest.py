@@ -16,6 +16,8 @@ os.environ["IMPROVE_GITHUB_TOKEN"] = ""
 os.environ["GRADER_DECISION_MODEL"] = ""  # no test sends a call to the decision grader
 # No test writes to the owner's CRM or reads it. A test that needs a CRM passes a fake one in the call context.
 os.environ["CRM_MCP_URL"] = ""
+# No test reads or books on Cal.com: a booking emails a real invitation. A test that needs Cal.com passes a fake scheduler.
+os.environ["CALCOM_API_KEY"] = ""
 # No test opens a Phonic conversation: Phonic bills by the minute. A test of the Phonic leg passes a fake socket.
 os.environ["PHONIC_API_KEY"] = ""
 # The fix job runs these tests with its own request in the environment (improve.yml: FIX_ISSUE, FIX_RULE, ...).

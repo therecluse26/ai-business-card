@@ -1548,6 +1548,44 @@ waits. What the CRM already has stays with the owner, as the lead email does. A 
 
 Measured on 2026-11-23 from the laptop: 117 to 157 ms for each request, 296 ms for the first one.
 
+### A meeting with the owner on Cal.com (off by default)
+
+With `CALCOM_API_KEY` set, the contact agent books a 15-minute video meeting with the owner during the call
+(`meetings.py`). Without it, no agent says anything about a meeting.
+
+- **Code reads the calendar.** `find_meeting_times` asks Cal.com for the free times of the next 7 days and
+  gives the agent at most three, on different days where it can, in the words to say ("Friday, November 27,
+  at 10 AM Eastern"). Each has an option id. The agent sends `book_meeting` the id, never a time, and code
+  maps the id back to the exact start. The agent says "Let me check <owner>'s calendar." before the read.
+- **A yes before the booking**, as for a message. A booking makes Cal.com email an invitation. The first
+  `book_meeting` call books nothing: it gives the agent the read-back, the time and the email address
+  letter by letter. Only a second call with the same time and address, after the caller's yes, books.
+  Code checks the address (a strict, simple form) and turns "ada at example dot com" into its written form.
+- **Limits.** One booking for each call, and `CALCOM_MAX_BOOKINGS_PER_DAY` (3) for the whole line in
+  24 hours, counted in the table `meetings`. Each booking emails an address that a caller gave, so the
+  limits bound what a bad actor can send to a stranger. A call from `OWNER_PHONE` counts too, and its notes
+  say it is a test.
+- **When it cannot book** (no key, no answer, a limit, a time that was taken) the agent says so in one
+  sentence and offers to take a message. It never names a time that code did not give. When Cal.com gives
+  no answer to the booking itself, the call does not try again: the booking may exist.
+- **The owner** gets a lead email "... booked a meeting with you", with the time and Cal.com's answer:
+  booked, or waiting for the owner's confirmation when the event type needs it. The CRM entry names the
+  meeting, and the call's outcome in the analytics is "meeting".
+- **The invitation's notes** say what the caller wants, in one sentence from this call. They hold no
+  passphrase, and for a verified caller no note of an earlier call: the address can be anyone's.
+- **"Forget me"** keeps only the time of the request, for the daily limit. What Cal.com has stays with the
+  owner, as the lead email does.
+- `uv run chat` books only with `--book`.
+
+**Setup.** In Cal.com, make an API key (Settings, Developer, API keys) and put it in `.env` as
+`CALCOM_API_KEY`. The line books the event type with the slug `CALCOM_EVENT_TYPE_SLUG` ("15min", which
+every new account has); it finds its id with one read on first use, so no id of an account is in the
+settings. The event type's own settings apply: on 2026-11-26 the owner's "15min" needed no confirmation, gave
+2 hours of minimum notice and a Cal Video link.
+
+Measured on 2026-11-26 from the laptop: the event types in 188 ms, the free times of 7 days in 471 ms, then
+84 to 88 ms on the open connection.
+
 ### Pipeline leg spike (M7)
 
 The pipeline leg (dropped on 2026-11-18) was planned as a local speech-to-text model, Claude through LangGraph, and local
@@ -1699,7 +1737,7 @@ src/ai_call_center/
   agents/specs.py                one AgentSpec per agent: instructions, tools, handoffs, voice leg
   graph/state.py                 CallState (checkpointed) and CallContext (per call)
   graph/handoffs.py              transfer_to_<agent> tools
-  graph/tools.py                 save_lead, request_owner_transfer, identify_caller, forget_caller, get_call_stats, text_portfolio_link, crm_lookup, end_call
+  graph/tools.py                 save_lead, request_owner_transfer, identify_caller, forget_caller, get_call_stats, text_portfolio_link, crm_lookup, find_meeting_times, book_meeting, end_call
   graph/build.py                 the agent loop; middleware swaps prompt and tools per active agent
   leads.py                       SQLite store: leads, the call log, cached number lookups
   callers.py                     returning-caller memory: first-name question, history after a yes, summary at hangup
@@ -1709,6 +1747,7 @@ src/ai_call_center/
   names.py                       same_person: does a spoken name match a name on record (first name by spelling, short form, sound; same surname)
   decisions.py                   Jev, a decision model: the probability that a caller asked for a live call; the word list is the fallback
   crm.py                         the owner's CRM over MCP: the writes after hangup, the entries that wait, and the one read behind the passphrase
+  meetings.py                    a meeting with the owner on Cal.com: the free times, the read-back, the booking, the two limits
   grading.py                     the grader: the rules, the code checks, and the request to the grader model, after hangup
   decision_grader.py             the decision grader: Gemini Decision 1 hears the call audio and answers typed questions; the grader model is the fallback
   analytics.py                   the figures, answer times and scores of each call; the public report (`uv run call-report`)

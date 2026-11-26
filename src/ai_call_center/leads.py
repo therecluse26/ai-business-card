@@ -138,6 +138,14 @@ class LeadStore:
         ).fetchone()
         return (row[0], Lead(*row[1:])) if row else None
 
+    def leads_of_call(self, call_control_id: str) -> list[Lead]:
+        """Every lead saved during this call, oldest first."""
+        rows = self._conn.execute(
+            "SELECT name, email, company, need, caller_number, call_control_id, created_at, timeline, size FROM leads WHERE call_control_id = ? ORDER BY id",
+            (call_control_id,),
+        ).fetchall()
+        return [Lead(*row) for row in rows]
+
     def leads_for(self, caller_number: str, *, limit: int = 20) -> list[Lead]:
         """Leads from this number, newest first."""
         rows = self._conn.execute(

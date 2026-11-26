@@ -64,7 +64,7 @@ from ai_call_center.agents.specs import (
     load_profile,
     web_address,
 )
-from ai_call_center.analytics import MESSAGE, NO_OUTCOME, TRANSFER, VOICE, CallAnalytics, call_day, forget_call, harness_version, record_call
+from ai_call_center.analytics import MEETING, MESSAGE, NO_OUTCOME, TRANSFER, VOICE, CallAnalytics, call_day, forget_call, harness_version, record_call
 from ai_call_center.caller_voice import VoiceReading, keep_reading
 from ai_call_center.callers import (
     UNKNOWN_NUMBERS,
@@ -115,6 +115,7 @@ from ai_call_center.graph.tools import (
 )
 from ai_call_center.guardrails import HIDDEN_NUMBER, TransferHours
 from ai_call_center.leads import LeadStore
+from ai_call_center.meetings import book, default_scheduler, find_times, meeting_booked, said_yes_to_read_back
 from ai_call_center.notify import notifier_from_settings
 from ai_call_center.passphrase import masked, private_words
 from ai_call_center.telephony.lookup import CallerLookup
@@ -830,6 +831,8 @@ class CallSession:
             owner_name=self.settings.owner_name,
             website_spoken=site.spoken if (site := web_address(self.settings.website_url, self.settings.brand_name)) else "",
             transfer_hours=TransferHours.parse(self.settings.transfer_hours, self.settings.transfer_days),
+            scheduler=default_scheduler(self.settings),
+            meeting_cap=self.settings.calcom_max_bookings_per_day,
             started_at=stats.started_at,
         )
         entry = self.specs[entry_agent]
@@ -1197,6 +1200,21 @@ class CallSession:
             log.info("call %s: crm_lookup (verified: %s) in %.0f ms", self.call_control_id, ctx.identity_verified, (time.monotonic() - started_read) * 1000)
             await params.result_callback(result)
 
+        async def on_find_meeting_times(params: FunctionCallParams) -> None:
+            started_read = time.monotonic()
+            result = await find_times(ctx, str(params.arguments.get("day") or ""))
+            log.info("call %s: find_meeting_times in %.0f ms", self.call_control_id, (time.monotonic() - started_read) * 1000)
+            await params.result_callback(result)
+
+        async def on_book_meeting(params: FunctionCallParams) -> None:
+            args = {k: str(params.arguments.get(k) or "") for k in ("option", "email", "name", "topic")}
+            # The caller's yes to the read-back can reach the context a moment after the tool call, as with a message.
+            waited = 0.0
+            while ctx.held_meeting and not said_yes_to_read_back(ctx.transcript()) and waited < TRANSCRIPT_WAIT_SECS:
+                await asyncio.sleep(0.1)
+                waited += 0.1
+            await params.result_callback(await book(ctx, **args, lines=ctx.transcript(), visited=[ENTRY_AGENT, *state.handoffs]))
+
         async def on_text_link(params: FunctionCallParams) -> None:
             await params.result_callback(await text_portfolio_link_to_caller(ctx, owner_name=self.settings.owner_name))
 
@@ -1297,6 +1315,8 @@ class CallSession:
             vl.service.register_function("get_call_stats", respelled(on_call_stats))
             vl.service.register_function("search_writing", respelled(on_search_writing))
             vl.service.register_function("crm_lookup", respelled(on_crm_lookup))
+            vl.service.register_function("find_meeting_times", respelled(on_find_meeting_times))
+            vl.service.register_function("book_meeting", respelled(on_book_meeting))
             vl.service.register_function("request_owner_transfer", respelled(on_transfer))
             vl.service.register_function("text_portfolio_link", respelled(on_text_link))
             vl.service.register_function("end_call", respelled(on_end_call))
@@ -1346,7 +1366,7 @@ class CallSession:
             await runner.cancel()
 
         await runner.add_workers(worker)
-        summary_tries, message_left = 0, False
+        summary_tries, message_left, meeting_made = 0, False, False
         summary_faults: tuple[str, ...] = ()
         try:
             await runner.run()
@@ -1374,6 +1394,7 @@ class CallSession:
                     log.exception("call %s: could not save the held message", self.call_control_id)
                 try:
                     message_left = message_saved(ctx)  # read now: the store closes below
+                    meeting_made = meeting_booked(ctx)
                 except Exception:
                     log.exception("call %s: could not read if a message was saved", self.call_control_id)
                 if ctx.forgotten:
@@ -1409,7 +1430,7 @@ class CallSession:
             state.lead_saved,
             state.transfer_requested,
         )
-        outcome = TRANSFER if state.end_reason == "transfer" else MESSAGE if message_left else NO_OUTCOME
+        outcome = TRANSFER if state.end_reason == "transfer" else MEETING if meeting_made else MESSAGE if message_left else NO_OUTCOME
         await self._record_analytics(ctx, stats, context.messages, visited=[ENTRY_AGENT, *state.handoffs], outcome=outcome, summary_tries=summary_tries, summary_faults=summary_faults)
 
     async def _handoff(

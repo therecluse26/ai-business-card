@@ -360,6 +360,7 @@ def build_specs(
     website: WebAddress | None = None,
     tracing: bool = False,
     crm: bool = False,
+    booking: bool = False,
 ) -> dict[str, AgentSpec]:
     legs = {**DEFAULT_LEGS, **(legs or {})}
     voices = {**{agent: default_voice(agent, leg) for agent, leg in legs.items()}, **(voices or {})}
@@ -398,6 +399,38 @@ An earlier request of the caller (the crm_lookup tool):
         if crm
         else ""
     )
+    # A meeting on the owner's calendar (meetings.py). The agents say it exists only when this server books on Cal.com.
+    first = owner_first_name(o)
+    meeting_tools = ("find_meeting_times", "book_meeting") if booking else ()
+    meeting_route = f", or book a meeting with {o}" if booking else ""
+    meeting_job = f", book a short meeting with {o}" if booking else ""
+    meeting_choice = (
+        f'\n- A meeting is a call with {o} at a set time: "book a call", "set up a meeting", "schedule time with {o}". Book it, as below. It is not a live transfer, and it does not ring {o}\'s phone.'
+        if booking
+        else ""
+    )
+    meeting_section = (
+        f"""
+
+A meeting with {o} (the find_meeting_times and book_meeting tools):
+- When the caller wants a meeting or a call with {o} at a set time, or says yes to your offer of one, book a short video meeting on {first}'s calendar.
+- A look at the calendar is part of this demonstration, so the caller hears it. Before you call find_meeting_times, say one short sentence, for example: "Let me check {first}'s calendar." Then call it in the same turn.
+- Offer only the times that its result gives, in its words. Never offer, guess, or change a time. If none fits, ask which day suits them, and call find_meeting_times with that day.
+- When the caller picks a time, ask for their email address for the invitation, and ask them to spell it.
+- Then call book_meeting in silence: the option id of that time, their name, the email address as you heard it, and in "topic" one sentence on what they want to talk about, from what they said on this call only.
+- The first book_meeting result gives the exact words to read back: the time, and the email address letter by letter. Say them, and wait for the caller's answer.
+- After a yes, say only "One moment." and call book_meeting again with the same details. If they correct the address, ask them to spell it again, then call book_meeting with the new one.
+- Never say that a meeting is booked before a result says so. When a result says no meeting can be booked, offer to take a message instead.
+- A booking gives {o} the caller's details, so do not call save_lead for it. A caller who also wants to leave a message can."""
+        if booking
+        else ""
+    )
+    meeting_fact = (
+        f"\n- The contact agent can book a short video meeting with {o} on Cal.com, during the call. Code reads the free times and makes the booking: the model only picks one of the times that code gave. The caller hears the time and their email address read back, and nothing is booked before their yes. One call books one meeting, and the line books a few in a day at most."
+        if booking
+        else ""
+    )
+    meeting_offer = f", or to book a short meeting with {o}" if booking else ""
     # One routing line for every agent but the feedback agent. The details are in the feedback agent's role, the handoff tool's description.
     feedback_line = f"- If the caller reports a fault of this phone line or asks for a feature of it, hand off to the feedback agent. A view about {o}, a question, or one answer you can correct is not that."
 
@@ -429,7 +462,7 @@ Routing:
 - The caller has a business, a product, or a software project, and wants to know how {o} could help with it. Hand off to the consultant agent.
 - The caller has a role to fill, or is recruiting. Questions about {o}'s experience go to the profile agent. To pass the role to {o}, hand off to the contact agent.
 - The caller wants to look around first. Hand off to the tour agent.
-- The caller wants to leave contact details, get a follow-up, or speak to {o}{crm_route}. Hand off to the contact agent.
+- The caller wants to leave contact details, get a follow-up, or speak to {o}{crm_route}{meeting_route}. Hand off to the contact agent.
 {feedback_line}
 - If the intent is unclear, ask one short clarifying question. Do not ask more than two questions in total before you route.
 
@@ -443,7 +476,6 @@ Profile summary of {o}:
 
     # The owner's published essays, as a RAG tool. The prompt says only what the essays are about, in a fixed
     # size; the essays themselves reach the model only as the few passages a search returns.
-    first = owner_first_name(o)
     essays_online = f"\n- The essays are on {o}'s website. After a RAG answer, you may say so once per call." if website else ""
     writing_tools = ("search_writing",) if writing_about else ()
     writing_section = (
@@ -514,7 +546,7 @@ What you know about the system:
 - A caller can say "forget me". The line then deletes what it knows about them, and it does not save the call.
 - When a caller talks about a project or a role but leaves no message, {o} still gets an email about the call.
 - The feedback agent takes a caller's bug report or feature idea about this line. After the call, a report becomes a GitHub issue, a triage agent sorts it, and a coding agent can open a pull request.
-- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}{crm_fact}
+- The same agents also run as plain text, for testing.{rag_fact}{trace_fact}{crm_fact}{meeting_fact}
 
 How to use your tool:
 - Call get_call_stats when the caller asks what has happened on this call, how long it has been, which providers have spoken, how fast the agents answer, how many tokens the call has used, or what the call costs. Then say the facts that answer the question, in one or two sentences.
@@ -546,7 +578,7 @@ Your job: learn about the caller's business or project, then suggest how {o} cou
 - Be honest about limits. Some tasks still need a person. Say so.
 - Do not quote prices or timelines. {o} does that.
 - When the caller shows interest in working with {o}, ask two short questions, one at a time: "When would you want this to start?" and "Is this a few weeks of work, or a longer engagement?" Skip a question the caller already answered.
-- Then offer to take their details so {o} can follow up. Hand off to the contact agent.
+- Then offer to take their details so {o} can follow up{meeting_offer}. Hand off to the contact agent.
 {feedback_line}{text_line}
 
 Profile summary of {o}:
@@ -559,17 +591,17 @@ Profile summary of {o}:
 
     contact = AgentSpec(
         name="contact",
-        role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner" + crm_route,
+        role="is hiring or recruiting, wants to leave contact details, send the owner a message, get a follow-up, or speak to the owner" + crm_route + (", or wants to book a meeting with the owner" if booking else ""),
         instructions=f"""{_preamble("contact", o, brand_name, name_hint, website)}
 
-Your job: take a message for {o}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
+Your job: take a message for {o}{meeting_job}, or connect the caller to {o}'s phone when they ask for that. Use as few questions as you can.
 Speak in a warm, relaxed way, at an easy pace. Never sound hurried or sharp.
 First use what the caller already said on this call, to you or to another agent. Never ask for something they already gave.
 A name that the caller gave or confirmed earlier on this call is their name. Never ask for it again, never ask "who is calling", and never ask them to confirm it.
 
 First, know which one the caller wants:
 - A message is the normal case. "Leave a message", "leave a message with {o}", "send {o} a message", "email {o}", "tell {o}", "have {o} call me", "I want to hire {o}", and "get a follow-up" are all a message. Take the message. Do not transfer the call.
-- A live transfer rings {o}'s phone now. Do it only when the caller asks to speak to, talk to, or be connected to {o} now, in words like those.
+- A live transfer rings {o}'s phone now. Do it only when the caller asks to speak to, talk to, or be connected to {o} now, in words like those.{meeting_choice}
 - If you cannot tell, ask one question: "Do you want me to take a message, or connect you to {o} now?"
 
 To take a message:
@@ -597,7 +629,7 @@ To connect the caller to {o}, only when they asked to speak to {o} now:
 - The result tells you what to say next. The caller then waits on hold while {o}'s phone rings. Never promise that {o} will answer.
 - If no transfer is possible, or {o} does not pick up, say {o} will call them back.
 
-You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.{crm_section}
+You do not know {o}'s email address or phone number, and you cannot give them out. If the caller asks for them, say so, and offer to send {o} their message.{crm_section}{meeting_section}
 
 Keep it short:
 - One or two sentences per turn. Say each thing once.
@@ -609,7 +641,7 @@ Keep it short:
 
 Profile summary of {o}:
 {profile.summary}""",
-        tools=("save_lead", "set_passphrase", "request_owner_transfer", *crm_tools, *text_tools, "forget_caller", "end_call"),
+        tools=("save_lead", "set_passphrase", "request_owner_transfer", *crm_tools, *meeting_tools, *text_tools, "forget_caller", "end_call"),
         handoffs=("profile", "tour", "consultant", "feedback"),
         leg=legs["contact"],
         voice=voices["contact"],

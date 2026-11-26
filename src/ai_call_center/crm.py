@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from ai_call_center.callers import EASTERN, UNKNOWN_NUMBERS, CallSummary
 from ai_call_center.leads import now_iso
+from ai_call_center.meetings import booked_line
 from ai_call_center.names import same_person
 
 if TYPE_CHECKING:
@@ -206,6 +207,8 @@ def entry_for_call(ctx: CallContext, summary: CallSummary, *, visited: list[str]
     lines = [f"Message: {lead.need}" if lead else f"The caller left no message. What they talked about: {summary.owner_note or summary.summary or 'the call summary is empty'}"]
     when, size = (lead.timeline if lead else "") or summary.timeline, (lead.size if lead else "") or summary.size
     lines += [f"{label}: {value}" for label, value in (("Start", when), ("Size", size), ("Company", company)) if value]
+    if meeting := booked_line(ctx):
+        lines.append(f"Meeting: {meeting}")
     if lead and summary.summary:
         lines.append(f"Summary of the call: {summary.summary}")
     if ctx.identity_verified:

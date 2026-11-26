@@ -2,6 +2,7 @@
 
 Run: uv run chat
      uv run chat --crm    the end of the call also writes to the owner's CRM, as a phone call does (crm.py)
+     uv run chat --book   the contact agent can book a real meeting on Cal.com, as on a phone call (meetings.py)
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from ai_call_center.agents.specs import (
     load_profile,
     web_address,
 )
-from ai_call_center.analytics import MESSAGE, NO_OUTCOME, TEXT, TRANSFER, CallAnalytics, call_day, forget_call, harness_version, record_call
+from ai_call_center.analytics import MEETING, MESSAGE, NO_OUTCOME, TEXT, TRANSFER, CallAnalytics, call_day, forget_call, harness_version, record_call
 from ai_call_center.callers import summarize_call, transcript_lines
 from ai_call_center.config import get_settings
 from ai_call_center.crm import CrmStore, default_crm, sync_call
@@ -42,6 +43,7 @@ from ai_call_center.graph.tools import (
 )
 from ai_call_center.guardrails import TransferHours
 from ai_call_center.leads import LeadStore
+from ai_call_center.meetings import default_scheduler, meeting_booked
 from ai_call_center.notify import RecordingNotifier, notifier_from_settings
 from ai_call_center.telephony import RecordingTelephony
 from ai_call_center.writing import default_library
@@ -87,10 +89,10 @@ def print_new_messages(messages: list, start: int) -> None:
             print(f"  [result] {msg.content}")
 
 
-async def run(caller_number: str = "+10000000000", *, crm: bool = False) -> None:
+async def run(caller_number: str = "+10000000000", *, crm: bool = False, book: bool = False) -> None:
     settings = get_settings()
     tracing.start(settings, voice=False)
-    specs = default_specs()
+    specs = default_specs(booking=book)  # a booking emails a real invitation, so a text call books only with `--book`
     graph = build_graph(default_model(), specs, checkpointer=InMemorySaver())
     telephony = RecordingTelephony()
     notifier = notifier_from_settings(settings)
@@ -116,6 +118,8 @@ async def run(caller_number: str = "+10000000000", *, crm: bool = False) -> None
         owner_name=settings.owner_name,
         decider=default_decider(settings),
         crm=default_crm(settings) if crm else None,  # `--crm`: a text call is a test, so it writes to the owner's CRM only on request
+        scheduler=default_scheduler(settings) if book else None,
+        meeting_cap=settings.calcom_max_bookings_per_day,
         earlier_calls=store.call_count_for(caller_number, exclude=call_id),
         transfer_hours=TransferHours.parse(settings.transfer_hours, settings.transfer_days),
         website_spoken=site.spoken if (site := web_address(settings.website_url, settings.brand_name)) else "",
@@ -196,7 +200,7 @@ async def run(caller_number: str = "+10000000000", *, crm: bool = False) -> None
                     test=True,
                     duration_secs=int((datetime.now(UTC) - ctx.started_at).total_seconds()),
                     agents=visited,
-                    outcome=TRANSFER if transferred else MESSAGE if message_saved(ctx) else NO_OUTCOME,
+                    outcome=TRANSFER if transferred else MEETING if meeting_booked(ctx) else MESSAGE if message_saved(ctx) else NO_OUTCOME,
                 ),
                 transcript_lines(result_messages),
                 summary_tries=summary.tries,
@@ -222,7 +226,7 @@ def main() -> None:
     try:
         args = sys.argv[1:]
         number = args[args.index("--from") + 1] if "--from" in args and len(args) > args.index("--from") + 1 else "+10000000000"
-        asyncio.run(run(number, crm="--crm" in args))
+        asyncio.run(run(number, crm="--crm" in args, book="--book" in args))
     except KeyboardInterrupt:
         sys.exit(130)
 

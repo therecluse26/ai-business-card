@@ -125,6 +125,16 @@ class Settings(BaseSettings):
     crm_api_token: SecretStr = SecretStr("")  # an API token of the CRM, scope "full"; make it from a user with the role member
     crm_timeout_secs: float = 10.0  # for one request; check the real times with `uv run check-crm`
 
+    # A short meeting with the owner, booked during the call on Cal.com (see meetings.py). Empty key = off, and
+    # no agent says anything about a meeting. The event type is found by its slug, so no id of an account is here:
+    # "15min" is the event type that every new Cal.com account has.
+    calcom_api_key: SecretStr = SecretStr("")
+    calcom_event_type_slug: str = "15min"
+    # All callers together, in 24 hours. A booking makes Cal.com email an invitation to the address a caller
+    # gives, so this bounds what a bad actor can send to a stranger. 0 = no booking. One call books one at most.
+    calcom_max_bookings_per_day: int = 3
+    calcom_timeout_secs: float = 5.0  # for one request; the caller waits for it
+
     # Pipecat Voice Reader (see voice/voice_reader.py): a small local model that hears the sound of each
     # caller turn: tone of voice, laughter, speech rate. It reads the sound only, not the words.
     voice_reader: bool = True
