@@ -130,8 +130,8 @@ The first words of a call are exact (`greeting_words` in `agents/specs.py`); the
 - `OWNER_NAME_PRONUNCIATION` tells every agent how to say the owner's name, in plain words. It is a hint in the prompt: the voice models take no phonetic markup.
 - `RESPELLINGS` is the stronger tool when a voice still says a name wrong. It holds `<written>=<respelling>` pairs, for example `Lovelace=Luv-layss`. A voice model says a word the way the word is written in the text it reads. So the server puts the respelling in everything a voice model reads: the instructions, the greeting, each tool result. The lead email, the call summary, the log and the text chat keep the written word (`voice/respell.py`).
 - Every caller hears the same first words. With `BRAND_NAME` set: "Hi, you've reached <brand>. I'm one of six
-  AI agents <owner> built, and this call is a live sample of the work <first name> does for clients. I remember
-  callers, so first: who am I speaking with?" Without a brand, the first sentence is "Hi, you've reached
+  AI agents <owner> built, and this call is a live sample of the work <first name> does for clients. This call is
+  recorded and reviewed by AI to improve the line. I remember callers, so first: who am I speaking with?" Without a brand, the first sentence is "Hi, you've reached
   <owner>'s AI business card." The words say nothing about an earlier call, so they leak nothing.
 - The caller gives a name. The classifier says "Thanks, <name>." and calls `identify_caller`. Code checks the
   name (see "Caller memory" below), and the tool result gives the next words exactly.

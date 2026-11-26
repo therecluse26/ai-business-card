@@ -159,6 +159,9 @@ LEG_COMPANIES: dict[str, str] = {
 }
 
 NAME_QUESTION = "I remember callers, so first: who am I speaking with?"
+# Said before the first question. The line records each call, and a grader model hears the recording
+# after hangup (see "A grader scores each call after hangup" in the README). The caller is told at the start.
+RECORDING_NOTICE = "This call is recorded and reviewed by AI to improve the line."
 WELCOME_QUESTION = "So, do you have a project or a role in mind, or would you like to look around first?"
 RETURNING_QUESTION = "What can I do for you today?"
 
@@ -192,7 +195,7 @@ def opening_line(owner: str, brand: str = "") -> str:
 def greeting_words(owner: str, brand: str = "") -> str:
     """The exact words that open every call. A first-time caller and a returning caller hear the same words,
     so the greeting leaks nothing about who called this number before."""
-    return f"{opening_line(owner, brand)} {NAME_QUESTION}"
+    return f"{opening_line(owner, brand)} {RECORDING_NOTICE} {NAME_QUESTION}"
 
 
 def greeting_tip(owner: str, *, writing: bool = False, rng: random.Random | None = None) -> str:

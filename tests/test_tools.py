@@ -491,7 +491,7 @@ async def test_a_refused_transfer_tells_the_agent_that_it_has_the_name(make_grap
 
 
 def test_the_greeting_says_whose_line_this_is_and_asks_who_is_calling(specs):
-    from ai_call_center.agents.specs import NAME_QUESTION, Profile, build_specs, greeting_words, opening_line
+    from ai_call_center.agents.specs import NAME_QUESTION, RECORDING_NOTICE, Profile, build_specs, greeting_words, opening_line
     from ai_call_center.voice.call_session import connect_message
 
     assert opening_line("Ada Lovelace") == (
@@ -509,7 +509,8 @@ def test_the_greeting_says_whose_line_this_is_and_asks_who_is_calling(specs):
     assert "How to say" not in specs["classifier"].instructions
     # Every caller hears the same words: they say nothing about an earlier call.
     hello = greeting_words("Ada Lovelace")
-    assert hello == f"{opening_line('Ada Lovelace')} {NAME_QUESTION}"
+    assert hello == f"{opening_line('Ada Lovelace')} {RECORDING_NOTICE} {NAME_QUESTION}"
+    assert "recorded" in RECORDING_NOTICE  # the caller is told before the first question
     assert f'"{hello}"' in connect_message(hello) and "nothing before or after them" in connect_message(hello)
     text = specs["classifier"].instructions
     assert "call identify_caller with the name they said" in text and "Am I speaking with" not in text
