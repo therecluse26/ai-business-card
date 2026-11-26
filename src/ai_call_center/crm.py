@@ -376,15 +376,8 @@ def _digest(text: str) -> str:
 
 
 def same_crm_person(spoken: str, stored: str) -> bool:
-    """True when two names are one person for the CRM: `same_person` (the first names match), and no two different surnames.
-
-    The line itself matches by the first name only, because a caller says "Sam" on one call and "Sam Carter" on the next.
-    That is too wide for the owner's records: "Sam Pike" and "Sam Carter" on one shared phone are two persons.
-    """
-    if not same_person(spoken, stored):
-        return False
-    a, b = spoken.split(), stored.split()
-    return len(a) < 2 or len(b) < 2 or a[-1].casefold() == b[-1].casefold()
+    """True when two names are one person for the CRM: `same_person` (the first names match, and no two different surnames)."""
+    return same_person(spoken, stored)
 
 
 def _record_gone(error: CrmError) -> bool:
