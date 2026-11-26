@@ -39,7 +39,8 @@ log = logging.getLogger(__name__)
 EASTERN = ZoneInfo("America/New_York")
 VOICE, TEXT = "voice", "text"  # the channel of a call: the phone, or the text mode
 MESSAGE, TRANSFER, NO_OUTCOME = "message", "transfer", "none"  # how a call ended for the owner
-OUTCOMES = (MESSAGE, TRANSFER, NO_OUTCOME)
+MEETING = "meeting"  # the caller booked a meeting on Cal.com (meetings.py); it counts before a message
+OUTCOMES = (MESSAGE, TRANSFER, NO_OUTCOME, MEETING)
 # The outcome of one call can say something about one caller, so the report gives totals only, and
 # only from this many calls on. Limit: a reader who keeps two reports can still see the change between them.
 MIN_CALLS_FOR_OUTCOMES = 5

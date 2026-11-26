@@ -1,13 +1,14 @@
 # Run book: tests on a real phone
 
 These tests cover the parts that no real phone call has used yet (status on 2026-11-18).
-Three calls cover all of them. Each call costs a few cents.
+Four calls cover all of them. Each call costs a few cents. Call D books a real meeting.
 
 | Call | What it tests |
 |---|---|
 | A | The Gemini leg, the Nova Sonic leg, and LangSmith voice traces |
 | B | The spoken fallback when no voice provider answers |
 | C | A call that a guardrail limit turns away |
+| D | A meeting booked on Cal.com during the call (added 2026-11-26) |
 
 Already confirmed on a real phone, not repeated here: call screening on a transfer, and failover
 from one provider to the other.
@@ -145,6 +146,40 @@ Pass:
    cp .env.backup .env
    uv run serve
    ```
+
+## Call D: a meeting on Cal.com
+
+Use the normal `.env`, with `CALCOM_API_KEY` set. This call makes a real booking: Cal.com emails a real
+invitation, to the address you give. Give an address of your own. It uses one of the
+`CALCOM_MAX_BOOKINGS_PER_DAY` bookings of the day.
+
+The start of the log must have `Meetings are on: Cal.com event type '15min', ...`. Dial `TELNYX_PHONE_NUMBER`.
+
+| Step | You say | You must hear |
+|---|---|---|
+| 1 | Your name, when the agent asks | The greeting and the welcome |
+| 2 | "Can I book a call with the owner?" | The contact agent's intro line, then "Let me check <owner>'s calendar." |
+| 3 | Nothing | At most three times, in Eastern time, on different days. Check them against the calendar in Cal.com |
+| 4 | Pick the second time | A question for your email address, and to spell it |
+| 5 | Spell your address | "So that's <the time>, and the invitation goes to <your address, letter by letter>. Is that right?" |
+| 6 | "No, that's wrong." (once, even if it was right), then spell it again | The read-back again, with no booking in Cal.com yet |
+| 7 | "Yes." | "One moment.", then that the meeting is booked and the invitation goes to that address |
+| 8 | "Can I book another one?" | That this call has a booking already, and an offer to take a message |
+| 9 | "That's all, goodbye." | A goodbye. The agent hangs up. |
+
+Pass:
+
+- The invitation reaches your address, for the time you picked, with the right Eastern time in it.
+- Its notes say what you asked for in one sentence, and "A test booking from the owner's own phone."
+  when you called from `OWNER_PHONE`.
+- Cal.com has no booking from step 6, and one booking after step 7.
+- The lead email "... booked a meeting with you" has the row "Meeting" with the time.
+- With the CRM on, the call's entry has a line "Meeting: ...".
+- `uv run call-report` counts the call under the outcome "meeting".
+- The log has `find_meeting_times in ... ms` and `meeting booked in Cal.com (status accepted)`, and no
+  email address.
+
+Then cancel the booking in Cal.com.
 
 ## After the tests
 

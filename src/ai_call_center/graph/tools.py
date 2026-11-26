@@ -33,6 +33,7 @@ from ai_call_center.feedback import FAULT, IDEA, MAX_ITEMS
 from ai_call_center.graph.state import CallContext, CallState
 from ai_call_center.callers import UNKNOWN_NUMBERS, CallSummary, history_text, recall, transcript_lines
 from ai_call_center.leads import Lead, now_iso
+from ai_call_center.meetings import MeetingStore, book, booked_line, find_times, is_read_back
 from ai_call_center.names import same_person
 from ai_call_center.notify import CallDetails
 from ai_call_center.passphrase import MIN_LETTERS, TRIES, PhraseStore, plain, sound_key, usable
@@ -181,9 +182,8 @@ def forget(ctx: CallContext) -> tuple[str, list[str]]:
     not summarised or saved. Returns the text for the model and the ids of the calls that were forgotten."""
     name = ctx.returning_name or ctx.caller_name
     memory = recall(ctx.leads, ctx.caller_number, name, exclude_call=ctx.call_control_id) if name else None
-    leads = list(memory.leads) if memory else []
-    if (current := ctx.leads.lead_for_call(ctx.call_control_id)) is not None:
-        leads.append(current[1])
+    # Every lead of this call goes: a booking and a message can both be on one call.
+    leads = [*(memory.leads if memory else []), *ctx.leads.leads_of_call(ctx.call_control_id)]
     call_ids = [call.call_control_id for call in memory.calls] if memory else []
     if ctx.caller_number not in UNKNOWN_NUMBERS:
         ctx.leads.forget(ctx.caller_number, call_ids=call_ids, leads=leads)
@@ -193,10 +193,12 @@ def forget(ctx: CallContext) -> tuple[str, list[str]]:
         AnalyticsStore(ctx.leads.connection).drop_notes(call_ids)
     # The links to the caller's CRM records go, and so does an entry that still waits. What the CRM has stays with the owner, as the email does.
     CrmStore(ctx.leads.connection).forget([*call_ids, ctx.call_control_id])
+    # A booking keeps only the time of its request, for the daily limit. What Cal.com has stays with the owner.
+    MeetingStore(ctx.leads.connection).forget([*call_ids, ctx.call_control_id])
     ctx.forgotten = True
     ctx.caller_history, ctx.identity_confirmed, ctx.returning_name = "", False, ""
     ctx.identity_verified, ctx.open_calls, ctx.phrase_closed, ctx.held_phrase, ctx.phrase_set = False, [], True, "", False
-    ctx.held_message, ctx.refused_transfer = None, None
+    ctx.held_message, ctx.refused_transfer, ctx.held_meeting, ctx.meeting_lead_id = None, None, "", 0
     ctx.feedback_filed.clear()  # a forgotten call is not graded, so no report of it reaches GitHub
     ctx.voice_readings.clear()  # and the voice reader hears no more of this call
     log.info("call %s: the caller asked to be forgotten (%d earlier calls, %d messages)", ctx.call_control_id, len(call_ids), len(leads))
@@ -264,6 +266,7 @@ def call_details(ctx: CallContext, *, kind: str, notes: str, visited: list[str],
         area=", ".join(part for part in (info.city.title(), info.state) if part) if info else "",
         registered_name=info.caller_name if info else "",
         voice=voice_summary(ctx.voice_readings),
+        meeting=booked_line(ctx),
     )
 
 
@@ -319,9 +322,10 @@ async def save_lead_record(
         row_id, saved = earlier
         same_caller = saved.name.casefold() == name.casefold()
         nothing_new = not callback_number and email in ("", saved.email) and company.casefold() in ("", saved.company.casefold())
-        # A record made before a transfer says only that the caller asked for the owner. A message
-        # that the caller leaves after it is new. On 2026-11-16 such a message was dropped here.
-        new_message = kind == "message" and row_id == ctx.transfer_note_id and not says_the_same(need, saved.need)
+        # A record made before a transfer says only that the caller asked for the owner, and the record of a
+        # booking is about the meeting. A message that the caller leaves after either is new. On 2026-11-16
+        # such a message was dropped here.
+        new_message = kind == "message" and row_id in (ctx.transfer_note_id, ctx.meeting_lead_id) and not says_the_same(need, saved.need)
         if same_caller and nothing_new and not new_message:
             return (
                 f"Already saved on this call as record {row_id}. Do not save it again. Tell the caller the owner has their details and will follow up.",
@@ -727,7 +731,8 @@ def missed_save(ctx: CallContext, lines: list[str]) -> int:
         rest.pop()
     if len(rest) == len(lines):  # the agent has not answered the yes yet
         return 0
-    return len(rest) if confirmed_the_message(rest) else 0
+    # A yes to the read-back of a meeting is a yes to book_meeting, not to a message.
+    return len(rest) if confirmed_the_message(rest) and not is_read_back(rest) else 0
 
 
 def message_confirm_question(ctx: CallContext, lines: list[str]) -> str | None:
@@ -900,6 +905,38 @@ async def crm_lookup(runtime: ToolRuntime[CallContext, CallState]) -> str:
     """Look up where the caller's own earlier request stands in the owner's CRM, over MCP. Call it when a returning caller asks if the owner got their message, or where their project or role stands.
     It reads a record only after the passphrase check of this call. The result gives you what to say."""
     return await request_status(runtime.context)
+
+
+@tool
+async def find_meeting_times(runtime: ToolRuntime[CallContext, CallState], day: str = "") -> str:
+    """Read the owner's calendar for free times for a short video meeting in the next 7 days. The result gives at most three times, each with an option id, in the words to say. Never offer a time that it did not give.
+
+    Args:
+        day: The day the caller asked for, for example "Friday" or "tomorrow". Leave empty for the next free times.
+    """
+    return await find_times(runtime.context, day)
+
+
+@tool
+async def book_meeting(option: str, email: str, runtime: ToolRuntime[CallContext, CallState], name: str = "", topic: str = "") -> str:
+    """Book the meeting time the caller chose; Cal.com emails the invitation. Call it in silence once you have the time and the email address: the first result gives the words to read back. Call it again with the same option and address only after the caller said yes to them. Code makes the booking.
+
+    Args:
+        option: The option id of the time the caller chose, from the find_meeting_times result, for example "2".
+        email: The caller's email address, as they spelled it.
+        name: The caller's name.
+        topic: One sentence on what the caller wants to talk about in the meeting, from what they said on this call only.
+    """
+    state = runtime.state
+    return await book(
+        runtime.context,
+        option=option,
+        email=email,
+        name=name,
+        topic=topic,
+        lines=transcript_lines(state.get("messages", [])),
+        visited=["classifier", *state.get("handoffs", [])],
+    )
 
 
 @tool
