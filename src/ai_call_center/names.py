@@ -3,7 +3,8 @@
 Code decides this, never a model. A wrong "yes" would read one person's notes to another, so a
 doubtful match is a "no": the caller is then greeted as a new caller, which costs them little.
 
-Two first names match when they are equal after cleanup, when they are forms of one name (Bob and
+Two names match when no two different surnames are given ("Sam" and "Sam Carter" match, "Sam Pike"
+and "Sam Carter" do not) and the first names match: they are equal after cleanup, when they are forms of one name (Bob and
 Robert), or when they sound the same and start with the same letter (Steven and Stephen). Speech
 to text often spells a name another way, so an exact match alone would miss real returning callers.
 Known limit: some different names sound the same to the sound code (Dana and Diana).
@@ -89,16 +90,27 @@ NAME_GROUPS: tuple[frozenset[str], ...] = tuple(
 def clean_first_name(name: str) -> str:
     """The first word of a name, lower case, letters only, accents removed: "José-Luis Park" gives "joseluis"."""
     words = name.split()
-    if not words:
-        return ""
-    plain = unicodedata.normalize("NFKD", words[0]).encode("ascii", "ignore").decode()
+    return _clean(words[0]) if words else ""
+
+
+def _clean(word: str) -> str:
+    plain = unicodedata.normalize("NFKD", word).encode("ascii", "ignore").decode()
     return "".join(ch for ch in plain.casefold() if ch.isalpha())
 
 
+def _surname(name: str) -> str:
+    """The last word of a name of two or more words, cleaned. "" for a first name alone."""
+    words = name.split()
+    return _clean(words[-1]) if len(words) > 1 else ""
+
+
 def same_person(spoken: str, stored: str) -> bool:
-    """True when the first names match by the rules above. An empty name never matches."""
+    """True when the names match by the rules above. An empty name never matches."""
     a, b = clean_first_name(spoken), clean_first_name(stored)
     if not a or not b:
+        return False
+    sa, sb = _surname(spoken), _surname(stored)
+    if sa and sb and sa != sb:
         return False
     if a == b:
         return True

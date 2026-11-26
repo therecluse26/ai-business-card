@@ -389,7 +389,9 @@ On that call the greeting agent held Phonic for 0.6 minutes (about 4 cents), and
 - No agent knows if a number called before. Every caller is asked who they are, and the name goes to
   `identify_caller`. Code, never a model, compares it with each name on record for the number
   (`names.same_person`): the same first name after cleanup, a short or long form of it (Bob and Robert),
-  or the same sound code and first letter (Steven and Stephen). With any doubt, the caller counts as new.
+  or the same sound code and first letter (Steven and Stephen). When both names have a surname, the
+  surnames must be the same too: "Sam" and "Sam Carter" match, "Sam Pike" and "Sam Carter" do not.
+  With any doubt, the caller counts as new.
 - A match makes the caller "recognised": the agent says "Welcome back", and gets no notes. The company,
   the saved interest, and the last three summaries enter the conversation only after the passphrase
   check (below). With no match, they never do, and no agent will say who called before.
@@ -1704,7 +1706,7 @@ src/ai_call_center/
   guardrails.py                  call limits at admission and the transfer hours
   notify.py                      lead emails to the owner over SMTP
   writing.py                     RAG over the owner's posts: RSS feed, passages, hybrid search, saved vectors
-  names.py                       same_person: does a spoken first name match a name on record (spelling, short form, sound)
+  names.py                       same_person: does a spoken name match a name on record (first name by spelling, short form, sound; same surname)
   decisions.py                   Jev, a decision model: the probability that a caller asked for a live call; the word list is the fallback
   crm.py                         the owner's CRM over MCP: the writes after hangup, the entries that wait, and the one read behind the passphrase
   grading.py                     the grader: the rules, the code checks, and the request to the grader model, after hangup

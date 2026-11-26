@@ -49,6 +49,23 @@ def test_different_names_and_empty_names_do_not_match():
         assert not same_person(spoken, stored), (spoken, stored)
 
 
+def test_a_full_name_needs_the_same_surname_and_a_first_name_alone_needs_the_first_name():
+    assert same_person("Steve Park", "Steve Park") and same_person("Stephen park", "Steve Park")
+    assert same_person("Steve", "Steve Park") and same_person("Steve Park", "Steve")
+    for spoken, stored in [("Steve Miller", "Steve Park"), ("Sam Pike", "Sam Carter"), ("Bill Park", "Steve Park")]:
+        assert not same_person(spoken, stored), (spoken, stored)
+
+
+def test_a_full_name_with_another_surname_is_a_new_caller(ctx, leads):
+    _lead(leads)
+    _call(leads, "call-1", "Steve Park", "Asked about an after-hours agent.", topic="an after-hours phone agent")
+    ctx.welcome = _welcome()
+    result = identify(ctx, "Steve Miller")
+    for secret in ("Welcome back", "talked before", "passphrase that you gave", "Park", "Acme"):
+        assert secret not in result
+    assert "Nice to meet you, Steve." in result and not ctx.identity_confirmed and ctx.caller_history == ""
+
+
 # --- recall: one person's records ---
 
 
