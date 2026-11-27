@@ -99,13 +99,14 @@ def _send(request: urllib.request.Request) -> int:
 
 
 def report_body(settings: Settings) -> bytes:
-    """The public report of the calls in the store, as JSON. Test calls are left out."""
+    """The public report of the calls in the store, as JSON. Test calls are left out unless `report_tests` is set."""
     store = AnalyticsStore(settings.leads_db)
     try:
         calls = store.calls()
     finally:
         store.close()
-    return json.dumps(dated_report(calls, fix_checks=stored_checks(settings.leads_db)), separators=(",", ":")).encode()
+    report = dated_report(calls, tests=settings.report_tests, fix_checks=stored_checks(settings.leads_db))
+    return json.dumps(report, separators=(",", ":")).encode()
 
 
 async def publish_report(settings: Settings, *, send: Callable[[urllib.request.Request], int] = _send) -> bool:

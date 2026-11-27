@@ -63,8 +63,23 @@ async def test_the_file_is_the_public_report_with_no_test_call_and_nothing_priva
     [request] = sent
     report = json.loads(request.data)
     assert report["totals"]["calls"] == 1 and len(report["calls"]) == 1 and report["generated_on"]
+    assert report["totals"]["test_calls"] == 0
     assert report["fix_checks"] == []  # no fix was checked yet; the field is there all the same
     text = request.data.decode()
+    assert CALL_ID not in text and SECRET_NOTE not in text and "mine" not in text
+
+
+async def test_with_report_tests_the_file_holds_the_test_calls_and_counts_them(tmp_path):
+    made = settings(tmp_path, report_tests=True)
+    store = AnalyticsStore(made.leads_db)
+    store.save(a_call())
+    store.save(a_call("mine", test=True))
+    store.close()
+    sent = []
+    assert await publish_report(made, send=lambda request: sent.append(request) or 200) is True
+    report = json.loads(sent[0].data)
+    assert report["totals"]["calls"] == 2 and report["totals"]["test_calls"] == 1 and len(report["calls"]) == 2
+    text = sent[0].data.decode()
     assert CALL_ID not in text and SECRET_NOTE not in text and "mine" not in text
 
 

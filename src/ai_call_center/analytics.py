@@ -384,6 +384,7 @@ def public_report(calls: list[CallAnalytics], *, tests: bool = False, fix_checks
         ],
         "totals": {
             "calls": len(shown),
+            "test_calls": sum(1 for call in shown if call.test),
             **_score(shown),
             "median_answer_secs": _median([answer.seconds for call in shown for answer in call.answers]),
             "outcomes": outcomes,
