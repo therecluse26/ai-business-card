@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     report_r2_access_key_id: str = ""
     report_r2_secret_access_key: SecretStr = SecretStr("")
     report_r2_key: str = "calls.json"  # the name of the file in the bucket
+    # True puts the owner's test calls in the uploaded report too; its totals then say how many there are.
+    report_tests: bool = False
     # A fix request starts the job on GitHub that proposes a fix for a failed rule (`improve.py`).
     # With the token or the repository empty, no fix request is sent.
     improve_github_token: SecretStr = SecretStr("")  # a fine-grained token: this repository only, "Actions" (write) only

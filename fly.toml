@@ -11,6 +11,8 @@ kill_timeout = "30s"
   LEADS_DB = "/data/leads.sqlite3"
   WRITING_CACHE_PATH = "/data/writing.json"
   SERVER_LOG = "/data/server.log"
+  # The owner's test calls go on digitalreformer.dev/calls too; the page says how many there are.
+  REPORT_TESTS = "true"
 
 [mounts]
   source = "data"
