@@ -260,7 +260,7 @@ async def test_a_failure_in_the_analytics_does_not_stop_the_end_of_a_call(tmp_pa
     assert AnalyticsStore(session.settings.leads_db).calls() == []
 
 
-async def test_the_end_of_a_call_publishes_the_report_but_not_after_a_test_call(tmp_path, ctx, monkeypatch):
+async def test_the_end_of_a_call_publishes_the_report_but_not_after_a_test_call_unless_tests_are_shown(tmp_path, ctx, monkeypatch):
     from ai_call_center.voice import call_session
 
     published = []
@@ -279,3 +279,7 @@ async def test_the_end_of_a_call_publishes_the_report_but_not_after_a_test_call(
     ctx.forgotten = False
     await owner._record_analytics(ctx, _stats(), MESSAGES, visited=["classifier"], outcome=NO_OUTCOME, summary_tries=0)
     assert published == [1, 0]
+    # With REPORT_TESTS, the report holds test calls, so a test call publishes it too.
+    owner_shown = _session(tmp_path, owner_phone=ctx.caller_number, report_tests=True)
+    await owner_shown._record_analytics(ctx, _stats(), MESSAGES, visited=["classifier"], outcome=NO_OUTCOME, summary_tries=0)
+    assert published == [1, 0, 1]  # the same call id, so one record; what counts is that it published

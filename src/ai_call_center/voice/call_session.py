@@ -705,7 +705,8 @@ class CallSession:
                 read = await grade_call(lines, visited=visited, summary_tries=summary_tries, profile=profile, owner=self.settings.owner_name, model=grader)
                 differ = differences(record.scores, read)
                 log.info("call %s: the grader model against the decision grader: %s", self.call_control_id, "; ".join(differ) if differ else "the same verdict for each rule that both checked")
-            if not record.test:  # a test call is not in the report
+            shown = not record.test or self.settings.report_tests  # a test call is in the report only with REPORT_TESTS
+            if shown:
                 await publish_report(self.settings)
 
             async def fault_of(request: FixRequest) -> FaultReport:
@@ -723,7 +724,7 @@ class CallSession:
             await request_fixes(self.settings, self.settings.leads_db, record, report=fault_of)
             # After a deploy: did the fix of a failed rule hold at this version (fix_check.py)?
             # A new check goes into the public report now, not after the next call.
-            if await check_fixes(self.settings, self.settings.leads_db, record) and not record.test:
+            if await check_fixes(self.settings, self.settings.leads_db, record) and shown:
                 await publish_report(self.settings)
             # What the caller said aloud about the line: a fault or a wish for a feature. It becomes a GitHub issue (feedback.py).
             # A report that the feedback agent filed counts as certain, also with no answer from the decision grader.
